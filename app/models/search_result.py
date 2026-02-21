@@ -1,0 +1,36 @@
+from sqlalchemy import Column, String, DateTime, Text, Enum, Integer, Index
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.sql import func
+import uuid
+import enum
+from ..core.database import Base
+
+
+class ResultStatus(str, enum.Enum):
+    PENDING = "pending"
+    CONTACTED = "contacted"
+    NOT_INTERESTED = "not_interested"
+    INVALID = "invalid"
+
+
+class SearchResult(Base):
+    __tablename__ = "search_results"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String, nullable=False)
+    location = Column(String, nullable=True)
+    post_content = Column(Text, nullable=True)
+    post_url = Column(String, unique=True, nullable=True)
+    search_keyword = Column(String, nullable=False)
+    source = Column(String, default="facebook")
+    status = Column(Enum(ResultStatus), default=ResultStatus.PENDING)
+    profile_url = Column(String, nullable=True)
+    scraped_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    # Indexes for better query performance
+    __table_args__ = (
+        Index("idx_search_results_scraped_at", scraped_at),
+        Index("idx_search_results_status", status),
+        Index("idx_search_results_keyword", search_keyword),
+    )
