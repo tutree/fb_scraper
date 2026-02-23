@@ -14,38 +14,32 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-  redis:
-    image: redis:7
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    networks:
+      - scraper_network
 
   api:
     build: .
-    ports:
-      - "8000:8000"
     environment:
       DATABASE_URL: postgresql://scraper:scraper123@postgres:5432/math_tutor_db
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: redis://localhost:6379
       FACEBOOK_EMAIL: ${FACEBOOK_EMAIL}
       FACEBOOK_PASSWORD: ${FACEBOOK_PASSWORD}
       PROXY_LIST: ${PROXY_LIST}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
     volumes:
       - ./config:/app/config
+      - ./cookies:/app/cookies
       - ./logs:/app/logs
+      - .:/app
+    networks:
+      - scraper_network
 
 volumes:
   postgres_data:
-  redis_data:
+
+networks:
+  scraper_network:
+    driver: bridge

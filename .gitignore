@@ -37,6 +37,10 @@ venv.bak/
 config/credentials.json
 config/keywords.json
 
+# Cookies - SENSITIVE (contains login sessions)
+cookies/*.json
+!cookies/README.md
+
 # Database
 *.db
 *.sqlite

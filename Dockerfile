@@ -1,18 +1,40 @@
 FROM python:3.11-slim
 
+# Force Python to run in unbuffered mode
+ENV PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
-# Install minimal system dependencies
+# Install system dependencies for Playwright
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     ca-certificates \
+    libglib2.0-0 \
+    libnss3 \
+    libnspr4 \
+    libdbus-1-3 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libasound2 \
+    libatspi2.0-0 \
+    libxshmfence1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install only Chromium browser (no deps for now, will use host display)
+# Install Chromium browser
 RUN playwright install chromium
 
 # Create logs directory

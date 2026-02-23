@@ -20,7 +20,7 @@ class SearchResult(Base):
     name = Column(String, nullable=False)
     location = Column(String, nullable=True)
     post_content = Column(Text, nullable=True)
-    post_url = Column(String, unique=True, nullable=True)
+    post_url = Column(String, nullable=True)  # Removed unique constraint
     search_keyword = Column(String, nullable=False)
     source = Column(String, default="facebook")
     status = Column(Enum(ResultStatus), default=ResultStatus.PENDING)

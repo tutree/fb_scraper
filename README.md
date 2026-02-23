@@ -11,7 +11,8 @@ A sophisticated Facebook scraper designed to find potential math tutoring client
 - 📊 PostgreSQL database for storing results
 - 🚀 FastAPI REST API
 - 🔍 Customizable keyword search
-- 📝 Detailed logging
+- 📝 Comprehensive logging and diagnostics
+- 🔧 Built-in diagnostic tools for troubleshooting
 
 ## Quick Start
 
@@ -65,13 +66,25 @@ sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE math_tutor_db TO scra
 python scripts/init_db.py
 ```
 
-6. **Run the application**:
+6. **Verify setup** (recommended):
+```bash
+# Run diagnostic to check everything is configured correctly
+python test_scraper.py
+```
+
+This will verify:
+- ✓ Database connectivity
+- ✓ Configuration files
+- ✓ Account setup
+- ✓ Keyword loading
+
+7. **Run the application**:
 ```bash
 source venv/bin/activate
 uvicorn app.main:app --host 0.0.0.0 --port 8001
 ```
 
-7. **Access the API**:
+8. **Access the API**:
 - API: http://localhost:8001
 - Interactive Docs: http://localhost:8001/docs
 
@@ -203,6 +216,45 @@ sudo systemctl status postgresql
 # Reinstall browsers
 playwright install chromium --force
 ```
+
+## Troubleshooting
+
+### Scraper Not Collecting Data?
+
+**Quick Diagnostic:**
+```bash
+python test_scraper.py
+```
+
+This will check:
+- Database connectivity
+- Configuration files
+- Account setup
+- Keyword loading
+
+**Monitor Logs:**
+```bash
+# Watch logs in real-time
+tail -f logs/app.log
+
+# Search for errors
+grep -i error logs/app.log
+
+# Check if posts are being saved
+grep -i "saved post" logs/app.log
+```
+
+**Common Issues:**
+
+1. **No posts found:** Keywords might be too specific
+2. **Login failed:** Check credentials in `config/credentials.json`
+3. **Database errors:** Verify PostgreSQL is running and credentials are correct
+4. **No keywords:** Copy `config/keywords.json.example` to `config/keywords.json`
+
+**Detailed Guides:**
+- 📖 [Quick Debug Guide](QUICK_DEBUG.md) - Fast problem resolution
+- 📖 [Troubleshooting Guide](TROUBLESHOOTING.md) - Comprehensive solutions
+- 📖 [Logging Documentation](LOGGING_IMPROVEMENTS.md) - Understanding logs
 
 ## Security Notes
 

@@ -26,11 +26,18 @@ class ScraperService:
     async def load_keywords(self) -> List[str]:
         """Load keywords from config file."""
         config_path = Path("config/keywords.json")
+        logger.info(f"Loading keywords from: {config_path.absolute()}")
+        
         if config_path.exists():
             with open(config_path) as f:
                 data = json.load(f)
-                return data.get("searchKeywords", [])
-        return settings.DEFAULT_KEYWORDS
+                keywords = data.get("searchKeywords", [])
+                logger.info(f"Loaded {len(keywords)} keywords from config: {keywords}")
+                return keywords
+        else:
+            logger.warning(f"Keywords file not found at {config_path}, using defaults")
+            logger.info(f"Default keywords: {settings.DEFAULT_KEYWORDS}")
+            return settings.DEFAULT_KEYWORDS
 
     async def run_search(
         self,
@@ -38,29 +45,57 @@ class ScraperService:
         max_results: int = 100,
     ) -> Dict[str, Any]:
         """Main search orchestration."""
+        logger.info("=" * 80)
+        logger.info("STARTING SCRAPER SERVICE")
+        logger.info("=" * 80)
+        
         if not keywords:
             keywords = await self.load_keywords()
+        else:
+            logger.info(f"Using provided keywords: {keywords}")
+
+        if not keywords:
+            logger.error("No keywords available for search!")
+            return {
+                "success": False,
+                "error": "No keywords provided or loaded",
+                "total_results": 0,
+                "keywords_searched": 0,
+            }
 
         all_results: List[Dict] = []
+        logger.info(f"Will search {len(keywords)} keywords with max {max_results} results each")
 
         try:
-            for keyword in keywords:
-                logger.info(f"Searching for: {keyword}")
+            for idx, keyword in enumerate(keywords, 1):
+                logger.info("=" * 80)
+                logger.info(f"KEYWORD {idx}/{len(keywords)}: '{keyword}'")
+                logger.info("=" * 80)
 
                 # Search for this keyword
                 results = await self.facebook_scraper.search_keyword(
                     keyword, max_results
                 )
                 all_results.extend(results)
+                
+                logger.info(f"Keyword '{keyword}' completed: {len(results)} results")
+                logger.info(f"Total results so far: {len(all_results)}")
 
                 # Longer random delay between searches (10-30 seconds)
-                delay = random.uniform(
-                    max(settings.SCRAPE_DELAY_MIN, 10),
-                    max(settings.SCRAPE_DELAY_MAX, 30),
-                )
-                logger.info(f"Waiting {delay:.1f}s before next search...")
-                await asyncio.sleep(delay)
+                if idx < len(keywords):  # Don't wait after last keyword
+                    delay = random.uniform(
+                        max(settings.SCRAPE_DELAY_MIN, 10),
+                        max(settings.SCRAPE_DELAY_MAX, 30),
+                    )
+                    logger.info(f"Waiting {delay:.1f}s before next keyword search...")
+                    await asyncio.sleep(delay)
 
+            logger.info("=" * 80)
+            logger.info("SCRAPER SERVICE COMPLETED SUCCESSFULLY")
+            logger.info(f"Total results collected: {len(all_results)}")
+            logger.info(f"Keywords searched: {len(keywords)}")
+            logger.info("=" * 80)
+            
             return {
                 "success": True,
                 "total_results": len(all_results),
@@ -68,13 +103,20 @@ class ScraperService:
             }
 
         except Exception as e:
-            logger.error(f"Error in run_search: {e}")
+            logger.error("=" * 80)
+            logger.error("SCRAPER SERVICE FAILED")
+            logger.error(f"Error: {e}", exc_info=True)
+            logger.error("=" * 80)
             return {
                 "success": False,
                 "error": str(e),
+                "total_results": len(all_results),
+                "keywords_searched": len(keywords),
             }
         finally:
+            logger.info("Closing browser...")
             await self.browser_manager.close()
+            logger.info("Browser closed")
 
     async def get_results(
         self,

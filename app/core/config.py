@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     SCRAPE_DELAY_MAX: int = 8
     MAX_RETRIES: int = 3
 
+    # Gemini API
+    GEMINI_API_KEY: str = ""
+
     # Default Keywords (fallback)
     DEFAULT_KEYWORDS: List[str] = [
         "looking for math tutor",

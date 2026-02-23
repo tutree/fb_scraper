@@ -40,10 +40,12 @@ class BrowserManager:
     async def get_browser(self) -> Browser:
         """Get or create browser instance with proxy."""
         if not self.browser:
+            logger.info("Initializing Playwright...")
             self.playwright = await async_playwright().start()
+            logger.info("Playwright started")
 
             launch_options = {
-                "headless": False,  # Set to True for production
+                "headless": True,  # Must be True in Docker/production
                 "args": [
                     "--disable-blink-features=AutomationControlled",
                     "--disable-dev-shm-usage",
@@ -66,38 +68,62 @@ class BrowserManager:
 
             # Add proxy if available
             if self.proxy_manager:
+                logger.info("Checking for proxy configuration...")
                 proxy_config = self.proxy_manager.get_next_proxy()
                 if proxy_config:
+                    logger.info(f"Using proxy: {proxy_config}")
                     launch_options["proxy"] = proxy_config
+                else:
+                    logger.info("No proxy configured, using direct connection")
+            else:
+                logger.info("Proxy manager not configured")
 
+            logger.info("Launching Chromium browser...")
             self.browser = await self.playwright.chromium.launch(**launch_options)
-            logger.info("Browser launched successfully")
+            logger.info("✓ Browser launched successfully")
 
         return self.browser
 
     async def create_page(self) -> Page:
         """Create a new page with enhanced stealth settings."""
+        logger.info("Creating new browser page...")
         browser = await self.get_browser()
         
         # Randomize viewport and user agent
         viewport = random.choice(self.viewports)
         user_agent = random.choice(self.user_agents)
+        logger.info(f"Using viewport: {viewport['width']}x{viewport['height']}")
+        logger.debug(f"Using user agent: {user_agent[:50]}...")
         
         # Randomize locale and timezone for more diversity
         locales = ["en-US", "en-GB", "en-CA"]
         timezones = ["America/New_York", "America/Chicago", "America/Los_Angeles", "Europe/London"]
         
+        selected_locale = random.choice(locales)
+        selected_timezone = random.choice(timezones)
+        logger.info(f"Using locale: {selected_locale}, timezone: {selected_timezone}")
+        
+        logger.info("Creating browser context with stealth settings...")
+        
+        # Check if we have saved cookies for this session
+        from pathlib import Path
+        cookies_dir = Path("cookies")
+        cookies_dir.mkdir(exist_ok=True)
+        
         context = await browser.new_context(
             viewport=viewport,
             user_agent=user_agent,
-            locale=random.choice(locales),
-            timezone_id=random.choice(timezones),
+            locale=selected_locale,
+            timezone_id=selected_timezone,
             # Add more realistic browser features
             has_touch=random.choice([True, False]),
             is_mobile=False,
             device_scale_factor=random.choice([1, 1.5, 2]),
+            # Enable storage state for cookies
+            storage_state=None,  # Will be set per account
         )
 
+        logger.info("Injecting stealth scripts...")
         # Enhanced stealth scripts with more comprehensive evasion
         await context.add_init_script(
             """
@@ -176,7 +202,123 @@ class BrowserManager:
         """
         )
 
-        return await context.new_page()
+        page = await context.new_page()
+        logger.info("✓ Browser page created with stealth configuration")
+        return page
+    
+    async def create_page_with_cookies(self, account_uid: str) -> Page:
+        """Create a page and load saved cookies for the account if available."""
+        from pathlib import Path
+        import json
+        
+        logger.info(f"Creating browser page for account: {account_uid}")
+        browser = await self.get_browser()
+        
+        # Randomize viewport and user agent
+        viewport = random.choice(self.viewports)
+        user_agent = random.choice(self.user_agents)
+        logger.info(f"Using viewport: {viewport['width']}x{viewport['height']}")
+        
+        # Check for saved cookies
+        cookies_dir = Path("cookies")
+        cookies_dir.mkdir(exist_ok=True)
+        cookies_file = cookies_dir / f"{account_uid}.json"
+        
+        storage_state = None
+        if cookies_file.exists():
+            logger.info(f"Found saved session for {account_uid}, loading cookies...")
+            try:
+                with open(cookies_file, 'r') as f:
+                    storage_state = json.load(f)
+                logger.info("✓ Cookies loaded successfully")
+            except Exception as e:
+                logger.warning(f"Failed to load cookies: {e}")
+        else:
+            logger.info(f"No saved session found for {account_uid}")
+        
+        # Create context with or without cookies
+        context = await browser.new_context(
+            viewport=viewport,
+            user_agent=user_agent,
+            locale="en-US",
+            timezone_id="America/New_York",
+            has_touch=False,
+            is_mobile=False,
+            device_scale_factor=1,
+            storage_state=storage_state,
+        )
+        
+        # Inject stealth scripts
+        logger.info("Injecting stealth scripts...")
+        await context.add_init_script(
+            """
+            // Hide webdriver property
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+            
+            // Delete automation indicators
+            delete navigator.__proto__.webdriver;
+            
+            // Mock plugins with realistic data
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5]
+            });
+            
+            // Mock languages
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['en-US', 'en']
+            });
+            
+            // Mock chrome object
+            window.chrome = {
+                runtime: {},
+                loadTimes: function() {},
+                csi: function() {},
+                app: {}
+            };
+        """
+        )
+        
+        page = await context.new_page()
+        logger.info("✓ Browser page created with stealth configuration")
+        
+        # Store context reference for saving cookies later
+        page._kiro_context = context
+        page._kiro_account_uid = account_uid
+        
+        return page
+    
+    async def save_cookies(self, page: Page) -> bool:
+        """Save cookies from the page for future use."""
+        from pathlib import Path
+        import json
+        
+        try:
+            account_uid = getattr(page, '_kiro_account_uid', None)
+            context = getattr(page, '_kiro_context', None)
+            
+            if not account_uid or not context:
+                logger.warning("Cannot save cookies: account_uid or context not found")
+                return False
+            
+            cookies_dir = Path("cookies")
+            cookies_dir.mkdir(exist_ok=True)
+            cookies_file = cookies_dir / f"{account_uid}.json"
+            
+            # Get storage state (cookies + localStorage)
+            storage_state = await context.storage_state()
+            
+            # Save to file
+            with open(cookies_file, 'w') as f:
+                json.dump(storage_state, f, indent=2)
+            
+            logger.info(f"✓ Saved session cookies for {account_uid}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to save cookies: {e}")
+            return False
 
     async def close(self) -> None:
         """Close browser and playwright."""
