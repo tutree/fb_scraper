@@ -15,6 +15,23 @@ class ProxyManager:
         self.proxies = settings.proxies
         self.current_index = 0
 
+        if self.proxies:
+            logger.info(f"ProxyManager: {len(self.proxies)} proxy(ies) loaded")
+            for i, p in enumerate(self.proxies):
+                # Mask password in log
+                try:
+                    proto, rest = p.split("://")
+                    if "@" in rest:
+                        creds, host = rest.split("@")
+                        user = creds.split(":")[0]
+                        logger.info(f"  Proxy [{i}]: {proto}://{user}:***@{host}")
+                    else:
+                        logger.info(f"  Proxy [{i}]: {p}")
+                except Exception:
+                    logger.info(f"  Proxy [{i}]: {p}")
+        else:
+            logger.warning("ProxyManager: No proxies configured — traffic will go DIRECT (no PROXY_LIST set)")
+
     def get_next_proxy(self) -> Optional[Dict]:
         """Get next working proxy in round-robin fashion."""
         if not self.proxies:

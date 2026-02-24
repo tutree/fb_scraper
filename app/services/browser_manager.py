@@ -7,6 +7,202 @@ from ..core.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+# ---------------------------------------------------------------------------
+# Comprehensive anti-detection stealth script
+# Injected into every browser context before any page script runs.
+# Covers: webdriver flag, plugins, canvas noise, WebGL vendor/renderer,
+#         AudioContext noise, chrome runtime, permissions, native toString.
+# ---------------------------------------------------------------------------
+STEALTH_SCRIPT = """
+(function () {
+    'use strict';
+
+    // ── 1. Remove webdriver traces ─────────────────────────────────────────
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    try { delete navigator.__proto__.webdriver; } catch (e) {}
+
+    // ── 2. Realistic navigator.plugins (PDF Viewer objects, not numbers) ───
+    try {
+        function mkPlugin(name, filename, description, mimes) {
+            const p = Object.create(Plugin.prototype);
+            Object.defineProperty(p, 'name',        { value: name });
+            Object.defineProperty(p, 'filename',    { value: filename });
+            Object.defineProperty(p, 'description', { value: description });
+            Object.defineProperty(p, 'length',      { value: mimes.length });
+            mimes.forEach(function (m, i) {
+                const mt = Object.create(MimeType.prototype);
+                Object.defineProperty(mt, 'type',          { value: m.type });
+                Object.defineProperty(mt, 'description',   { value: m.description });
+                Object.defineProperty(mt, 'suffixes',      { value: m.suffixes });
+                Object.defineProperty(mt, 'enabledPlugin', { value: p });
+                Object.defineProperty(p, i, { value: mt });
+            });
+            return p;
+        }
+        var plugins = [
+            mkPlugin('PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format',
+                [{ type: 'application/pdf', description: 'Portable Document Format', suffixes: 'pdf' },
+                 { type: 'text/pdf',        description: 'Portable Document Format', suffixes: 'pdf' }]),
+            mkPlugin('Chrome PDF Viewer', 'internal-pdf-viewer', '',
+                [{ type: 'application/pdf', description: '', suffixes: 'pdf' },
+                 { type: 'text/pdf',        description: '', suffixes: 'pdf' }]),
+            mkPlugin('Chromium PDF Plugin', 'internal-pdf-viewer', 'Portable Document Format',
+                [{ type: 'application/pdf', description: 'Portable Document Format', suffixes: 'pdf' }])
+        ];
+        var pa = Object.create(PluginArray.prototype);
+        Object.defineProperty(pa, 'length', { value: plugins.length });
+        plugins.forEach(function (p, i) {
+            Object.defineProperty(pa, i, { value: p });
+            Object.defineProperty(pa, p.name, { value: p });
+        });
+        pa.item      = function (i) { return this[i] || null; };
+        pa.namedItem = function (n) { return this[n] || null; };
+        Object.defineProperty(navigator, 'plugins', { get: function () { return pa; } });
+    } catch (e) {}
+
+    // ── 3. Navigator properties ────────────────────────────────────────────
+    Object.defineProperty(navigator, 'languages',          { get: () => ['en-US', 'en'] });
+    Object.defineProperty(navigator, 'platform',           { get: () => 'Win32' });
+    Object.defineProperty(navigator, 'hardwareConcurrency',{ get: () => 8 });
+    Object.defineProperty(navigator, 'deviceMemory',       { get: () => 8 });
+    Object.defineProperty(navigator, 'maxTouchPoints',     { get: () => 0 });
+    Object.defineProperty(navigator, 'appVersion', {
+        get: () => '5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    });
+    try {
+        Object.defineProperty(navigator, 'connection', {
+            get: () => ({ effectiveType: '4g', rtt: 50, downlink: 10.0, saveData: false, onchange: null })
+        });
+    } catch (e) {}
+
+    // ── 4. Fully-mocked chrome runtime ────────────────────────────────────
+    if (!window.chrome) window.chrome = {};
+    window.chrome.runtime = {
+        id: undefined,
+        connect: function () {
+            return { onMessage: { addListener: function () {} }, postMessage: function () {}, disconnect: function () {} };
+        },
+        sendMessage:  function () {},
+        onMessage:    { addListener: function () {}, removeListener: function () {} },
+        onConnect:    { addListener: function () {}, removeListener: function () {} },
+        getPlatformInfo: function (cb) { if (cb) cb({ os: 'win', arch: 'x86-64', nacl_arch: 'x86-64' }); }
+    };
+    window.chrome.loadTimes = function () {
+        return { requestTime: Date.now() / 1000, startLoadTime: Date.now() / 1000,
+                 commitLoadTime: Date.now() / 1000, finishDocumentLoadTime: Date.now() / 1000,
+                 finishLoadTime: Date.now() / 1000, firstPaintTime: Date.now() / 1000,
+                 firstPaintAfterLoadTime: 0, navigationType: 'Other', wasFetchedViaSpdy: false,
+                 wasNpnNegotiated: false, npnNegotiatedProtocol: 'unknown', wasAlternateProtocolAvailable: false,
+                 connectionInfo: 'unknown' };
+    };
+    window.chrome.csi = function () {
+        return { startE: Date.now(), onloadT: Date.now(), pageT: Date.now() / 1000, tran: 15 };
+    };
+    window.chrome.app = {
+        isInstalled: false,
+        InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
+        RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' }
+    };
+
+    // ── 5. Permissions API ─────────────────────────────────────────────────
+    try {
+        var _origQuery = window.navigator.permissions.query.bind(navigator.permissions);
+        window.navigator.permissions.query = function (params) {
+            if (params && params.name === 'notifications') {
+                return Promise.resolve({ state: Notification.permission, onchange: null });
+            }
+            return _origQuery(params);
+        };
+    } catch (e) {}
+
+    // ── 6. Canvas fingerprint — add imperceptible per-run noise ───────────
+    try {
+        var _toDataURL = HTMLCanvasElement.prototype.toDataURL;
+        var _getImageData = CanvasRenderingContext2D.prototype.getImageData;
+        HTMLCanvasElement.prototype.toDataURL = function () {
+            var ctx = this.getContext('2d');
+            if (ctx && this.width > 0 && this.height > 0) {
+                var img = _getImageData.call(ctx, 0, 0, this.width, this.height);
+                for (var i = 0; i < img.data.length; i += 97) {
+                    img.data[i] = Math.min(255, img.data[i] + (Math.random() > 0.5 ? 1 : 0));
+                }
+                ctx.putImageData(img, 0, 0);
+            }
+            return _toDataURL.apply(this, arguments);
+        };
+    } catch (e) {}
+
+    // ── 7. WebGL — spoof vendor & renderer ────────────────────────────────
+    try {
+        var _getParam = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = function (param) {
+            if (param === 37445) return 'Google Inc. (Intel)';
+            if (param === 37446) return 'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+            return _getParam.call(this, param);
+        };
+    } catch (e) {}
+    try {
+        var _getParam2 = WebGL2RenderingContext.prototype.getParameter;
+        WebGL2RenderingContext.prototype.getParameter = function (param) {
+            if (param === 37445) return 'Google Inc. (Intel)';
+            if (param === 37446) return 'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+            return _getParam2.call(this, param);
+        };
+    } catch (e) {}
+
+    // ── 8. AudioContext — tiny noise on frequency data ────────────────────
+    try {
+        var _createAnalyser = AudioContext.prototype.createAnalyser;
+        AudioContext.prototype.createAnalyser = function () {
+            var analyser = _createAnalyser.call(this);
+            var _getFloat = analyser.getFloatFrequencyData.bind(analyser);
+            analyser.getFloatFrequencyData = function (arr) {
+                _getFloat(arr);
+                for (var i = 0; i < arr.length; i++) arr[i] += Math.random() * 0.0001 - 0.00005;
+            };
+            return analyser;
+        };
+    } catch (e) {}
+
+    // ── 9. iframe contentWindow stealth propagation ───────────────────────
+    try {
+        var _createElement = document.createElement.bind(document);
+        document.createElement = function (tag) {
+            var el = _createElement.apply(document, arguments);
+            if (typeof tag === 'string' && tag.toLowerCase() === 'iframe') {
+                Object.defineProperty(el, 'contentWindow', {
+                    get: function () {
+                        var cw = HTMLIFrameElement.prototype.__lookupGetter__('contentWindow').call(this);
+                        if (!cw) return cw;
+                        try { Object.defineProperty(cw.navigator, 'webdriver', { get: () => undefined }); } catch (e) {}
+                        return cw;
+                    }
+                });
+            }
+            return el;
+        };
+    } catch (e) {}
+
+    // ── 10. Make overridden functions look native ─────────────────────────
+    try {
+        var _nativeToString  = Function.prototype.toString;
+        var _overridden = [
+            HTMLCanvasElement.prototype.toDataURL,
+            WebGLRenderingContext.prototype.getParameter,
+            navigator.permissions ? navigator.permissions.query : null
+        ].filter(Boolean);
+        var _overriddenSet = new WeakSet(_overridden);
+        Function.prototype.toString = function () {
+            if (_overriddenSet.has(this)) {
+                return 'function ' + (this.name || '') + '() { [native code] }';
+            }
+            return _nativeToString.call(this);
+        };
+    } catch (e) {}
+
+})();
+"""
+
 
 class BrowserManager:
     def __init__(self, proxy_manager: Optional[ProxyManager] = None):
@@ -82,6 +278,25 @@ class BrowserManager:
             self.browser = await self.playwright.chromium.launch(**launch_options)
             logger.info("✓ Browser launched successfully")
 
+            # Verify proxy connectivity: fetch public IP and log it
+            try:
+                verify_page = await self.browser.new_page()
+                response = await verify_page.goto("https://api.ipify.org?format=text", wait_until="domcontentloaded", timeout=30000)
+                if response and response.ok:
+                    public_ip = await verify_page.inner_text("body")
+                    public_ip = public_ip.strip()
+                    if "proxy" in launch_options:
+                        logger.info(f"✓ PROXY IS WORKING — outbound IP: {public_ip} (via {launch_options['proxy'].get('server')})")
+                    else:
+                        logger.info(f"ℹ DIRECT connection — outbound IP: {public_ip} (no proxy)")
+                else:
+                    logger.warning(f"Proxy connectivity check got non-OK response: {response.status if response else 'no response'}")
+                await verify_page.close()
+            except Exception as e:
+                logger.warning(f"Proxy connectivity check failed: {e}")
+                if "proxy" in launch_options:
+                    logger.error("✗ PROXY IS NOT WORKING — browser may fail to reach Facebook")
+
         return self.browser
 
     async def create_page(self) -> Page:
@@ -124,85 +339,11 @@ class BrowserManager:
         )
 
         logger.info("Injecting stealth scripts...")
-        # Enhanced stealth scripts with more comprehensive evasion
-        await context.add_init_script(
-            """
-            // Hide webdriver property
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
-            });
-            
-            // Delete automation indicators
-            delete navigator.__proto__.webdriver;
-            
-            // Mock plugins with realistic data
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => [1, 2, 3, 4, 5]
-            });
-            
-            // Mock languages
-            Object.defineProperty(navigator, 'languages', {
-                get: () => ['en-US', 'en']
-            });
-            
-            // Mock platform
-            Object.defineProperty(navigator, 'platform', {
-                get: () => 'Win32'
-            });
-            
-            // Mock hardware concurrency
-            Object.defineProperty(navigator, 'hardwareConcurrency', {
-                get: () => 8
-            });
-            
-            // Mock device memory
-            Object.defineProperty(navigator, 'deviceMemory', {
-                get: () => 8
-            });
-            
-            // Override permissions
-            const originalQuery = window.navigator.permissions.query;
-            window.navigator.permissions.query = (parameters) => (
-                parameters.name === 'notifications' ?
-                    Promise.resolve({state: Notification.permission}) :
-                    originalQuery(parameters)
-            );
-            
-            // Mock chrome object with more properties
-            window.chrome = {
-                runtime: {},
-                loadTimes: function() {},
-                csi: function() {},
-                app: {}
-            };
-            
-            // Hide automation
-            Object.defineProperty(navigator, 'maxTouchPoints', {
-                get: () => 1
-            });
-            
-            // Mock connection
-            Object.defineProperty(navigator, 'connection', {
-                get: () => ({
-                    effectiveType: '4g',
-                    rtt: 50,
-                    downlink: 10,
-                    saveData: false
-                })
-            });
-            
-            // Override toString to hide proxy
-            const originalToString = Function.prototype.toString;
-            Function.prototype.toString = function() {
-                if (this === navigator.permissions.query) {
-                    return 'function query() { [native code] }';
-                }
-                return originalToString.call(this);
-            };
-        """
-        )
+        await context.add_init_script(STEALTH_SCRIPT)
 
         page = await context.new_page()
+        page.set_default_navigation_timeout(90000)
+        page.set_default_timeout(90000)
         logger.info("✓ Browser page created with stealth configuration")
         return page
     
@@ -248,39 +389,13 @@ class BrowserManager:
             storage_state=storage_state,
         )
         
-        # Inject stealth scripts
+        # Inject comprehensive stealth scripts
         logger.info("Injecting stealth scripts...")
-        await context.add_init_script(
-            """
-            // Hide webdriver property
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
-            });
-            
-            // Delete automation indicators
-            delete navigator.__proto__.webdriver;
-            
-            // Mock plugins with realistic data
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => [1, 2, 3, 4, 5]
-            });
-            
-            // Mock languages
-            Object.defineProperty(navigator, 'languages', {
-                get: () => ['en-US', 'en']
-            });
-            
-            // Mock chrome object
-            window.chrome = {
-                runtime: {},
-                loadTimes: function() {},
-                csi: function() {},
-                app: {}
-            };
-        """
-        )
+        await context.add_init_script(STEALTH_SCRIPT)
         
         page = await context.new_page()
+        page.set_default_navigation_timeout(90000)
+        page.set_default_timeout(90000)
         logger.info("✓ Browser page created with stealth configuration")
         
         # Store context reference for saving cookies later

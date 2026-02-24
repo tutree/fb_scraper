@@ -14,15 +14,38 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 logger = get_logger(__name__)
 
 
+async def _human_mouse_move(page: Page, x: int, y: int) -> None:
+    """Move mouse along a curved path to look human (not a straight teleport)."""
+    try:
+        # Current position unknown — start from a plausible location
+        start_x = random.randint(200, 900)
+        start_y = random.randint(200, 600)
+        steps = random.randint(10, 25)
+        for i in range(steps + 1):
+            t = i / steps
+            # Ease in/out curve + small jitter
+            ease = t * t * (3 - 2 * t)
+            cx = int(start_x + (x - start_x) * ease + random.randint(-3, 3))
+            cy = int(start_y + (y - start_y) * ease + random.randint(-3, 3))
+            await page.mouse.move(cx, cy)
+            await asyncio.sleep(random.uniform(0.005, 0.020))
+    except Exception:
+        pass  # Non-critical
+
+
 async def human_scroll(page: Page, scrolls: int = None) -> None:
     """Simulate human-like scrolling behavior."""
     if scrolls is None:
         scrolls = random.randint(3, 6)
     
     for _ in range(scrolls):
-        # Random scroll distance
+        # Random scroll distance — vary speed via multiple small steps
         scroll_amount = random.randint(300, 800)
-        await page.evaluate(f"window.scrollBy(0, {scroll_amount})")
+        steps = random.randint(3, 8)
+        per_step = scroll_amount // steps
+        for _ in range(steps):
+            await page.evaluate(f"window.scrollBy(0, {per_step + random.randint(-20, 20)})")
+            await asyncio.sleep(random.uniform(0.05, 0.15))
         await asyncio.sleep(random.uniform(1.5, 4.0))
         
         # Sometimes scroll back up (humans do this)
@@ -34,6 +57,9 @@ async def human_scroll(page: Page, scrolls: int = None) -> None:
         # Random pause (reading content)
         if random.random() < 0.4:
             await asyncio.sleep(random.uniform(2.0, 5.0))
+        
+        # Move mouse while reading
+        await _human_mouse_move(page, random.randint(200, 1200), random.randint(200, 700))
 
 
 async def warmup_session(page: Page) -> None:
@@ -42,27 +68,36 @@ async def warmup_session(page: Page) -> None:
         logger.info("Starting session warmup...")
         
         # Go to homepage first
-        await page.goto("https://www.facebook.com", wait_until="networkidle")
-        await asyncio.sleep(random.uniform(3, 7))
+        await page.goto("https://www.facebook.com", wait_until="domcontentloaded", timeout=90000)
+        await asyncio.sleep(random.uniform(3, 6))
         
-        # Simulate reading by scrolling slowly
-        for _ in range(random.randint(2, 4)):
-            await page.evaluate(f"window.scrollBy(0, {random.randint(200, 500)})")
-            await asyncio.sleep(random.uniform(2, 4))
+        # Move mouse around the page naturally before anything else
+        for _ in range(random.randint(4, 7)):
+            await _human_mouse_move(page, random.randint(100, 1300), random.randint(100, 700))
+            await asyncio.sleep(random.uniform(0.4, 1.2))
         
-        # Random mouse movements to simulate human behavior
-        for _ in range(random.randint(3, 6)):
-            await page.mouse.move(
-                random.randint(100, 800), 
-                random.randint(100, 600),
-                steps=random.randint(5, 15)
-            )
-            await asyncio.sleep(random.uniform(0.3, 1.0))
+        # Simulate reading the feed by scrolling slowly with pauses
+        for _ in range(random.randint(3, 5)):
+            await page.evaluate(f"window.scrollBy(0, {random.randint(150, 400)})")
+            await asyncio.sleep(random.uniform(1.5, 3.5))
+            # Move mouse as if hovering over a post
+            await _human_mouse_move(page, random.randint(300, 900), random.randint(200, 600))
+            await asyncio.sleep(random.uniform(0.5, 1.5))
         
-        # Sometimes click on a safe element (like scrolling back to top)
-        if random.random() < 0.3:
-            await page.evaluate("window.scrollTo(0, 0)")
-            await asyncio.sleep(random.uniform(1, 3))
+        # Occasionally scroll back to top like a normal user
+        if random.random() < 0.4:
+            await page.evaluate("window.scrollTo({top: 0, behavior: 'smooth'})")
+            await asyncio.sleep(random.uniform(1, 2.5))
+        
+        # Optionally visit one more safe page (notifications or own profile)
+        if random.random() < 0.35:
+            try:
+                await page.goto("https://www.facebook.com/notifications", wait_until="domcontentloaded", timeout=30000)
+                await asyncio.sleep(random.uniform(3, 6))
+                await _human_mouse_move(page, random.randint(300, 800), random.randint(200, 500))
+                await asyncio.sleep(random.uniform(1, 2))
+            except Exception:
+                pass
         
         logger.info("Session warmup completed")
     except Exception as e:
@@ -147,7 +182,7 @@ class FacebookScraper:
         
         try:
             logger.info("Navigating to Facebook login page...")
-            await page.goto("https://www.facebook.com/login", wait_until="networkidle")
+            await page.goto("https://www.facebook.com/login", wait_until="domcontentloaded", timeout=90000)
             logger.info("Login page loaded")
             
             # Human-like delay before interacting - look around first
@@ -204,7 +239,7 @@ class FacebookScraper:
 
             # Wait for either dashboard or 2FA screen
             logger.info("Waiting for page to load after login...")
-            await page.wait_for_load_state("networkidle")
+            await page.wait_for_load_state("domcontentloaded", timeout=90000)
             logger.info("Page loaded, checking for 2FA...")
 
             # Handle 2FA checkpoint
@@ -229,7 +264,7 @@ class FacebookScraper:
                 if submit_btn:
                     logger.info("Clicking 2FA submit button...")
                     await submit_btn.click()
-                    await page.wait_for_load_state("networkidle")
+                    await page.wait_for_load_state("domcontentloaded", timeout=90000)
                     logger.info("2FA submitted, page loaded")
                 else:
                     logger.warning("2FA submit button not found")
@@ -242,7 +277,7 @@ class FacebookScraper:
                 if continue_btn:
                     logger.info("'Save browser' prompt found, clicking Continue...")
                     await continue_btn.click()
-                    await page.wait_for_load_state("networkidle")
+                    await page.wait_for_load_state("domcontentloaded", timeout=90000)
                     logger.info("Continued past save browser prompt")
                 else:
                     logger.info("No 'Save browser' prompt found")
@@ -273,6 +308,7 @@ class FacebookScraper:
         # Reuse existing page or create new one
         if not hasattr(self, '_current_page') or self._current_page is None:
             account = self._get_next_account()
+            self._current_account = account  # Persist for use in _scroll_and_process_posts
             logger.info(f"Using account: {account.get('uid', 'Unknown')}")
             logger.info("Creating browser page...")
             
@@ -325,7 +361,7 @@ class FacebookScraper:
             
             # Type search query manually instead of URL parameter (more human-like)
             logger.info("Navigating to Facebook homepage...")
-            await page.goto("https://www.facebook.com", wait_until="networkidle")
+            await page.goto("https://www.facebook.com", wait_until="domcontentloaded", timeout=90000)
             await asyncio.sleep(random.uniform(2, 4))
             
             # Find and click search box
@@ -333,18 +369,32 @@ class FacebookScraper:
             search_box = await page.query_selector('input[type="search"], input[placeholder*="Search"]')
             if search_box:
                 logger.info("Search box found, typing keyword...")
+                # Hover first, then click — like a real user
+                bbox = await search_box.bounding_box()
+                if bbox:
+                    target_x = int(bbox['x'] + bbox['width'] * random.uniform(0.3, 0.7))
+                    target_y = int(bbox['y'] + bbox['height'] * random.uniform(0.3, 0.7))
+                    await _human_mouse_move(page, target_x, target_y)
+                    await asyncio.sleep(random.uniform(0.3, 0.7))
                 await search_box.click()
                 await asyncio.sleep(random.uniform(0.5, 1.5))
                 
-                # Type keyword character by character
-                for char in keyword:
+                # Type keyword with human-like cadence (faster mid-word, slower at start/end)
+                for i, char in enumerate(keyword):
                     await page.keyboard.type(char)
-                    await asyncio.sleep(random.uniform(0.1, 0.3))
+                    # Vary delay: slower at start/end, faster in middle
+                    if i < 3 or i > len(keyword) - 4:
+                        await asyncio.sleep(random.uniform(0.12, 0.28))
+                    else:
+                        await asyncio.sleep(random.uniform(0.05, 0.18))
+                    # Occasional longer pause (thinking/hesitation)
+                    if random.random() < 0.07:
+                        await asyncio.sleep(random.uniform(0.3, 0.8))
                 
                 await asyncio.sleep(random.uniform(1, 2))
                 logger.info("Pressing Enter to search...")
                 await page.keyboard.press("Enter")
-                await page.wait_for_load_state("networkidle")
+                await page.wait_for_load_state("domcontentloaded", timeout=90000)
                 logger.info("Search results page loaded")
                 
                 # Click on "Posts" tab if available
@@ -353,17 +403,24 @@ class FacebookScraper:
                 posts_tab = await page.query_selector('a[href*="/search/posts"]')
                 if posts_tab:
                     logger.info("Posts tab found, clicking...")
+                    bbox = await posts_tab.bounding_box()
+                    if bbox:
+                        await _human_mouse_move(page,
+                            int(bbox['x'] + bbox['width'] * 0.5),
+                            int(bbox['y'] + bbox['height'] * 0.5))
+                        await asyncio.sleep(random.uniform(0.2, 0.5))
                     await posts_tab.click()
-                    await page.wait_for_load_state("networkidle")
+                    await page.wait_for_load_state("domcontentloaded", timeout=90000)
                     logger.info("Posts tab loaded")
                 else:
                     logger.warning("Posts tab not found, staying on current page")
             else:
                 # Fallback to direct URL
                 logger.warning("Search box not found, using direct URL")
-                search_url = f"https://www.facebook.com/search/posts/?q={keyword}"
+                from urllib.parse import quote_plus
+                search_url = f"https://www.facebook.com/search/posts/?q={quote_plus(keyword)}"
                 logger.info(f"Navigating to: {search_url}")
-                await page.goto(search_url, wait_until="networkidle")
+                await page.goto(search_url, wait_until="domcontentloaded", timeout=90000)
             
             # Wait and look around before scraping
             wait_time = random.uniform(4, 8)
@@ -396,7 +453,7 @@ class FacebookScraper:
     async def _scroll_and_process_posts(
         self, page: Page, keyword: str, max_results: int
     ) -> int:
-        """Scroll, extract links from span.xjp7ctv > a, visit profiles, check if user, save to database."""
+        """Scroll, extract author profile links semantically, visit profiles, save users to database."""
         logger.info(f"Starting extraction for keyword: '{keyword}' (target: {max_results} posts)")
         
         # Scroll a few times to load more posts
@@ -404,95 +461,141 @@ class FacebookScraper:
         for i in range(2):
             await human_scroll(page, scrolls=2)
             await asyncio.sleep(random.uniform(3, 5))
-        
-        # Extract entire page HTML
-        logger.info("Extracting full page HTML...")
-        full_html = await page.content()
-        logger.info(f"Extracted HTML ({len(full_html)} characters)")
-        
-        # Extract links from span.xjp7ctv > a (direct profile links)
-        logger.info("Extracting direct profile links from span.xjp7ctv > a...")
-        direct_links = await page.evaluate(
+
+        # Save a screenshot for debugging
+        try:
+            safe_kw = keyword[:30].replace(' ', '_').replace('/', '_')
+            screenshot_path = f"/app/logs/debug_{safe_kw}.png"
+            await page.screenshot(path=screenshot_path, full_page=False)
+            logger.info(f"Screenshot saved: {screenshot_path}")
+        except Exception as e:
+            logger.warning(f"Screenshot failed: {e}")
+
+        # Diagnostic: log current URL and page structure
+        current_url = page.url
+        logger.info(f"Current page URL: {current_url}")
+        page_diag = await page.evaluate(
+            """
+            () => ({
+                title: document.title,
+                articles: document.querySelectorAll('div[role="article"]').length,
+                feed: !!document.querySelector('div[role="feed"]'),
+                totalAnchors: document.querySelectorAll('a[href]').length,
+                bodySnippet: document.body ? document.body.innerText.slice(0, 300) : 'NO BODY',
+            })
+            """
+        )
+        logger.info(f"Page diagnostics: title={page_diag.get('title')!r}, "
+                    f"articles={page_diag.get('articles')}, feed={page_diag.get('feed')}, "
+                    f"anchors={page_diag.get('totalAnchors')}")
+        logger.info(f"Page body snippet: {page_diag.get('bodySnippet')!r}")
+
+        # Extract author profile links — use a.href (resolved absolute URL by browser)
+        # NOT a[href*="facebook.com"] which only matches the raw HTML attribute
+        logger.info("Extracting author profile links via semantic DOM traversal...")
+        all_links = await page.evaluate(
             """
             () => {
-                const links = [];
-                
-                // Find all span tags with class xjp7ctv
-                const spans = document.querySelectorAll('span.xjp7ctv');
-                console.log(`Found ${spans.length} span.xjp7ctv elements`);
-                
-                spans.forEach((span, index) => {
-                    // Find the a tag inside
-                    const aTag = span.querySelector('a');
-                    if (aTag && aTag.href) {
-                        const href = aTag.href;
-                        const text = aTag.textContent.trim();
-                        
-                        links.push({
-                            url: href,
-                            text: text,
-                            type: 'direct'
-                        });
-                        
-                        if (index < 10) {
-                            console.log(`Direct link ${index + 1}: ${text} -> ${href}`);
-                        }
+                const results = [];
+                const seen = new Set();
+                const BASE = location.origin; // https://www.facebook.com
+
+                const NON_PROFILE = new Set([
+                    'pages', 'groups', 'events', 'marketplace', 'watch', 'gaming',
+                    'ads', 'search', 'stories', 'notifications', 'messages',
+                    'friends', 'bookmarks', 'memory', 'help', 'privacy', 'terms',
+                    'hashtag', 'reel', 'reels', 'live', 'photo', 'photos', 'video',
+                    'videos', 'login', 'recover', 'checkpoint', 'settings', 'composer',
+                    'sharer', 'dialog', 'share', 'l.php', 'ajax', 'api'
+                ]);
+
+                // a.href is always the fully resolved absolute URL in the browser
+                function isProfileHref(absoluteHref) {
+                    if (!absoluteHref || !absoluteHref.includes('facebook.com')) return false;
+                    try {
+                        const u = new URL(absoluteHref);
+                        const parts = u.pathname.replace(/^\//, '').replace(/\/$/, '').split('/');
+                        const slug = parts[0];
+                        if (!slug) return false;
+                        if (NON_PROFILE.has(slug.toLowerCase())) return false;
+                        if (/^(groups|events|pages|hashtag|watch|gaming|marketplace|reel|reels|stories|live|photo|photos|video|videos|posts|permalink|story\.php|share|sharer|composer|checkpoint|login|ajax)/.test(slug)) return false;
+                        if (u.search.includes('comment_id=')) return false;
+                        // profile.php is always personal
+                        if (slug === 'profile.php') return true;
+                        // Real slug: alphanumeric + dots/underscores/hyphens, no sub-path
+                        return /^[A-Za-z0-9._-]{2,}$/.test(slug) && parts.length === 1;
+                    } catch(e) { return false; }
+                }
+
+                function addLink(absoluteHref, text) {
+                    try {
+                        const u = new URL(absoluteHref);
+                        const key = u.pathname.replace(/\/$/, '');
+                        if (seen.has(key)) return;
+                        seen.add(key);
+                        results.push({ url: absoluteHref, text: (text || '').trim(), type: 'direct' });
+                    } catch(e) {}
+                }
+
+                // Strategy 1: first profile link inside each post article
+                const articles = document.querySelectorAll('div[role="article"]');
+                articles.forEach(article => {
+                    for (const a of article.querySelectorAll('a[href]')) {
+                        if (isProfileHref(a.href)) { addLink(a.href, a.textContent); break; }
                     }
                 });
-                
-                console.log(`Extracted ${links.length} direct links`);
-                return links;
+
+                // Strategy 2: feed direct children
+                if (results.length === 0) {
+                    const feed = document.querySelector('div[role="feed"]');
+                    if (feed) {
+                        Array.from(feed.children).forEach(child => {
+                            for (const a of child.querySelectorAll('a[href]')) {
+                                if (isProfileHref(a.href)) { addLink(a.href, a.textContent); break; }
+                            }
+                        });
+                    }
+                }
+
+                // Strategy 3: every anchor on the page (a.href = absolute, always works)
+                if (results.length === 0) {
+                    document.querySelectorAll('a[href]').forEach(a => {
+                        if (isProfileHref(a.href)) addLink(a.href, a.textContent);
+                    });
+                }
+
+                return results;
             }
             """
         )
+
+        logger.info(f"✓ Total extracted: {len(all_links)} profile links via semantic extraction")
         
-        # Extract group post author links
-        logger.info("Extracting group post author links...")
-        group_links = await page.evaluate(
-            """
-            () => {
-                const links = [];
-                
-                // Find all a tags that contain the specific span for group post authors
-                const aTags = document.querySelectorAll('a');
-                
-                aTags.forEach((aTag, index) => {
-                    // Check if this a tag has the specific span child
-                    const span = aTag.querySelector('span.x193iq5w.xeuugli.x13faqbe.x1vvkbs.x1xmvt09.x1nxh6w3.x1sibtaa.x1s688f.xi81zsa');
-                    if (span && aTag.href && aTag.href.includes('/groups/')) {
-                        const href = aTag.href;
-                        const text = span.textContent.trim();
-                        
-                        links.push({
-                            url: href,
-                            text: text,
-                            type: 'group'
-                        });
-                        
-                        if (index < 10) {
-                            console.log(`Group link ${index + 1}: ${text} -> ${href}`);
-                        }
-                    }
-                });
-                
-                console.log(`Extracted ${links.length} group post author links`);
-                return links;
-            }
-            """
-        )
-        
-        # Combine both types of links
-        all_links = direct_links + group_links
-        logger.info(f"✓ Total extracted: {len(direct_links)} direct + {len(group_links)} group = {len(all_links)} links")
-        logger.info(f"Filtering to odd indices only (1, 3, 5...) to avoid duplicates")
+        # Pre-filter: drop any link whose URL is a /groups/ page — those are never individual users
+        import re as _re
+        def _is_user_profile_url(url: str) -> bool:
+            clean = url.split('?')[0].split('&')[0]
+            if '/groups/' in clean:
+                return False
+            # profile.php?id=... is always a personal profile
+            if 'profile.php' in url:
+                return True
+            # Must end with a slug that is not a known non-profile path
+            non_profile = {'pages', 'events', 'marketplace', 'watch', 'gaming', 'ads'}
+            match = _re.search(r'facebook\.com/([^/?#]+)', clean)
+            if match and match.group(1).lower() in non_profile:
+                return False
+            return True
+
+        user_links = [l for l in all_links if _is_user_profile_url(l['url'])]
+        logger.info(f"After pre-filtering groups/pages: {len(user_links)} candidate user links (dropped {len(all_links) - len(user_links)})")
         
         # Visit each profile and check if it's a user
         # Process in batches for parallel execution
         users_saved = 0
         batch_size = 3  # Process 3 profiles simultaneously
         
-        # Filter to odd indices only to avoid duplicates
-        filtered_links = [link for idx, link in enumerate(all_links, 1) if idx % 2 != 0]
+        filtered_links = user_links  # JS already deduplicates
         logger.info(f"Processing {len(filtered_links)} links in batches of {batch_size}")
         
         # Process links in batches
@@ -512,7 +615,8 @@ class FacebookScraper:
                 if users_saved >= max_results:
                     break
                 # Create a new page for each parallel task
-                new_page = await self.browser_manager.create_page_with_cookies(account['uid'])
+                account_uid = getattr(self, '_current_account', {}).get('uid', '')
+                new_page = await self.browser_manager.create_page_with_cookies(account_uid)
                 task = self._process_single_profile(new_page, link, keyword, batch_start + i + 1, len(filtered_links))
                 tasks.append(task)
             
@@ -549,7 +653,7 @@ class FacebookScraper:
             if link_type == 'group':
                 logger.info(f"  Processing group post author...")
                 # Navigate to the group user page
-                await page.goto(link_url, wait_until="networkidle", timeout=30000)
+                await page.goto(link_url, wait_until="domcontentloaded", timeout=90000)
                 await asyncio.sleep(random.uniform(2, 4))
                 
                 # Find the "View profile" link
@@ -565,13 +669,13 @@ class FacebookScraper:
                 logger.info(f"  Found profile URL: {profile_url}")
                 
                 # Navigate to the actual profile
-                await page.goto(profile_url, wait_until="networkidle", timeout=30000)
+                await page.goto(profile_url, wait_until="domcontentloaded", timeout=90000)
                 await asyncio.sleep(random.uniform(2, 4))
             else:
                 # Direct profile link
                 profile_url = link_url
                 # Visit the profile
-                await page.goto(profile_url, wait_until="networkidle", timeout=30000)
+                await page.goto(profile_url, wait_until="domcontentloaded", timeout=90000)
                 await asyncio.sleep(random.uniform(2, 4))
             
             # Extract the actual user name from the profile page using the specific classes
@@ -667,23 +771,45 @@ class FacebookScraper:
                     unique_locations.append(loc)
                     seen.add(loc)
             
-            if unique_locations:
-                # This is a user (not channel/group)
-                # Concatenate multiple locations with comma
-                location_text = ', '.join(unique_locations)
-                logger.info(f"  ✓ User detected! Location: {location_text}")
+            location_text = ', '.join(unique_locations) if unique_locations else None
+
+            # Determine if this is a personal profile (not a group/page)
+            # Check for personal profile indicators: Add Friend, Message, or Follow buttons
+            is_personal_profile = await page.evaluate(
+                """
+                () => {
+                    const text = document.body.innerText || '';
+                    const html = document.body.innerHTML || '';
+                    // Group indicators
+                    if (html.includes('joinButton') || text.includes('Join group') ||
+                        text.includes('Join Group') || html.includes('group_type')) {
+                        return false;
+                    }
+                    // Page indicators
+                    if (text.includes('Like Page') || text.includes('Suggest Page')) {
+                        return false;
+                    }
+                    // Personal profile indicators
+                    const hasAddFriend = !!document.querySelector('[aria-label="Add friend"], [aria-label="Add Friend"]');
+                    const hasMessage = !!document.querySelector('[aria-label="Message"]');
+                    const hasFollow = !!document.querySelector('[aria-label="Follow"]');
+                    return hasAddFriend || hasMessage || hasFollow;
+                }
+                """
+            )
+
+            if is_personal_profile:
+                if location_text:
+                    logger.info(f"  ✓ Personal profile detected. Location: {location_text}")
+                else:
+                    logger.info(f"  ✓ Personal profile detected (no public location)")
                 
-                # Try to extract post content from the original search page
-                # For now, we'll save what we have
-                post_content = None  # Will be extracted later if needed
-                
-                # Save to database
                 try:
                     search_result = SearchResult(
                         name=final_name,
                         location=location_text,
-                        post_content=post_content,
-                        post_url=None,  # We don't have the specific post URL yet
+                        post_content=None,
+                        post_url=None,
                         profile_url=profile_url,
                         search_keyword=keyword,
                         status=ResultStatus.PENDING,
@@ -699,7 +825,7 @@ class FacebookScraper:
                     await page.close()
                     return False
             else:
-                logger.info(f"  ✗ Not a user (channel/group) - location not found")
+                logger.info(f"  ✗ Not a personal profile (group/page) — skipping")
                 await page.close()
                 return False
             
