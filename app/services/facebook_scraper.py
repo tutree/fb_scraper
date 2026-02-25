@@ -492,7 +492,7 @@ class FacebookScraper:
 
         # Extract author profile links — use a.href (resolved absolute URL by browser)
         # NOT a[href*="facebook.com"] which only matches the raw HTML attribute
-        logger.info("Extracting author profile links via semantic DOM traversal...")
+        logger.info("Extracting author profile links and post content via semantic DOM traversal...")
         all_links = await page.evaluate(
             """
             () => {
@@ -527,21 +527,52 @@ class FacebookScraper:
                     } catch(e) { return false; }
                 }
 
-                function addLink(absoluteHref, text) {
+                function extractPostContent(article) {
+                    // Try to find the post text content within the article
+                    // Look for common post content selectors
+                    const contentSelectors = [
+                        'div[data-ad-rendering-role="story_message"]',
+                        'div[data-ad-comet-preview="message"]',
+                        'div[dir="auto"][style*="text-align"]',
+                        'span[dir="auto"]'
+                    ];
+                    
+                    for (const selector of contentSelectors) {
+                        const elem = article.querySelector(selector);
+                        if (elem && elem.textContent.trim().length > 20) {
+                            return elem.textContent.trim();
+                        }
+                    }
+                    
+                    // Fallback: get all text from the article, but limit to first 500 chars
+                    const text = article.textContent.trim();
+                    return text.length > 500 ? text.substring(0, 500) + '...' : text;
+                }
+
+                function addLink(absoluteHref, text, postContent) {
                     try {
                         const u = new URL(absoluteHref);
                         const key = u.pathname.replace(/\/$/, '');
                         if (seen.has(key)) return;
                         seen.add(key);
-                        results.push({ url: absoluteHref, text: (text || '').trim(), type: 'direct' });
+                        results.push({ 
+                            url: absoluteHref, 
+                            text: (text || '').trim(), 
+                            type: 'direct',
+                            post_content: postContent || null
+                        });
                     } catch(e) {}
                 }
 
                 // Strategy 1: first profile link inside each post article
                 const articles = document.querySelectorAll('div[role="article"]');
                 articles.forEach(article => {
+                    const postContent = extractPostContent(article);
                     for (const a of article.querySelectorAll('a[href]')) {
-                        if (isProfileHref(a.href)) { addLink(a.href, a.textContent); break; }
+                        if (isProfileHref(a.href)) { 
+                            addLink(a.href, a.textContent, postContent); 
+                            break; 
+                        }
                     }
                 });
 
@@ -550,8 +581,12 @@ class FacebookScraper:
                     const feed = document.querySelector('div[role="feed"]');
                     if (feed) {
                         Array.from(feed.children).forEach(child => {
+                            const postContent = extractPostContent(child);
                             for (const a of child.querySelectorAll('a[href]')) {
-                                if (isProfileHref(a.href)) { addLink(a.href, a.textContent); break; }
+                                if (isProfileHref(a.href)) { 
+                                    addLink(a.href, a.textContent, postContent); 
+                                    break; 
+                                }
                             }
                         });
                     }
@@ -560,7 +595,12 @@ class FacebookScraper:
                 // Strategy 3: every anchor on the page (a.href = absolute, always works)
                 if (results.length === 0) {
                     document.querySelectorAll('a[href]').forEach(a => {
-                        if (isProfileHref(a.href)) addLink(a.href, a.textContent);
+                        if (isProfileHref(a.href)) {
+                            // Try to find parent article for post content
+                            let parent = a.closest('div[role="article"]');
+                            const postContent = parent ? extractPostContent(parent) : null;
+                            addLink(a.href, a.textContent, postContent);
+                        }
                     });
                 }
 
@@ -647,6 +687,9 @@ class FacebookScraper:
         
         logger.info(f"[{idx}/{total}] Checking {link_type} link: {name}")
         logger.info(f"  URL: {link_url}")
+        
+        # Store the post content from the search results page before navigating away
+        post_content = link.get('post_content', None)
         
         try:
             # Handle group posts differently
@@ -808,7 +851,7 @@ class FacebookScraper:
                     search_result = SearchResult(
                         name=final_name,
                         location=location_text,
-                        post_content=None,
+                        post_content=post_content,  # Include post content
                         post_url=None,
                         profile_url=profile_url,
                         search_keyword=keyword,

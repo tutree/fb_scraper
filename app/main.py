@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from .core.config import settings
-from .api.routes import search, results, proxy
+from .api.routes import search, results, proxy, dashboard
 from .core.database import engine, Base
 from .core.logging_config import setup_logging
 
@@ -31,6 +31,7 @@ app.add_middleware(
 app.include_router(search.router, prefix=settings.API_V1_PREFIX)
 app.include_router(results.router, prefix=settings.API_V1_PREFIX)
 app.include_router(proxy.router, prefix=settings.API_V1_PREFIX)
+app.include_router(dashboard.router, prefix=settings.API_V1_PREFIX)
 
 
 @app.get("/")

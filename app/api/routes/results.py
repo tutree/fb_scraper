@@ -20,18 +20,21 @@ async def get_results(
     limit: int = Query(100, ge=1, le=1000),
     status: Optional[ResultStatus] = None,
     keyword: Optional[str] = None,
+    user_type: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     """Get search results with filters."""
-    scraper = ScraperService(db)
-    results = await scraper.get_results(
-        skip=skip,
-        limit=limit,
-        status=status,
-        keyword=keyword,
-    )
-
-    total = db.query(SearchResult).count()
+    query = db.query(SearchResult)
+    
+    if status:
+        query = query.filter(SearchResult.status == status)
+    if keyword:
+        query = query.filter(SearchResult.search_keyword.ilike(f"%{keyword}%"))
+    if user_type:
+        query = query.filter(SearchResult.user_type == user_type)
+    
+    total = query.count()
+    results = query.order_by(SearchResult.scraped_at.desc()).offset(skip).limit(limit).all()
 
     return SearchResultList(
         total=total,

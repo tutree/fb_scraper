@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, Text, Enum, Integer, Index
+from sqlalchemy import Column, String, DateTime, Text, Enum, Integer, Index, Float, JSON
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 import uuid
@@ -13,6 +13,12 @@ class ResultStatus(str, enum.Enum):
     INVALID = "invalid"
 
 
+class UserType(str, enum.Enum):
+    CUSTOMER = "customer"  # Looking for tutor
+    TUTOR = "tutor"  # Offering tutoring
+    UNKNOWN = "unknown"  # Unclear or irrelevant
+
+
 class SearchResult(Base):
     __tablename__ = "search_results"
 
@@ -25,6 +31,13 @@ class SearchResult(Base):
     source = Column(String, default="facebook")
     status = Column(Enum(ResultStatus), default=ResultStatus.PENDING)
     profile_url = Column(String, nullable=True)
+    
+    # Gemini AI classification fields
+    user_type = Column(Enum(UserType), nullable=True)
+    gemini_analysis = Column(JSON, nullable=True)  # Full Gemini response
+    confidence_score = Column(Float, nullable=True)  # 0-1 confidence
+    analyzed_at = Column(DateTime(timezone=True), nullable=True)
+    
     scraped_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -33,4 +46,7 @@ class SearchResult(Base):
         Index("idx_search_results_scraped_at", scraped_at),
         Index("idx_search_results_status", status),
         Index("idx_search_results_keyword", search_keyword),
+        Index("idx_search_results_user_type", user_type),
+        Index("idx_search_results_analyzed_at", analyzed_at),
     )
+
