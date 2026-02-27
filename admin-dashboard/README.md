@@ -15,7 +15,7 @@ npm install
 npm run dev
 ```
 
-The dashboard will be available at `http://localhost:3000`
+The dashboard will be available at `http://localhost:5173`
 
 ## Features
 
@@ -29,7 +29,7 @@ The dashboard will be available at `http://localhost:3000`
 
 ## Requirements
 
-- The FastAPI backend must be running on `http://localhost:8000`
+- The FastAPI backend must be running on `http://localhost:5000`
 - The backend API endpoints are proxied through Vite
 
 ## Build for Production

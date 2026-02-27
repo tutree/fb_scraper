@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, cast, String
 
 from ...core.database import get_db
 from ...models.search_result import SearchResult, ResultStatus, UserType
@@ -14,15 +14,19 @@ async def get_stats(db: Session = Depends(get_db)):
     total = db.query(SearchResult).count()
     
     customers = db.query(SearchResult).filter(
-        SearchResult.user_type == UserType.CUSTOMER.value
+        cast(SearchResult.user_type, String) == "customer"
     ).count()
     
     tutors = db.query(SearchResult).filter(
-        SearchResult.user_type == UserType.TUTOR.value
+        cast(SearchResult.user_type, String) == "tutor"
     ).count()
     
     unknown = db.query(SearchResult).filter(
-        SearchResult.user_type == UserType.UNKNOWN.value
+        cast(SearchResult.user_type, String) == "unknown"
+    ).count()
+    
+    not_analyzed = db.query(SearchResult).filter(
+        SearchResult.user_type.is_(None)
     ).count()
     
     pending = db.query(SearchResult).filter(
@@ -46,6 +50,7 @@ async def get_stats(db: Session = Depends(get_db)):
         "customers": customers,
         "tutors": tutors,
         "unknown": unknown,
+        "not_analyzed": not_analyzed,
         "pending": pending,
         "contacted": contacted,
         "not_interested": not_interested,

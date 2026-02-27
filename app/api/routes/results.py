@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
+from sqlalchemy import cast, String
 from typing import Optional
 
 from ...core.database import get_db
@@ -31,7 +32,7 @@ async def get_results(
     if keyword:
         query = query.filter(SearchResult.search_keyword.ilike(f"%{keyword}%"))
     if user_type:
-        query = query.filter(SearchResult.user_type == user_type)
+        query = query.filter(cast(SearchResult.user_type, String) == user_type)
     
     total = query.count()
     results = query.order_by(SearchResult.scraped_at.desc()).offset(skip).limit(limit).all()

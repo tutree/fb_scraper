@@ -27,7 +27,7 @@ function App() {
       if (filters.keyword) params.append('keyword', filters.keyword)
 
       const [resultsRes, statsRes] = await Promise.all([
-        axios.get(`${API_BASE}/results?${params}`),
+        axios.get(`${API_BASE}/results/?${params}`),
         axios.get(`${API_BASE}/dashboard/stats`)
       ])
 
@@ -73,6 +73,10 @@ function App() {
           <div className="stat-card">
             <h3>Tutors</h3>
             <div className="value">{stats.tutors}</div>
+          </div>
+          <div className="stat-card">
+            <h3>Not Analyzed</h3>
+            <div className="value">{stats.not_analyzed || 0}</div>
           </div>
           <div className="stat-card">
             <h3>Pending</h3>
