@@ -177,158 +177,60 @@ class FacebookScraper:
         try:
             logger.info(f"  Extracting comments (max: {max_comments})...")
             
-            # Wait for page to load
-            await asyncio.sleep(random.uniform(1, 2))
-            
-            # STEP 1: Click the "Comment" button to reveal comments section
+            # Try to click "View more comments" button if it exists
             try:
-                logger.info(f"  Looking for 'Comment' button...")
-                
-                # Try multiple selectors for the Comment button
-                comment_button_selectors = [
-                    'div[aria-label="Comment"]',
-                    'div[role="button"]:has-text("Comment")',
-                    'span:has-text("Comment")',
-                    '[aria-label="Leave a comment"]',
-                ]
-                
-                clicked = False
-                for selector in comment_button_selectors:
-                    try:
-                        if await page.is_visible(selector, timeout=2000):
-                            logger.info(f"  Clicking 'Comment' button to reveal comments...")
-                            await page.click(selector)
-                            await asyncio.sleep(random.uniform(2, 3))
-                            clicked = True
-                            break
-                    except:
-                        continue
-                
-                if not clicked:
-                    logger.info(f"  Comment button not found, comments may already be visible")
-                    
-            except Exception as e:
-                logger.debug(f"  Could not click Comment button: {e}")
-            
-            # STEP 2: Try to expand comments if there's a "View more comments" link
-            try:
-                view_more_selectors = [
-                    'div[role="button"]:has-text("View more comments")',
-                    'div[role="button"]:has-text("more comment")',
-                    'span:has-text("View more comments")',
-                    'span:has-text("more comment")',
-                    'a:has-text("View more comments")',
-                ]
-                
-                for selector in view_more_selectors:
-                    try:
-                        if await page.is_visible(selector, timeout=2000):
-                            logger.info(f"  Clicking 'View more comments'...")
-                            await page.click(selector)
-                            await asyncio.sleep(random.uniform(1, 2))
-                            break
-                    except:
-                        continue
-                        
-            except Exception as e:
-                logger.debug(f"  View more comments not found: {e}")
-            
-            # STEP 3: Scroll down to load more comments
-            try:
-                for _ in range(3):
-                    await page.evaluate("window.scrollBy(0, 400)")
-                    await asyncio.sleep(0.5)
+                view_more_selector = 'div[role="button"]:has-text("View more comments")'
+                if await page.is_visible(view_more_selector, timeout=3000):
+                    await page.click(view_more_selector)
+                    await asyncio.sleep(random.uniform(1, 2))
             except:
                 pass
             
-            # Wait for comments to render
-            await asyncio.sleep(2)
-            
-            # STEP 4: Extract comments using JavaScript
-            logger.info(f"  Extracting comment data from page...")
+            # Extract comments using JavaScript
             comments_data = await page.evaluate(
                 """
                 (maxComments) => {
                     const comments = [];
-                    const seen = new Set();
                     
-                    // Strategy 1: Look for comment containers with specific structure
-                    // Facebook comments usually have a structure with author link + comment text
-                    const allLinks = document.querySelectorAll('a[href*="/user/"], a[href*="facebook.com/"]');
+                    // Find all comment containers
+                    const commentElements = document.querySelectorAll('[role="article"]');
                     
-                    for (const link of allLinks) {
-                        if (comments.length >= maxComments) break;
+                    for (let i = 0; i < Math.min(commentElements.length, maxComments); i++) {
+                        const elem = commentElements[i];
                         
-                        // Get the author name and URL
-                        const authorName = link.textContent.trim();
-                        const authorUrl = link.href;
+                        // Extract author name
+                        const authorLink = elem.querySelector('a[role="link"]');
+                        const authorName = authorLink ? authorLink.textContent.trim() : null;
+                        const authorUrl = authorLink ? authorLink.href : null;
                         
-                        if (!authorName || authorName.length < 2) continue;
-                        if (seen.has(authorUrl)) continue;
-                        
-                        // Look for comment text near this author link
-                        // Comments are usually in a parent container
-                        let parent = link.closest('div[role="article"]') || 
-                                    link.closest('li') || 
-                                    link.closest('div[data-visualcompletion]');
-                        
-                        if (!parent) {
-                            // Try going up a few levels
-                            parent = link.parentElement?.parentElement?.parentElement;
-                        }
-                        
-                        if (!parent) continue;
-                        
-                        // Extract comment text from the parent container
+                        // Extract comment text
+                        const textElements = elem.querySelectorAll('div[dir="auto"]');
                         let commentText = '';
-                        const textDivs = parent.querySelectorAll('div[dir="auto"]');
-                        
-                        for (const div of textDivs) {
-                            const text = div.textContent.trim();
-                            // Skip if it's the author name or action buttons
-                            if (text && 
-                                text.length > 10 && 
-                                text !== authorName &&
-                                !text.match(/^(Like|Reply|Share|Comment|[0-9]+[smhd]|Just now|Yesterday)$/i)) {
+                        for (const textElem of textElements) {
+                            const text = textElem.textContent.trim();
+                            if (text && text.length > 10) {
                                 commentText = text;
                                 break;
                             }
                         }
                         
-                        // If no comment text found, try getting all text from parent
-                        if (!commentText) {
-                            const allText = parent.textContent;
-                            const lines = allText.split('\\n')
-                                .map(l => l.trim())
-                                .filter(l => 
-                                    l.length > 10 && 
-                                    l !== authorName &&
-                                    !l.match(/^(Like|Reply|Share|Comment|[0-9]+[smhd]|Just now|Yesterday)$/i)
-                                );
-                            if (lines.length > 0) {
-                                commentText = lines[0];
-                            }
-                        }
-                        
                         // Extract timestamp
+                        const timeElements = elem.querySelectorAll('span');
                         let timestamp = null;
-                        const timeSpans = parent.querySelectorAll('span');
-                        for (const span of timeSpans) {
-                            const text = span.textContent.trim();
-                            if (text.match(/[0-9]+[smhd]|Just now|Yesterday|[0-9]+ min|[0-9]+ hr/i)) {
+                        for (const timeElem of timeElements) {
+                            const text = timeElem.textContent.trim();
+                            if (text.match(/\\d+[smhd]|Just now|Yesterday/i)) {
                                 timestamp = text;
                                 break;
                             }
                         }
                         
-                        // Only add if we have both author and comment text
-                        if (authorName && commentText && commentText.length > 5) {
-                            seen.add(authorUrl);
+                        if (authorName && commentText) {
                             comments.push({
                                 author_name: authorName,
                                 author_profile_url: authorUrl,
                                 comment_text: commentText,
-                                comment_timestamp: timestamp || 'Unknown'
+                                comment_timestamp: timestamp
                             });
                         }
                     }

@@ -34,7 +34,7 @@ class SearchResult(Base):
     profile_url = Column(String, nullable=True)
     
     # Gemini AI classification fields
-    user_type = Column(Enum(UserType, values_callable=lambda x: [e.value for e in x]), nullable=True)
+    user_type = Column(Enum(UserType), nullable=True)
     gemini_analysis = Column(JSON, nullable=True)  # Full Gemini response
     confidence_score = Column(Float, nullable=True)  # 0-1 confidence
     analyzed_at = Column(DateTime(timezone=True), nullable=True)

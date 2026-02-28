@@ -36,6 +36,7 @@ venv.bak/
 # Configuration Files - SENSITIVE
 config/credentials.json
 config/keywords.json
+credentials/
 
 # Cookies - SENSITIVE (contains login sessions)
 cookies/*.json

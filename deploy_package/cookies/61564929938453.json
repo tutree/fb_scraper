@@ -1,0 +1,85 @@
+{
+  "cookies": [
+    {
+      "name": "datr",
+      "value": "KPmhaTIq7nSQpUVjivkeJdHn",
+      "domain": ".facebook.com",
+      "path": "/",
+      "expires": 1806782760.872753,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "fr",
+      "value": "1a1EtGhhQ8WIxjPhr.AWcp-d-eGrMA3oUiRp-flJ-2v8LsYemhluFiwV37-q-Km1E3x_Y.Bpof8A..AAA.0.0.Bpof8A.AWd4ZnyCLcDdoxKzXFDgFAFWgDk",
+      "domain": ".facebook.com",
+      "path": "/",
+      "expires": 1780000256.933613,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "xs",
+      "value": "4%3A5LVp-Z5SnDQcUg%3A2%3A1772222811%3A-1%3A-1%3A%3AAczOPgB__Rjq4tmw-88TL3A2xFD2NW8VVn7gtXnmPQ",
+      "domain": ".facebook.com",
+      "path": "/",
+      "expires": 1803760256.93444,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "locale",
+      "value": "en_US",
+      "domain": ".facebook.com",
+      "path": "/",
+      "expires": 1772827585.97072,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "c_user",
+      "value": "61564929938453",
+      "domain": ".facebook.com",
+      "path": "/",
+      "expires": 1803760256.931767,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "dpr",
+      "value": "2.5",
+      "domain": ".facebook.com",
+      "path": "/",
+      "expires": 1772827768,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "sb",
+      "value": "O_mhabdlMAeorRvviA-O0Bvm",
+      "domain": ".facebook.com",
+      "path": "/",
+      "expires": 1806782814.365734,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "wd",
+      "value": "1368x586",
+      "domain": ".facebook.com",
+      "path": "/",
+      "expires": 1772827707,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "Lax"
+    }
+  ],
+  "origins": []
+}

@@ -68,7 +68,7 @@ async def analyze_pending_posts(limit: int = None, force_reanalyze: bool = False
             
             if not post.post_content:
                 logger.warning(f"  ⚠ No post content available, skipping")
-                post.user_type = UserType.UNKNOWN.value  # Use .value to get lowercase string
+                post.user_type = UserType.UNKNOWN
                 post.confidence_score = 0.0
                 post.gemini_analysis = {"reason": "No post content"}
                 post.analyzed_at = datetime.now()
@@ -81,23 +81,23 @@ async def analyze_pending_posts(limit: int = None, force_reanalyze: bool = False
                 user_name=post.name
             )
             
-            # Map Gemini response to UserType enum value (lowercase)
+            # Map Gemini response to UserType enum objects
             type_mapping = {
-                "CUSTOMER": UserType.CUSTOMER.value,
-                "TUTOR": UserType.TUTOR.value,
-                "UNKNOWN": UserType.UNKNOWN.value
+                "CUSTOMER": UserType.CUSTOMER,
+                "TUTOR": UserType.TUTOR,
+                "UNKNOWN": UserType.UNKNOWN
             }
             
-            post.user_type = type_mapping.get(result["type"], UserType.UNKNOWN.value)
+            post.user_type = type_mapping.get(result["type"], UserType.UNKNOWN)
             post.confidence_score = result["confidence"]
             post.gemini_analysis = result
             post.analyzed_at = datetime.now()
             
             # Update counts
-            if post.user_type == UserType.CUSTOMER.value:
+            if post.user_type == UserType.CUSTOMER:
                 customer_count += 1
                 logger.info(f"  ✓ CUSTOMER (confidence: {result['confidence']:.2f})")
-            elif post.user_type == UserType.TUTOR.value:
+            elif post.user_type == UserType.TUTOR:
                 tutor_count += 1
                 logger.info(f"  ✓ TUTOR (confidence: {result['confidence']:.2f})")
             else:
@@ -143,9 +143,9 @@ async def show_analysis_stats():
         analyzed = db.query(SearchResult).filter(SearchResult.user_type != None).count()
         pending = total - analyzed
         
-        customers = db.query(SearchResult).filter(SearchResult.user_type == UserType.CUSTOMER.value).count()
-        tutors = db.query(SearchResult).filter(SearchResult.user_type == UserType.TUTOR.value).count()
-        unknown = db.query(SearchResult).filter(SearchResult.user_type == UserType.UNKNOWN.value).count()
+        customers = db.query(SearchResult).filter(SearchResult.user_type == UserType.CUSTOMER).count()
+        tutors = db.query(SearchResult).filter(SearchResult.user_type == UserType.TUTOR).count()
+        unknown = db.query(SearchResult).filter(SearchResult.user_type == UserType.UNKNOWN).count()
         
         logger.info("=" * 80)
         logger.info("ANALYSIS STATISTICS")
