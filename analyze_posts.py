@@ -70,27 +70,25 @@ async def analyze_pending_posts(limit: int = None, force_reanalyze: bool = False
                 logger.warning(f"  ⚠ No post content available, skipping")
                 post.user_type = UserType.UNKNOWN
                 post.confidence_score = 0.0
-                post.gemini_analysis = {"reason": "No post content"}
+                post.analysis_message = "No post content"
                 post.analyzed_at = datetime.now()
                 unknown_count += 1
                 continue
-            
+
             # Classify with Gemini
             result = await classifier.classify_user(
                 post_content=post.post_content,
                 user_name=post.name
             )
-            
-            # Map Gemini response to UserType enum objects
+
             type_mapping = {
                 "CUSTOMER": UserType.CUSTOMER,
                 "TUTOR": UserType.TUTOR,
                 "UNKNOWN": UserType.UNKNOWN
             }
-            
             post.user_type = type_mapping.get(result["type"], UserType.UNKNOWN)
             post.confidence_score = result["confidence"]
-            post.gemini_analysis = result
+            post.analysis_message = result.get("reason") or ""
             post.analyzed_at = datetime.now()
             
             # Update counts

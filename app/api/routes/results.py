@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import cast, String
-from typing import Optional
+from typing import Optional, List
 
 from ...core.database import get_db
 from ...services.scraper import ScraperService
@@ -10,7 +10,9 @@ from ...schemas.search_result import (
     SearchResultList,
     SearchResultUpdate,
 )
+from ...schemas.post_comment import PostCommentResponse
 from ...models.search_result import SearchResult, ResultStatus
+from ...models.post_comment import PostComment
 
 router = APIRouter(prefix="/results", tags=["results"])
 
@@ -41,6 +43,16 @@ async def get_results(
         total=total,
         items=[SearchResultResponse.model_validate(r) for r in results],
     )
+
+
+@router.get("/{result_id}/comments", response_model=List[PostCommentResponse])
+async def get_result_comments(result_id: str, db: Session = Depends(get_db)):
+    """Get comments for a specific search result."""
+    result = db.query(SearchResult).filter(SearchResult.id == result_id).first()
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    comments = db.query(PostComment).filter(PostComment.search_result_id == result_id).order_by(PostComment.scraped_at.desc()).all()
+    return [PostCommentResponse.model_validate(c) for c in comments]
 
 
 @router.get("/{result_id}", response_model=SearchResultResponse)

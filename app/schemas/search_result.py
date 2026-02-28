@@ -1,7 +1,7 @@
 from pydantic import BaseModel, ConfigDict
 from datetime import datetime
 from uuid import UUID
-from typing import Optional, List, Dict, Any
+from typing import Optional, List
 from ..models.search_result import ResultStatus
 
 
@@ -28,7 +28,7 @@ class SearchResultResponse(SearchResultBase):
     status: ResultStatus
     user_type: Optional[str] = None
     confidence_score: Optional[float] = None
-    gemini_analysis: Optional[Dict[str, Any]] = None
+    analysis_message: Optional[str] = None
     analyzed_at: Optional[datetime] = None
     scraped_at: datetime
     updated_at: Optional[datetime] = None

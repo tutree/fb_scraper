@@ -1,0 +1,151 @@
+.comments-page {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+.comments-header {
+  margin-bottom: 1.5rem;
+}
+
+.comments-header h1 {
+  font-size: 2rem;
+  color: #1a73e8;
+  margin-bottom: 0.25rem;
+}
+
+.comments-header p {
+  color: #666;
+  font-size: 1rem;
+}
+
+.comments-nav {
+  margin-top: 0.75rem;
+}
+
+.comments-nav .nav-link {
+  color: #1a73e8;
+  text-decoration: none;
+}
+
+.comments-nav .nav-link:hover {
+  text-decoration: underline;
+}
+
+.comments-filters {
+  display: flex;
+  gap: 1.5rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+.comments-filters label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.comments-filters select {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 0.95rem;
+}
+
+.comments-page-error {
+  color: #c00;
+  margin-bottom: 1rem;
+}
+
+.comments-loading {
+  color: #666;
+  margin-bottom: 1rem;
+}
+
+.comments-table-wrap {
+  overflow-x: auto;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  margin-bottom: 1rem;
+}
+
+.comments-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.comments-table th,
+.comments-table td {
+  padding: 0.75rem 1rem;
+  text-align: left;
+  border-bottom: 1px solid #eee;
+}
+
+.comments-table th {
+  background: #f8f9fa;
+  font-weight: 600;
+  color: #333;
+}
+
+.comments-table tbody tr:hover {
+  background: #f8f9fa;
+}
+
+.comments-table .comment-text {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.comments-table .analysis-cell {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.9rem;
+  color: #555;
+}
+
+.comments-table .no-data {
+  text-align: center;
+  color: #666;
+  padding: 2rem;
+}
+
+.comments-table .badge {
+  display: inline-block;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+.comments-table .badge-customer { background: #e3f2fd; color: #1565c0; }
+.comments-table .badge-tutor { background: #e8f5e9; color: #2e7d32; }
+.comments-table .badge-unknown { background: #f5f5f5; color: #616161; }
+
+.comments-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.comments-pagination button {
+  padding: 0.5rem 1rem;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: white;
+  cursor: pointer;
+}
+
+.comments-pagination button:hover:not(:disabled) {
+  background: #f0f0f0;
+}
+
+.comments-pagination button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

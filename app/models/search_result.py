@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, Text, Enum, Integer, Index, Float, JSON
+from sqlalchemy import Column, String, DateTime, Text, Enum, Integer, Index, Float
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -35,8 +35,8 @@ class SearchResult(Base):
     
     # Gemini AI classification fields
     user_type = Column(Enum(UserType, values_callable=lambda x: [e.value for e in x]), nullable=True)
-    gemini_analysis = Column(JSON, nullable=True)  # Full Gemini response
     confidence_score = Column(Float, nullable=True)  # 0-1 confidence
+    analysis_message = Column(Text, nullable=True)  # Reason text from Gemini (no raw JSON)
     analyzed_at = Column(DateTime(timezone=True), nullable=True)
     
     scraped_at = Column(DateTime(timezone=True), server_default=func.now())

@@ -34,6 +34,23 @@ body {
   font-size: 1.1rem;
 }
 
+.header-nav {
+  margin-top: 0.75rem;
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+}
+
+.header-link {
+  color: #1a73e8;
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.header-link:hover {
+  text-decoration: underline;
+}
+
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -279,6 +296,8 @@ select.badge:hover {
 }
 
 .dialog-content {
+  position: relative;
+  z-index: 1001;
   background: white;
   border-radius: 12px;
   max-width: 900px;

@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
+import { Link } from 'react-router-dom'
 import axios from 'axios'
 import './App.css'
 
@@ -19,6 +20,12 @@ function App() {
   const [currentPage, setCurrentPage] = useState(1)
   const [itemsPerPage, setItemsPerPage] = useState(20)
   const [totalItems, setTotalItems] = useState(0)
+  const [comments, setComments] = useState([])
+  const [commentsLoading, setCommentsLoading] = useState(false)
+  const [commentsError, setCommentsError] = useState(null)
+  const [commentsLoadedForId, setCommentsLoadedForId] = useState(null)
+  const [commentsExpanded, setCommentsExpanded] = useState(false)
+  const selectedIdRef = useRef(null)
 
   useEffect(() => {
     fetchData()
@@ -61,13 +68,58 @@ function App() {
 
   const openDetailDialog = (result) => {
     setSelectedResult(result)
+    selectedIdRef.current = result?.id ?? null
     setShowDetailDialog(true)
+    setComments([])
+    setCommentsError(null)
+    setCommentsLoadedForId(null)
+    setCommentsExpanded(false)
   }
 
   const closeDetailDialog = () => {
     setShowDetailDialog(false)
     setSelectedResult(null)
+    selectedIdRef.current = null
+    setComments([])
+    setCommentsError(null)
+    setCommentsLoadedForId(null)
+    setCommentsExpanded(false)
   }
+
+  const fetchComments = async (resultId) => {
+    if (!resultId) return
+    setCommentsLoading(true)
+    setCommentsError(null)
+    try {
+      const res = await axios.get(`${API_BASE}/results/${resultId}/comments`)
+      const list = Array.isArray(res.data) ? res.data : []
+      if (selectedIdRef.current === resultId) {
+        setComments(list)
+        setCommentsLoadedForId(resultId)
+        setCommentsExpanded(true)
+      }
+    } catch (err) {
+      const message = err.response?.data?.detail ?? err.message ?? 'Failed to load comments'
+      if (selectedIdRef.current === resultId) {
+        setComments([])
+        setCommentsError(message)
+        setCommentsLoadedForId(null)
+        setCommentsExpanded(true)
+      }
+    } finally {
+      setCommentsLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    const handleEsc = (e) => {
+      if (e.key === 'Escape') closeDetailDialog()
+    }
+    if (showDetailDialog) {
+      document.addEventListener('keydown', handleEsc)
+      return () => document.removeEventListener('keydown', handleEsc)
+    }
+  }, [showDetailDialog])
 
   const copyToClipboard = (text) => {
     navigator.clipboard.writeText(text)
@@ -124,6 +176,10 @@ function App() {
       <div className="header">
         <h1>Facebook Scraper Dashboard</h1>
         <p>Manage and analyze scraped leads</p>
+        <nav className="header-nav">
+          <Link to="/" className="header-link">Leads</Link>
+          <Link to="/comments" className="header-link">Comments</Link>
+        </nav>
       </div>
 
       {stats && (
@@ -454,12 +510,57 @@ function App() {
                 </div>
               </div>
 
-              {selectedResult.gemini_analysis && (
+              <div className="detail-section" onClick={(e) => e.stopPropagation()}>
+                <h3>Comments</h3>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    e.preventDefault()
+                    if (commentsExpanded && commentsLoadedForId === selectedResult?.id) {
+                      setCommentsExpanded(false)
+                    } else {
+                      fetchComments(selectedResult?.id)
+                    }
+                  }}
+                  disabled={commentsLoading || !selectedResult?.id}
+                >
+                  {commentsLoading ? 'Loading...' : (commentsExpanded && commentsLoadedForId === selectedResult?.id ? 'Hide Comments' : 'View Comments')}
+                </button>
+                {commentsExpanded && commentsLoadedForId === selectedResult?.id && (
+                  <>
+                    {commentsError && (
+                      <p className="comments-error" style={{ marginTop: '12px', color: '#c00', fontSize: '14px' }}>{commentsError}</p>
+                    )}
+                    {!commentsError && comments.length === 0 && !commentsLoading && (
+                      <p className="comments-empty" style={{ marginTop: '12px', color: '#666', fontSize: '14px' }}>No comments for this post.</p>
+                    )}
+                    {!commentsError && comments.length > 0 && (
+                      <div className="comments-list" style={{ marginTop: '12px', maxHeight: '200px', overflowY: 'auto' }}>
+                        {comments.map((c) => (
+                          <div key={c.id} className="comment-item" style={{ padding: '8px', borderBottom: '1px solid #eee', marginBottom: '8px' }}>
+                            <div style={{ fontWeight: 600, marginBottom: '4px' }}>
+                              {c.author_profile_url ? (
+                                <a href={c.author_profile_url} target="_blank" rel="noopener noreferrer">{c.author_name || 'Unknown'}</a>
+                              ) : (
+                                (c.author_name || 'Unknown')
+                              )}
+                              {c.comment_timestamp && <span style={{ color: '#888', fontSize: '12px', marginLeft: '8px' }}>{c.comment_timestamp}</span>}
+                            </div>
+                            <div>{c.comment_text || ''}</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+
+              {selectedResult.analysis_message && (
                 <div className="detail-section">
                   <h3>AI Analysis</h3>
-                  <pre className="analysis-box">
-                    {JSON.stringify(selectedResult.gemini_analysis, null, 2)}
-                  </pre>
+                  <p className="analysis-box" style={{ whiteSpace: 'pre-wrap' }}>{selectedResult.analysis_message}</p>
                 </div>
               )}
             </div>

@@ -99,7 +99,49 @@ Analyze now:
                 "confidence": 0.0,
                 "reason": f"Classification error: {str(e)}"
             }
-    
+
+    async def classify_comment_user(self, comment_text: str, author_name: str = "") -> Dict:
+        """
+        Classify a comment author as potential customer or tutor based on their comment.
+        Used by the comment analyzer (analyze_comments.py).
+
+        Returns:
+            Dict with keys: type (CUSTOMER/TUTOR/UNKNOWN), confidence (0-1), reason
+        """
+        if not comment_text or not comment_text.strip():
+            return {"type": "UNKNOWN", "confidence": 0.0, "reason": "No comment text"}
+        prompt = f"""
+Analyze this comment on a Facebook post (about math tutoring / education) and classify the comment author.
+
+Comment author: {author_name or "Unknown"}
+Comment: {comment_text}
+
+Classification:
+- CUSTOMER: The person is looking for a tutor, asking for recommendations, or saying they need help.
+- TUTOR: The person is offering tutoring, advertising their business, or promoting tutoring services.
+- UNKNOWN: Unclear, irrelevant, or neither (e.g. generic reply, off-topic).
+
+Return ONLY valid JSON in this exact format (no markdown, no extra text):
+{{"type": "CUSTOMER", "confidence": 0.9, "reason": "Asks for tutor recommendations"}}
+"""
+        try:
+            response = self.model.generate_content(prompt)
+            response_text = response.text.strip()
+            if response_text.startswith("```"):
+                response_text = response_text.split("```")[1]
+                if response_text.startswith("json"):
+                    response_text = response_text[4:]
+                response_text = response_text.strip()
+            result = json.loads(response_text)
+            if "type" not in result or "confidence" not in result:
+                raise ValueError("Invalid response structure")
+            result["type"] = result["type"].upper()
+            result["confidence"] = max(0.0, min(1.0, float(result["confidence"])))
+            return result
+        except (json.JSONDecodeError, ValueError, Exception) as e:
+            logger.debug(f"Comment classification failed: {e}")
+            return {"type": "UNKNOWN", "confidence": 0.0, "reason": str(e)[:200]}
+
     async def batch_classify(self, posts: list) -> list:
         """
         Classify multiple posts in batch.

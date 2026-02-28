@@ -11,6 +11,7 @@ from ..models.post_comment import PostComment
 from ..core.config import settings
 from ..core.logging_config import get_logger
 from tenacity import retry, stop_after_attempt, wait_exponential
+from .facebook_comment_fix import EXTRACT_FROM_DIALOG_JS
 
 logger = get_logger(__name__)
 
@@ -244,85 +245,65 @@ class FacebookScraper:
             # Wait for comments to render
             await asyncio.sleep(2)
             
-            # STEP 4: Extract comments using JavaScript
+            # STEP 4: Extract comments using JavaScript (innerText, Comment-by filter, obfuscation rejection)
             logger.info(f"  Extracting comment data from page...")
             comments_data = await page.evaluate(
                 """
                 (maxComments) => {
                     const comments = [];
                     const seen = new Set();
-                    
-                    // Strategy 1: Look for comment containers with specific structure
-                    // Facebook comments usually have a structure with author link + comment text
-                    const allLinks = document.querySelectorAll('a[href*="/user/"], a[href*="facebook.com/"]');
-                    
-                    for (const link of allLinks) {
+                    function getText(el) { return el ? (el.innerText || el.textContent || '').trim() : ''; }
+                    function isObfuscated(text) {
+                        if (!text || text.length < 10) return true;
+                        if (/shared with public/i.test(text)) return true;
+                        if (/february|january|march|april|may|june|july|august|september|october|november|december/i.test(text) && /at \\d|\\d+:\\d+/.test(text)) return true;
+                        if ((text.match(/-/g) || []).length > 3 && text.length < 80) return true;
+                        if (/^[^a-zA-Z]*[a-zA-Z]-+[a-zA-Z]-+[a-zA-Z]/.test(text)) return true;
+                        return false;
+                    }
+                    const SKIP = /^(Like|Reply|Share|Comment|Facebook|Anonymous participant|\\d+[smhd]|Just now|Yesterday|See more|\\d+ min|\\d+ hr|\\d+ (w|d|m|y))/i;
+                    function isProfileUrl(url) {
+                        if (!url || !url.includes('facebook.com')) return false;
+                        if (url.includes('/groups/') || url.includes('/pages/') || url.includes('/events/')) return false;
+                        return true;
+                    }
+
+                    const articles = document.querySelectorAll('div[role="article"][aria-label^="Comment by"]');
+                    for (const parent of articles) {
                         if (comments.length >= maxComments) break;
-                        
-                        // Get the author name and URL
-                        const authorName = link.textContent.trim();
-                        const authorUrl = link.href;
-                        
+                        const authorLink = parent.querySelector('a[href*="facebook.com"]');
+                        if (!authorLink || !isProfileUrl(authorLink.href)) continue;
+                        const authorName = getText(authorLink);
+                        const authorUrl = authorLink.href;
                         if (!authorName || authorName.length < 2) continue;
                         if (seen.has(authorUrl)) continue;
-                        
-                        // Look for comment text near this author link
-                        // Comments are usually in a parent container
-                        let parent = link.closest('div[role="article"]') || 
-                                    link.closest('li') || 
-                                    link.closest('div[data-visualcompletion]');
-                        
-                        if (!parent) {
-                            // Try going up a few levels
-                            parent = link.parentElement?.parentElement?.parentElement;
-                        }
-                        
-                        if (!parent) continue;
-                        
-                        // Extract comment text from the parent container
+
                         let commentText = '';
-                        const textDivs = parent.querySelectorAll('div[dir="auto"]');
-                        
-                        for (const div of textDivs) {
-                            const text = div.textContent.trim();
-                            // Skip if it's the author name or action buttons
-                            if (text && 
-                                text.length > 10 && 
-                                text !== authorName &&
-                                !text.match(/^(Like|Reply|Share|Comment|[0-9]+[smhd]|Just now|Yesterday)$/i)) {
-                                commentText = text;
+                        const textDivs = parent.querySelectorAll('div[dir="auto"][style*="text-align"], div[dir="auto"], span[dir="auto"]');
+                        for (const d of textDivs) {
+                            const t = getText(d);
+                            if (t && t.length > 10 && t !== authorName && !SKIP.test(t) && !isObfuscated(t)) {
+                                commentText = t;
                                 break;
                             }
                         }
-                        
-                        // If no comment text found, try getting all text from parent
                         if (!commentText) {
-                            const allText = parent.textContent;
-                            const lines = allText.split('\\n')
-                                .map(l => l.trim())
-                                .filter(l => 
-                                    l.length > 10 && 
-                                    l !== authorName &&
-                                    !l.match(/^(Like|Reply|Share|Comment|[0-9]+[smhd]|Just now|Yesterday)$/i)
-                                );
-                            if (lines.length > 0) {
-                                commentText = lines[0];
-                            }
+                            const lines = getText(parent).split('\\n').map(l => l.trim()).filter(l =>
+                                l.length > 10 && l !== authorName && !SKIP.test(l) && !isObfuscated(l)
+                            );
+                            if (lines.length) commentText = lines[0];
                         }
-                        
-                        // Extract timestamp
+
                         let timestamp = null;
-                        const timeSpans = parent.querySelectorAll('span');
-                        for (const span of timeSpans) {
-                            const text = span.textContent.trim();
-                            if (text.match(/[0-9]+[smhd]|Just now|Yesterday|[0-9]+ min|[0-9]+ hr/i)) {
-                                timestamp = text;
+                        for (const s of parent.querySelectorAll('span, abbr')) {
+                            const t = getText(s);
+                            if (/\\d+[smhd]|Just now|Yesterday|\\d+ min|\\d+ hr|\\d+ (w|d|m|y)/i.test(t)) {
+                                timestamp = t;
                                 break;
                             }
                         }
-                        
-                        // Only add if we have both author and comment text
-                        if (authorName && commentText && commentText.length > 5) {
+
+                        if (authorName && commentText && commentText.length > 5 && !isObfuscated(commentText)) {
                             seen.add(authorUrl);
                             comments.push({
                                 author_name: authorName,
@@ -332,7 +313,6 @@ class FacebookScraper:
                             });
                         }
                     }
-                    
                     return comments;
                 }
                 """,
@@ -366,6 +346,94 @@ class FacebookScraper:
         except Exception as e:
             logger.error(f"  ✗ Error extracting comments: {e}")
             return 0
+
+    async def _click_comments_and_extract_from_dialog(
+        self, page: Page, profile_url: str, max_comments: int = 10
+    ) -> List[Dict]:
+        """
+        On the search results page: find the post containing this profile link,
+        click its Comments button to open the dialog, extract comments, then close with ESC.
+        Returns list of comment dicts (author_name, author_profile_url, comment_text, comment_timestamp).
+        Caller should persist these after profile extraction and storage (when search_result_id is known).
+        """
+        comments_data = []
+        try:
+            # Normalize profile URL for matching (strip trailing slash, lowercase for comparison)
+            profile_path = profile_url.split("?")[0].rstrip("/").lower()
+
+            # Find the article containing this profile link and click its Comments button
+            clicked = await page.evaluate(
+                """
+                (profilePath) => {
+                    const pathToMatch = profilePath;
+                    const articles = document.querySelectorAll('div[role="article"]');
+                    for (const article of articles) {
+                        const anchors = article.querySelectorAll('a[href]');
+                        let match = false;
+                        for (const a of anchors) {
+                            const href = (a.href || '').split('?')[0].replace(/\\/$/, '').toLowerCase();
+                            if (pathToMatch && href && (href.includes(pathToMatch) || pathToMatch.includes(href))) {
+                                match = true;
+                                break;
+                            }
+                        }
+                        if (!match) continue;
+
+                        // Click "X comments" (e.g. "12 comments") - NOT "Comment" or "Leave a comment"
+                        const buttons = article.querySelectorAll('div[role="button"]');
+                        for (const btn of buttons) {
+                            const text = (btn.textContent || '').trim();
+                            if (/\\d+\\s*comments?/i.test(text) && !/leave\\s*a\\s*comment/i.test(text)) {
+                                btn.click();
+                                return true;
+                            }
+                        }
+                        const spans = article.querySelectorAll('span');
+                        for (const s of spans) {
+                            const t = (s.textContent || '').trim();
+                            if (/^\\d+\\s*comments?$/i.test(t) && s.offsetParent) {
+                                s.click();
+                                return true;
+                            }
+                        }
+                        return false;
+                    }
+                    return false;
+                }
+                """,
+                profile_path,
+            )
+
+            if not clicked:
+                logger.info("  Comments button not found for this post, skipping dialog extraction")
+                return comments_data
+
+            await asyncio.sleep(random.uniform(2, 3))  # Wait for dialog to open
+
+            try:
+                view_more = await page.query_selector('[role="dialog"] div[role="button"]:has-text("View more comments"), [role="dialog"] span:has-text("View more comments")')
+                if view_more:
+                    await view_more.click()
+                    await asyncio.sleep(random.uniform(1.5, 2.5))
+            except Exception:
+                pass
+
+            # Extract comments from the dialog (innerText, Comment-by filter, obfuscation rejection)
+            comments_data = await page.evaluate(EXTRACT_FROM_DIALOG_JS, max_comments)
+
+            logger.info(f"  Extracted {len(comments_data)} comments from dialog")
+
+        except Exception as e:
+            logger.warning(f"  Could not extract comments from dialog: {e}")
+        finally:
+            # Always close dialog with ESC
+            try:
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.5)
+            except Exception:
+                pass
+
+        return comments_data
 
     @retry(
         stop=stop_after_attempt(3),
@@ -858,22 +926,34 @@ class FacebookScraper:
         
         filtered_links = user_links  # JS already deduplicates
         logger.info(f"Processing {len(filtered_links)} links sequentially (one at a time)")
-        
-        # Process links ONE AT A TIME to avoid Facebook rate limiting
+        use_index_based_comments = (page_diag.get("articles", 0) == 0 and page_diag.get("feed"))
+
+        # One loop per profile: scrape comments for THIS post → visit THIS profile → save to DB → next
         for i, link in enumerate(filtered_links):
             if users_saved >= max_results:
                 logger.info(f"Reached max_results ({max_results}), stopping")
                 break
-            
-            logger.info(f"Processing link {i+1}/{len(filtered_links)}")
-            
-            # Create a new page for this profile
+
+            logger.info(f"Processing link {i+1}/{len(filtered_links)}: {link.get('text', '') or link['url'][:50]}")
+
+            # 1) Scrape comments for this post (on search page), then we'll save with this profile
+            comments_data = []
+            try:
+                if use_index_based_comments:
+                    from .facebook_comment_fix import extract_comments_from_post_on_search_page
+                    comments_data = await extract_comments_from_post_on_search_page(page, i, max_comments=20)
+                else:
+                    comments_data = await self._click_comments_and_extract_from_dialog(page, link["url"], max_comments=10)
+                if comments_data:
+                    logger.info(f"  Scraped {len(comments_data)} comments (will save with this profile)")
+            except Exception as e:
+                logger.debug(f"  Comment extraction skipped: {e}")
+
+            # 2) Fetch profile and store to DB (with the comments we just scraped)
             account_uid = getattr(self, '_current_account', {}).get('uid', '')
             new_page = await self.browser_manager.create_page_with_cookies(account_uid)
-            
-            # Process the profile
             try:
-                result = await self._process_single_profile(new_page, link, keyword, i + 1, len(filtered_links))
+                result = await self._process_single_profile(new_page, link, keyword, i + 1, len(filtered_links), comments_data=comments_data)
                 if result:  # Successfully saved
                     users_saved += 1
                     logger.info(f"✓ Progress: {users_saved}/{max_results} profiles saved")
@@ -889,8 +969,9 @@ class FacebookScraper:
         logger.info(f"✓ Completed: {users_saved} users saved to database")
         return users_saved
 
-    async def _process_single_profile(self, page, link, keyword, idx, total):
-        """Process a single profile and return True if saved successfully."""
+    async def _process_single_profile(self, page, link, keyword, idx, total, comments_data: Optional[List[Dict]] = None):
+        """Process a single profile and return True if saved successfully.
+        If comments_data is provided (from search results dialog), they will be saved once the profile is stored."""
         link_url = link['url']
         name = link['text']
         link_type = link['type']
@@ -1071,7 +1152,25 @@ class FacebookScraper:
                     self.db.add(search_result)
                     self.db.commit()
                     logger.info(f"  ✓ Saved to database (ID: {search_result.id})")
-                    
+
+                    # Save comments from search results dialog (if we scraped them before visiting profile)
+                    if comments_data:
+                        try:
+                            for c in comments_data:
+                                pc = PostComment(
+                                    search_result_id=search_result.id,
+                                    author_name=c.get("author_name"),
+                                    author_profile_url=c.get("author_profile_url"),
+                                    comment_text=c.get("comment_text"),
+                                    comment_timestamp=c.get("comment_timestamp"),
+                                )
+                                self.db.add(pc)
+                            self.db.commit()
+                            logger.info(f"  ✓ Saved {len(comments_data)} comments from search results dialog")
+                        except Exception as e:
+                            logger.warning(f"  Failed to save dialog comments: {e}")
+                            self.db.rollback()
+
                     # Extract comments from user's recent posts on their profile
                     # Since search results don't provide post URLs, we scrape from profile
                     try:
@@ -1137,6 +1236,35 @@ class FacebookScraper:
                     return False
             else:
                 logger.info(f"  ✗ Not a personal profile (group/page) — skipping")
+                # Still save a SearchResult (INVALID) so we can attach scraped comments and not lose them
+                if comments_data:
+                    try:
+                        search_result = SearchResult(
+                            name=final_name or "Unknown",
+                            location=location_text,
+                            post_content=post_content,
+                            post_url=post_url,
+                            profile_url=profile_url,
+                            search_keyword=keyword,
+                            status=ResultStatus.INVALID,
+                        )
+                        self.db.add(search_result)
+                        self.db.commit()
+                        logger.info(f"  ✓ Saved as INVALID (ID: {search_result.id}) to store {len(comments_data)} comments")
+                        for c in comments_data:
+                            pc = PostComment(
+                                search_result_id=search_result.id,
+                                author_name=c.get("author_name"),
+                                author_profile_url=c.get("author_profile_url"),
+                                comment_text=c.get("comment_text"),
+                                comment_timestamp=c.get("comment_timestamp"),
+                            )
+                            self.db.add(pc)
+                        self.db.commit()
+                        logger.info(f"  ✓ Saved {len(comments_data)} comments")
+                    except Exception as e:
+                        logger.warning(f"  Failed to save skipped profile + comments: {e}")
+                        self.db.rollback()
                 await page.close()
                 return False
             
