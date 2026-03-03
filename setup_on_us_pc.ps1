@@ -58,7 +58,7 @@ Write-Host "To start the scraper, run:" -ForegroundColor Yellow
 Write-Host "  .\start_scraper_us_pc.ps1" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Or double-click:" -ForegroundColor Yellow
-Write-Host "  start_scraper_us_pc.bat" -ForegroundColor Cyan
+Write-Host "  scripts\\launchers\\start_scraper_us_pc.bat" -ForegroundColor Cyan
 Write-Host ""
 
 Read-Host "Press Enter to exit"

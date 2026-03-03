@@ -6,7 +6,7 @@ echo "🚀 Starting Facebook Scraper..."
 
 # Check if virtual environment exists
 if [ ! -d "venv" ]; then
-    echo "❌ Virtual environment not found. Please run setup.sh first."
+    echo "❌ Virtual environment not found. Please run ./scripts/launchers/setup.sh first."
     exit 1
 fi
 

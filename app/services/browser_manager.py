@@ -205,8 +205,9 @@ STEALTH_SCRIPT = """
 
 
 class BrowserManager:
-    def __init__(self, proxy_manager: Optional[ProxyManager] = None):
+    def __init__(self, proxy_manager: Optional[ProxyManager] = None, headless: bool = True):
         self.proxy_manager = proxy_manager
+        self.headless = headless
         self.browser: Optional[Browser] = None
         self.playwright = None
         
@@ -241,7 +242,7 @@ class BrowserManager:
             logger.info("Playwright started")
 
             launch_options = {
-                "headless": True,  # Must be True in Docker/production
+                "headless": self.headless,  # Use instance configuration (default True)
                 "args": [
                     "--disable-blink-features=AutomationControlled",
                     "--disable-dev-shm-usage",
