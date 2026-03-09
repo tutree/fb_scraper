@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import App from './App.jsx'
 import CommentsPage from './pages/CommentsPage.jsx'
+import ScraperPage from './pages/ScraperPage.jsx'
 import './index.css'
 
 ReactDOM.createRoot(document.getElementById('root')).render(
@@ -11,6 +12,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
       <Routes>
         <Route path="/" element={<App />} />
         <Route path="/comments" element={<CommentsPage />} />
+        <Route path="/scraper" element={<ScraperPage />} />
       </Routes>
     </BrowserRouter>
   </React.StrictMode>,

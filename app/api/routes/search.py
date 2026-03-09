@@ -1,34 +1,95 @@
-from fastapi import APIRouter, Depends, BackgroundTasks
-from sqlalchemy.orm import Session
-from typing import List, Optional
-from datetime import datetime
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from threading import Lock
 import uuid
 
-from ...core.database import get_db
+from ...core.database import SessionLocal
+from ...core.logging_config import get_recent_logs
 from ...services.scraper import ScraperService
-from ...schemas.search import SearchRequest, SearchResponse
+from ...core.logging_config import get_logger
+from ...schemas.search import (
+    SearchRequest,
+    SearchResponse,
+    SearchTaskDetail,
+    SearchStopResponse,
+    SearchLogsResponse,
+)
 
 router = APIRouter(prefix="/search", tags=["search"])
+logger = get_logger(__name__)
 
 # In-memory task store (swap for Redis in production)
-tasks: dict = {}
+tasks: Dict[str, Dict[str, Any]] = {}
+current_task_id: Optional[str] = None
+last_task_id: Optional[str] = None
+tasks_lock = Lock()
+ACTIVE_STATUSES = {"running", "stopping"}
+TERMINAL_STATUSES = {"completed", "failed", "stopped"}
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _to_task_detail(task_id: Optional[str], task: Optional[Dict[str, Any]]) -> SearchTaskDetail:
+    if not task_id or not task:
+        return SearchTaskDetail(
+            task_id=None,
+            status="idle",
+            message="No active scraper task",
+        )
+
+    status = str(task.get("status") or "idle")
+    return SearchTaskDetail(
+        task_id=task_id,
+        status=status,
+        message=f"Task status: {status}",
+        created_at=task.get("created_at"),
+        updated_at=task.get("updated_at"),
+        stop_requested=bool(task.get("stop_requested", False)),
+        requested_keywords=task.get("requested_keywords"),
+        requested_max_results=task.get("requested_max_results"),
+        result=task.get("result"),
+        error=task.get("error"),
+    )
 
 
 @router.post("/start", response_model=SearchResponse)
 async def start_search(
     request: SearchRequest,
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
 ):
     """Start a new search task."""
+    global current_task_id, last_task_id
+
+    with tasks_lock:
+        if current_task_id:
+            current = tasks.get(current_task_id)
+            if current and current.get("status") in ACTIVE_STATUSES:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Task {current_task_id} is already {current.get('status')}",
+                )
+
     task_id = str(uuid.uuid4())
 
     # Store task info
-    tasks[task_id] = {
-        "id": task_id,
-        "status": "running",
-        "created_at": datetime.now().isoformat(),
-    }
+    now = _now_iso()
+    with tasks_lock:
+        tasks[task_id] = {
+            "id": task_id,
+            "status": "running",
+            "created_at": now,
+            "updated_at": now,
+            "stop_requested": False,
+            "requested_keywords": request.keywords,
+            "requested_max_results": request.max_results or 100,
+            "result": None,
+            "error": None,
+        }
+        current_task_id = task_id
+        last_task_id = task_id
 
     # Run search in background
     background_tasks.add_task(
@@ -36,7 +97,6 @@ async def start_search(
         task_id,
         request.keywords,
         request.max_results or 100,
-        db,
     )
 
     return SearchResponse(
@@ -49,12 +109,11 @@ async def start_search(
 @router.get("/task/{task_id}", response_model=SearchResponse)
 async def get_task_status(task_id: str):
     """Get status of a search task."""
-    if task_id not in tasks:
-        from fastapi import HTTPException
-
+    with tasks_lock:
+        task = tasks.get(task_id)
+    if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    task = tasks[task_id]
     return SearchResponse(
         task_id=task_id,
         message=f"Task status: {task['status']}",
@@ -62,21 +121,101 @@ async def get_task_status(task_id: str):
     )
 
 
+@router.get("/current", response_model=SearchTaskDetail)
+async def get_current_task() -> SearchTaskDetail:
+    """Get details of the current scraper task if any."""
+    with tasks_lock:
+        task_id = current_task_id or last_task_id
+        task = tasks.get(task_id) if task_id else None
+    return _to_task_detail(task_id, task)
+
+
+@router.post("/stop", response_model=SearchStopResponse)
+async def stop_search() -> SearchStopResponse:
+    """Request stop for the currently running scraper task."""
+    with tasks_lock:
+        task_id = current_task_id
+        task = tasks.get(task_id) if task_id else None
+
+        if not task_id or not task:
+            return SearchStopResponse(
+                task_id=None,
+                status="idle",
+                message="No active scraper task",
+            )
+
+        status = str(task.get("status") or "idle")
+        if status not in ACTIVE_STATUSES:
+            return SearchStopResponse(
+                task_id=task_id,
+                status=status,
+                message=f"Task is already {status}",
+            )
+
+        task["stop_requested"] = True
+        task["status"] = "stopping"
+        task["updated_at"] = _now_iso()
+
+    return SearchStopResponse(
+        task_id=task_id,
+        status="stopping",
+        message="Stop requested",
+    )
+
+
+@router.get("/logs", response_model=SearchLogsResponse)
+async def get_search_logs(
+    lines: int = Query(200, ge=1, le=2000),
+) -> SearchLogsResponse:
+    """Return recent application logs for scraper monitoring."""
+    return SearchLogsResponse(lines=get_recent_logs(lines=lines))
+
+
 async def run_search_task(
     task_id: str,
     keywords: Optional[List[str]],
     max_results: int,
-    db: Session,
 ) -> None:
     """Background task for searching."""
-    try:
-        scraper = ScraperService(db)
-        result = await scraper.run_search(keywords, max_results)
+    global current_task_id
 
-        tasks[task_id]["status"] = (
-            "completed" if result["success"] else "failed"
+    def should_stop() -> bool:
+        with tasks_lock:
+            task = tasks.get(task_id)
+            return bool(task and task.get("stop_requested"))
+
+    db = SessionLocal()
+    try:
+        logger.info("Background scraper task %s started", task_id)
+        scraper = ScraperService(db)
+        result = await scraper.run_search(
+            keywords,
+            max_results,
+            should_stop=should_stop,
         )
-        tasks[task_id]["result"] = result
+
+        if result.get("stopped"):
+            final_status = "stopped"
+        else:
+            final_status = "completed" if result.get("success") else "failed"
+
+        with tasks_lock:
+            if task_id in tasks:
+                tasks[task_id]["status"] = final_status
+                tasks[task_id]["result"] = result
+                tasks[task_id]["updated_at"] = _now_iso()
+        logger.info("Background scraper task %s finished with status=%s", task_id, final_status)
     except Exception as e:
-        tasks[task_id]["status"] = "failed"
-        tasks[task_id]["error"] = str(e)
+        logger.exception("Background scraper task %s failed: %s", task_id, e)
+        with tasks_lock:
+            if task_id in tasks:
+                tasks[task_id]["status"] = "failed"
+                tasks[task_id]["error"] = str(e)
+                tasks[task_id]["updated_at"] = _now_iso()
+    finally:
+        db.close()
+        with tasks_lock:
+            if current_task_id == task_id:
+                task = tasks.get(task_id)
+                if not task or task.get("status") in TERMINAL_STATUSES:
+                    current_task_id = None

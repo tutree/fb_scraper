@@ -1,6 +1,8 @@
 from playwright.async_api import async_playwright, Browser, Page
-from typing import Optional
+from typing import Optional, Dict, Any, List, Tuple
 import random
+import json
+from pathlib import Path
 from tenacity import retry, stop_after_attempt, wait_exponential
 from ..services.proxy_manager import ProxyManager
 from ..core.logging_config import get_logger
@@ -230,6 +232,115 @@ class BrowserManager:
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
         ]
 
+    def _cookie_dirs(self) -> List[Path]:
+        """Directories to search for cookie files."""
+        return [Path("cookies"), Path("config/cookies")]
+
+    def _normalize_same_site(self, value: Optional[str]) -> str:
+        raw = (value or "").strip().lower()
+        if raw in {"lax"}:
+            return "Lax"
+        if raw in {"strict"}:
+            return "Strict"
+        return "None"
+
+    def _normalize_cookie(self, cookie: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        name = cookie.get("name")
+        value = cookie.get("value")
+        domain = cookie.get("domain")
+        path = cookie.get("path") or "/"
+
+        if not name or value is None or not domain:
+            return None
+
+        expires = cookie.get("expires")
+        if expires is None:
+            expires = cookie.get("expirationDate")
+        if expires is None:
+            expires = -1
+
+        try:
+            expires = float(expires)
+        except Exception:
+            expires = -1
+
+        return {
+            "name": str(name),
+            "value": str(value),
+            "domain": str(domain),
+            "path": str(path),
+            "expires": expires,
+            "httpOnly": bool(cookie.get("httpOnly", False)),
+            "secure": bool(cookie.get("secure", True)),
+            "sameSite": self._normalize_same_site(cookie.get("sameSite")),
+        }
+
+    def _parse_storage_state(self, data: Any) -> Optional[Dict[str, Any]]:
+        """Accept both Playwright storage_state dict and raw cookie list exports."""
+        cookies: List[Dict[str, Any]]
+        origins: List[Dict[str, Any]] = []
+
+        if isinstance(data, dict) and isinstance(data.get("cookies"), list):
+            cookies = data.get("cookies", [])
+            maybe_origins = data.get("origins")
+            if isinstance(maybe_origins, list):
+                origins = maybe_origins
+        elif isinstance(data, list):
+            cookies = data
+        else:
+            return None
+
+        normalized = []
+        for cookie in cookies:
+            if not isinstance(cookie, dict):
+                continue
+            item = self._normalize_cookie(cookie)
+            if item:
+                normalized.append(item)
+
+        if not normalized:
+            return None
+
+        return {"cookies": normalized, "origins": origins}
+
+    def _read_json_file(self, file_path: Path) -> Optional[Any]:
+        try:
+            with open(file_path, "r", encoding="utf-8-sig") as f:
+                return json.load(f)
+        except Exception as exc:
+            logger.warning("Failed to parse cookie file '%s': %s", file_path, exc)
+            return None
+
+    def _extract_c_user(self, cookies: List[Dict[str, Any]]) -> Optional[str]:
+        for cookie in cookies:
+            if cookie.get("name") == "c_user":
+                value = cookie.get("value")
+                if value:
+                    return str(value)
+        return None
+
+    def _load_storage_state_for_uid(
+        self,
+        account_uid: str,
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Path]]:
+        """Load storage_state by uid, searching multiple directories and formats."""
+        candidates: List[Path] = []
+        for directory in self._cookie_dirs():
+            if directory.exists():
+                candidates.append(directory / f"{account_uid}.json")
+
+        for file_path in candidates:
+            if not file_path.exists():
+                continue
+            raw_data = self._read_json_file(file_path)
+            if raw_data is None:
+                continue
+            storage_state = self._parse_storage_state(raw_data)
+            if storage_state:
+                return storage_state, file_path
+
+        return None, None
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=10),
@@ -361,34 +472,37 @@ class BrowserManager:
     
     async def create_page_with_cookies(self, account_uid: str) -> Page:
         """Create a page and load saved cookies for the account if available."""
-        from pathlib import Path
-        import json
-        
         logger.info(f"Creating browser page for account: {account_uid}")
         browser = await self.get_browser()
-        
+
         # Randomize viewport and user agent
         viewport = random.choice(self.viewports)
         user_agent = random.choice(self.user_agents)
         logger.info(f"Using viewport: {viewport['width']}x{viewport['height']}")
-        
-        # Check for saved cookies
-        cookies_dir = Path("cookies")
-        cookies_dir.mkdir(exist_ok=True)
-        cookies_file = cookies_dir / f"{account_uid}.json"
-        
-        storage_state = None
-        if cookies_file.exists():
-            logger.info(f"Found saved session for {account_uid}, loading cookies...")
+
+        for directory in self._cookie_dirs():
             try:
-                with open(cookies_file, 'r') as f:
-                    storage_state = json.load(f)
-                logger.info("✓ Cookies loaded successfully")
-            except Exception as e:
-                logger.warning(f"Failed to load cookies: {e}")
+                directory.mkdir(exist_ok=True)
+            except Exception:
+                pass
+
+        storage_state, storage_path = self._load_storage_state_for_uid(account_uid)
+        if storage_state:
+            c_user = self._extract_c_user(storage_state.get("cookies", []))
+            logger.info(
+                "Found saved session for %s from %s (cookies=%d, c_user=%s)",
+                account_uid,
+                storage_path,
+                len(storage_state.get("cookies", [])),
+                c_user or "unknown",
+            )
         else:
-            logger.info(f"No saved session found for {account_uid}")
-        
+            logger.info(
+                "No saved session found for %s in cookie dirs: %s",
+                account_uid,
+                ", ".join(str(d) for d in self._cookie_dirs()),
+            )
+
         # Create context with or without cookies
         context = await browser.new_context(
             viewport=viewport,
@@ -400,25 +514,25 @@ class BrowserManager:
             device_scale_factor=1,
             storage_state=storage_state,
         )
-        
+
         # NOTE: Resource blocking disabled - it was causing timeouts with high-latency proxy
         # Facebook pages need all resources to load properly
         logger.info("Resource blocking disabled - loading all resources for compatibility")
-        
+
         # Inject comprehensive stealth scripts
         logger.info("Injecting stealth scripts...")
         await context.add_init_script(STEALTH_SCRIPT)
-        
+
         page = await context.new_page()
         # Set reasonable timeouts for high-latency proxy
         page.set_default_navigation_timeout(120000)  # 2 minutes for navigation
         page.set_default_timeout(60000)  # 1 minute for other operations
-        logger.info("✓ Browser page created with stealth configuration")
-        
+        logger.info("Browser page created with stealth configuration")
+
         # Store context reference for saving cookies later
         page._kiro_context = context
         page._kiro_account_uid = account_uid
-        
+
         return page
     
     async def save_cookies(self, page: Page) -> bool:

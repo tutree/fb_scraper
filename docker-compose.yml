@@ -1,44 +1,89 @@
 services:
   postgres:
-    image: postgres:15
+    image: postgres:15-alpine
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: scraper
-      POSTGRES_PASSWORD: scraper123
-      POSTGRES_DB: math_tutor_db
+      POSTGRES_USER: ${POSTGRES_USER:-scraper}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-scraper123}
+      POSTGRES_DB: ${POSTGRES_DB:-math_tutor_db}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U scraper"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-scraper} -d ${POSTGRES_DB:-math_tutor_db}"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+    networks:
+      - scraper_network
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     networks:
       - scraper_network
 
   api:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql://scraper:scraper123@postgres:5432/math_tutor_db
-      REDIS_URL: redis://localhost:6379
-      FACEBOOK_EMAIL: ${FACEBOOK_EMAIL}
-      FACEBOOK_PASSWORD: ${FACEBOOK_PASSWORD}
-      PROXY_LIST: ${PROXY_LIST}
-      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-scraper}:${POSTGRES_PASSWORD:-scraper123}@postgres:5432/${POSTGRES_DB:-math_tutor_db}
+      REDIS_URL: redis://redis:6379
+      FACEBOOK_EMAIL: ${FACEBOOK_EMAIL:-}
+      FACEBOOK_PASSWORD: ${FACEBOOK_PASSWORD:-}
+      PROXY_LIST: ${PROXY_LIST:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      API_V1_PREFIX: ${API_V1_PREFIX:-/api/v1}
+      PROJECT_NAME: ${PROJECT_NAME:-Math Tutor Scraper API}
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${API_PORT:-8000}:8000"
     volumes:
       - ./config:/app/config
       - ./cookies:/app/cookies
-      - ./logs:/app/logs
-      - .:/app
+      - scraper_logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - scraper_network
+
+  frontend:
+    build:
+      context: ./admin-dashboard
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
     networks:
       - scraper_network
 
 volumes:
   postgres_data:
+  redis_data:
+  scraper_cookies:
+  scraper_logs:
 
 networks:
   scraper_network:

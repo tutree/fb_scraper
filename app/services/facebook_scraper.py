@@ -1,5 +1,5 @@
-from playwright.async_api import Page
-from typing import List, Dict, Optional
+﻿from playwright.async_api import Page
+from typing import List, Dict, Optional, Callable
 import asyncio
 import random
 import json
@@ -11,7 +11,7 @@ from ..models.post_comment import PostComment
 from ..core.config import settings
 from ..core.logging_config import get_logger
 from tenacity import retry, stop_after_attempt, wait_exponential
-from .facebook_comment_fix import EXTRACT_FROM_DIALOG_JS
+from .facebook_comment_fix import EXTRACT_FROM_DIALOG_JS, expand_all_comments_in_dialog
 
 logger = get_logger(__name__)
 
@@ -19,7 +19,7 @@ logger = get_logger(__name__)
 async def _human_mouse_move(page: Page, x: int, y: int) -> None:
     """Move mouse along a curved path to look human (not a straight teleport)."""
     try:
-        # Current position unknown — start from a plausible location
+        # Current position unknown â€” start from a plausible location
         start_x = random.randint(200, 900)
         start_y = random.randint(200, 600)
         steps = random.randint(10, 25)
@@ -41,7 +41,7 @@ async def human_scroll(page: Page, scrolls: int = None) -> None:
         scrolls = random.randint(3, 6)
     
     for _ in range(scrolls):
-        # Random scroll distance — vary speed via multiple small steps
+        # Random scroll distance â€” vary speed via multiple small steps
         scroll_amount = random.randint(300, 800)
         steps = random.randint(3, 8)
         per_step = scroll_amount // steps
@@ -106,31 +106,140 @@ async def warmup_session(page: Page) -> None:
         logger.warning(f"Warmup session error (non-critical): {e}")
 
 CREDENTIALS_PATH = Path("config/credentials.json")
+COOKIE_DIRS = [Path("cookies"), Path("config/cookies")]
 
+
+def _extract_c_user_from_cookie_json(data: object) -> Optional[str]:
+    if isinstance(data, dict):
+        cookies = data.get("cookies")
+        if not isinstance(cookies, list):
+            return None
+    elif isinstance(data, list):
+        cookies = data
+    else:
+        return None
+
+    for cookie in cookies:
+        if isinstance(cookie, dict) and cookie.get("name") == "c_user":
+            value = cookie.get("value")
+            if value:
+                return str(value)
+    return None
+
+
+def _cookie_uid_order() -> List[str]:
+    """Return cookie-backed account ids ordered by freshest cookie file first."""
+    uid_mtime: Dict[str, float] = {}
+    for directory in COOKIE_DIRS:
+        if not directory.exists():
+            continue
+        for cookie_file in directory.glob("*.json"):
+            try:
+                mtime = cookie_file.stat().st_mtime
+            except Exception:
+                mtime = 0.0
+
+            stem = cookie_file.stem.strip()
+            if stem.isdigit():
+                uid_mtime[stem] = max(uid_mtime.get(stem, 0.0), mtime)
+
+            try:
+                with open(cookie_file, "r", encoding="utf-8-sig") as f:
+                    data = json.load(f)
+                c_user = _extract_c_user_from_cookie_json(data)
+                if c_user:
+                    uid_mtime[c_user] = max(uid_mtime.get(c_user, 0.0), mtime)
+            except Exception:
+                continue
+
+    return [
+        uid
+        for uid, _ in sorted(uid_mtime.items(), key=lambda item: item[1], reverse=True)
+    ]
 
 def load_accounts() -> List[Dict]:
     """Load Facebook accounts from credentials file."""
     logger.info(f"Loading Facebook accounts from: {CREDENTIALS_PATH.absolute()}")
     
     if CREDENTIALS_PATH.exists():
-        with open(CREDENTIALS_PATH) as f:
-            data = json.load(f)
+        try:
+            # utf-8-sig tolerates BOM-prefixed JSON files commonly produced on Windows.
+            with open(CREDENTIALS_PATH, encoding="utf-8-sig") as f:
+                data = json.load(f)
+
             all_accounts = data.get("facebook_accounts", [])
             active_accounts = [a for a in all_accounts if a.get("active")]
+            cookie_uid_order = _cookie_uid_order()
             logger.info(f"Found {len(all_accounts)} total accounts, {len(active_accounts)} active")
-            
-            if not active_accounts:
-                logger.warning("No active accounts found in credentials file")
+
+            if cookie_uid_order:
+                logger.info(f"Found cookie sessions for {len(cookie_uid_order)} account uid(s)")
+
+            selected_accounts: List[Dict] = []
+            if active_accounts:
+                active_by_uid = {
+                    str(account.get("uid", "")).strip(): account
+                    for account in active_accounts
+                    if str(account.get("uid", "")).strip()
+                }
+                ordered_active = [
+                    active_by_uid[uid]
+                    for uid in cookie_uid_order
+                    if uid in active_by_uid
+                ]
+                if ordered_active:
+                    logger.info(
+                        "Prioritizing active accounts with freshest cookies: %s",
+                        [a.get("uid") for a in ordered_active],
+                    )
+                merged = ordered_active + active_accounts
+                deduped: List[Dict] = []
+                seen = set()
+                for account in merged:
+                    uid = str(account.get("uid", "")).strip()
+                    if not uid or uid in seen:
+                        continue
+                    seen.add(uid)
+                    deduped.append(account)
+                selected_accounts = deduped
             else:
-                for acc in active_accounts:
-                    uid = acc.get("uid", "Unknown")
-                    has_totp = "Yes" if acc.get("totp_secret") else "No"
-                    logger.info(f"  - Account: {uid}, 2FA configured: {has_totp}")
-            
-            return active_accounts
+                logger.warning("No active accounts found in credentials file")
+                if cookie_uid_order:
+                    account_by_uid = {
+                        str(account.get("uid", "")).strip(): account
+                        for account in all_accounts
+                        if str(account.get("uid", "")).strip()
+                    }
+                    fallback_cookie_accounts = [
+                        account_by_uid[uid]
+                        for uid in cookie_uid_order
+                        if uid in account_by_uid
+                    ]
+                    if fallback_cookie_accounts:
+                        logger.warning(
+                            "Falling back to cookie-backed accounts: %s",
+                            [a.get("uid") for a in fallback_cookie_accounts],
+                        )
+                        selected_accounts = fallback_cookie_accounts
+
+            for acc in selected_accounts:
+                uid = acc.get("uid", "Unknown")
+                has_totp = "Yes" if acc.get("totp_secret") else "No"
+                logger.info(f"  - Account: {uid}, 2FA configured: {has_totp}")
+
+            return selected_accounts
+        except Exception as exc:
+            logger.error(
+                "Failed to parse credentials file '%s': %s. Falling back to environment variables.",
+                CREDENTIALS_PATH,
+                exc,
+            )
     
     # Fallback to env-based single account
-    logger.warning(f"Credentials file not found at {CREDENTIALS_PATH}, using environment variables")
+    if CREDENTIALS_PATH.exists():
+        logger.warning("Using environment variables due to credentials file parse failure")
+    else:
+        logger.warning(f"Credentials file not found at {CREDENTIALS_PATH}, using environment variables")
     env_account = {
         "uid": settings.FACEBOOK_EMAIL,
         "password": settings.FACEBOOK_PASSWORD,
@@ -170,156 +279,253 @@ class FacebookScraper:
         logger.info(f"Using account: {account.get('uid', 'Unknown')}")
         return account
 
-    async def _extract_comments(self, page: Page, search_result_id: str, max_comments: int = 10) -> int:
+    def _resolve_comment_limit(self, max_comments: int) -> int:
+        """Translate a user-facing max_comments to an extraction-safe upper bound."""
+        return max_comments if max_comments and max_comments > 0 else 5000
+
+    async def _sleep_with_stop(
+        self,
+        total_seconds: float,
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> bool:
+        """Sleep in short chunks and abort early when stop is requested."""
+        if not should_stop:
+            await asyncio.sleep(total_seconds)
+            return False
+
+        remaining = max(0.0, float(total_seconds))
+        while remaining > 0:
+            if should_stop():
+                return True
+            chunk = min(1.0, remaining)
+            await asyncio.sleep(chunk)
+            remaining -= chunk
+        return should_stop()
+
+    async def _inspect_auth_state(self, page: Page) -> Dict[str, bool]:
+        """Return robust auth-state indicators from the current Facebook page."""
+        try:
+            state = await page.evaluate(
+                """
+                () => {
+                    const body = (document.body?.innerText || '').toLowerCase();
+                    const title = (document.title || '').toLowerCase();
+                    const hasLoginInputs = !!document.querySelector('input[name="email"], input[name="pass"], #email, #pass');
+                    const hasJoinCopy =
+                        body.includes('join or log into facebook') ||
+                        body.includes('forgot account?') ||
+                        body.includes("this page isn't available");
+                    const hasLoginButton =
+                        body.includes('\\nlog in\\n') ||
+                        body.includes('log in') ||
+                        body.includes('sign up');
+                    const hasNav = !!document.querySelector('div[role="navigation"]');
+                    const hasFeed = !!document.querySelector('div[role="feed"]');
+                    const hasProfileLink = !!document.querySelector('a[href*="/profile.php"], a[href*="/me/"]');
+                    const hasSearchInput = !!document.querySelector('input[type="search"], input[placeholder*="Search"], input[aria-label*="Search"]');
+
+                    const loggedOut = hasLoginInputs || hasJoinCopy || (title.includes('page not found') && hasLoginButton);
+                    const loggedIn = !loggedOut && (hasNav || hasFeed || hasProfileLink || hasSearchInput);
+                    return { loggedOut, loggedIn };
+                }
+                """
+            )
+            return {
+                "logged_out": bool(state.get("loggedOut")),
+                "logged_in": bool(state.get("loggedIn")),
+            }
+        except Exception as exc:
+            logger.warning(f"Could not inspect auth state reliably: {exc}")
+            return {"logged_out": False, "logged_in": False}
+
+    async def _expand_inline_comments(
+        self,
+        page: Page,
+        max_cycles: int = 180,
+        stall_limit: int = 14,
+    ) -> int:
+        """
+        Expand visible inline "more comments/replies" controls on post pages.
+        Waits for lazy rendering and stops when no growth is observed repeatedly.
+        """
+        no_progress_cycles = 0
+        best_count = 0
+
+        for _ in range(max_cycles):
+            state = await page.evaluate(
+                """
+                () => {
+                    const root = document;
+                    const clickables = root.querySelectorAll('div[role="button"], span[role="button"], a[role="button"], a, span');
+                    const include = [
+                        /view more comments?/i,
+                        /view previous comments?/i,
+                        /see more comments?/i,
+                        /more comments?/i,
+                        /view\\s+\\d+\\s+more\\s+repl/i,
+                        /view more repl(?:y|ies)/i,
+                        /more repl(?:y|ies)/i,
+                    ];
+                    const exclude = /(leave\\s*a\\s*comment|write\\s*a\\s*comment|comment\\s+as|most relevant|all comments|newest)/i;
+                    let clicked = 0;
+
+                    for (const el of clickables) {
+                        const text = (el.innerText || el.textContent || '').trim();
+                        if (!text || text.length > 120) continue;
+                        if (exclude.test(text)) continue;
+                        if (!include.some((rx) => rx.test(text))) continue;
+
+                        const visible = !!(el.offsetParent || (el.getClientRects && el.getClientRects().length));
+                        if (!visible) continue;
+
+                        try {
+                            el.click();
+                            clicked += 1;
+                        } catch (_) {}
+                    }
+
+                    const count = document.querySelectorAll('div[role="article"][aria-label^="Comment by"]').length;
+                    return { clicked, count };
+                }
+                """
+            )
+
+            clicked = int(state.get("clicked", 0))
+            count = int(state.get("count", 0))
+
+            if count > best_count:
+                best_count = count
+                no_progress_cycles = 0
+            elif clicked == 0:
+                no_progress_cycles += 1
+
+            await page.evaluate("window.scrollBy(0, 900)")
+            await asyncio.sleep(random.uniform(2.0, 4.0) if clicked > 0 else random.uniform(1.0, 2.2))
+
+            if no_progress_cycles >= stall_limit:
+                break
+
+        return best_count
+
+    async def _extract_comments(self, page: Page, search_result_id: str, max_comments: int = 0) -> int:
         """
         Extract comments from the current post page.
-        Returns the number of comments extracted.
+        If max_comments <= 0, attempt to load and extract all available comments.
         """
         try:
-            logger.info(f"  Extracting comments (max: {max_comments})...")
-            
-            # Wait for page to load
-            await asyncio.sleep(random.uniform(1, 2))
-            
-            # STEP 1: Click the "Comment" button to reveal comments section
+            limit = self._resolve_comment_limit(max_comments)
+            logger.info(f"  Extracting comments (limit={limit if max_comments > 0 else 'ALL'})...")
+
+            await asyncio.sleep(random.uniform(1.2, 2.2))
+
             try:
-                logger.info(f"  Looking for 'Comment' button...")
-                
-                # Try multiple selectors for the Comment button
+                logger.info("  Looking for 'Comment' button...")
                 comment_button_selectors = [
                     'div[aria-label="Comment"]',
                     'div[role="button"]:has-text("Comment")',
                     'span:has-text("Comment")',
                     '[aria-label="Leave a comment"]',
                 ]
-                
-                clicked = False
                 for selector in comment_button_selectors:
                     try:
                         if await page.is_visible(selector, timeout=2000):
-                            logger.info(f"  Clicking 'Comment' button to reveal comments...")
                             await page.click(selector)
-                            await asyncio.sleep(random.uniform(2, 3))
-                            clicked = True
+                            await asyncio.sleep(random.uniform(2.0, 3.2))
                             break
-                    except:
+                    except Exception:
                         continue
-                
-                if not clicked:
-                    logger.info(f"  Comment button not found, comments may already be visible")
-                    
-            except Exception as e:
-                logger.debug(f"  Could not click Comment button: {e}")
-            
-            # STEP 2: Try to expand comments if there's a "View more comments" link
-            try:
-                view_more_selectors = [
-                    'div[role="button"]:has-text("View more comments")',
-                    'div[role="button"]:has-text("more comment")',
-                    'span:has-text("View more comments")',
-                    'span:has-text("more comment")',
-                    'a:has-text("View more comments")',
-                ]
-                
-                for selector in view_more_selectors:
-                    try:
-                        if await page.is_visible(selector, timeout=2000):
-                            logger.info(f"  Clicking 'View more comments'...")
-                            await page.click(selector)
-                            await asyncio.sleep(random.uniform(1, 2))
-                            break
-                    except:
-                        continue
-                        
-            except Exception as e:
-                logger.debug(f"  View more comments not found: {e}")
-            
-            # STEP 3: Scroll down to load more comments
-            try:
-                for _ in range(3):
-                    await page.evaluate("window.scrollBy(0, 400)")
-                    await asyncio.sleep(0.5)
-            except:
-                pass
-            
-            # Wait for comments to render
-            await asyncio.sleep(2)
-            
-            # STEP 4: Extract comments using JavaScript (innerText, Comment-by filter, obfuscation rejection)
-            logger.info(f"  Extracting comment data from page...")
-            comments_data = await page.evaluate(
-                """
-                (maxComments) => {
-                    const comments = [];
-                    const seen = new Set();
-                    function getText(el) { return el ? (el.innerText || el.textContent || '').trim() : ''; }
-                    function isObfuscated(text) {
-                        if (!text || text.length < 10) return true;
-                        if (/shared with public/i.test(text)) return true;
-                        if (/february|january|march|april|may|june|july|august|september|october|november|december/i.test(text) && /at \\d|\\d+:\\d+/.test(text)) return true;
-                        if ((text.match(/-/g) || []).length > 3 && text.length < 80) return true;
-                        if (/^[^a-zA-Z]*[a-zA-Z]-+[a-zA-Z]-+[a-zA-Z]/.test(text)) return true;
-                        return false;
-                    }
-                    const SKIP = /^(Like|Reply|Share|Comment|Facebook|Anonymous participant|\\d+[smhd]|Just now|Yesterday|See more|\\d+ min|\\d+ hr|\\d+ (w|d|m|y))/i;
-                    function isProfileUrl(url) {
-                        if (!url || !url.includes('facebook.com')) return false;
-                        if (url.includes('/groups/') || url.includes('/pages/') || url.includes('/events/')) return false;
-                        return true;
-                    }
+            except Exception as exc:
+                logger.debug(f"  Could not click Comment button: {exc}")
 
-                    const articles = document.querySelectorAll('div[role="article"][aria-label^="Comment by"]');
-                    for (const parent of articles) {
-                        if (comments.length >= maxComments) break;
-                        const authorLink = parent.querySelector('a[href*="facebook.com"]');
-                        if (!authorLink || !isProfileUrl(authorLink.href)) continue;
-                        const authorName = getText(authorLink);
-                        const authorUrl = authorLink.href;
-                        if (!authorName || authorName.length < 2) continue;
-                        if (seen.has(authorUrl)) continue;
+            has_dialog = await page.evaluate("() => !!document.querySelector('[role=\"dialog\"]')")
 
-                        let commentText = '';
-                        const textDivs = parent.querySelectorAll('div[dir="auto"][style*="text-align"], div[dir="auto"], span[dir="auto"]');
-                        for (const d of textDivs) {
-                            const t = getText(d);
-                            if (t && t.length > 10 && t !== authorName && !SKIP.test(t) && !isObfuscated(t)) {
-                                commentText = t;
-                                break;
+            if has_dialog:
+                logger.info("  Comments opened in dialog, expanding all comments/replies...")
+                await expand_all_comments_in_dialog(page, root_selector='[role="dialog"]', max_cycles=120, stall_limit=10)
+                comments_data = await page.evaluate(EXTRACT_FROM_DIALOG_JS, limit)
+            else:
+                await self._expand_inline_comments(page, max_cycles=60, stall_limit=8)
+                logger.info("  Extracting comment data from inline page comments...")
+                comments_data = await page.evaluate(
+                    """
+                    (maxComments) => {
+                        const comments = [];
+                        const seen = new Set();
+
+                        function getText(el) { return el ? (el.innerText || el.textContent || '').trim() : ''; }
+                        function isObfuscated(text) {
+                            if (!text || text.length < 10) return true;
+                            if (/shared with public/i.test(text)) return true;
+                            if (/february|january|march|april|may|june|july|august|september|october|november|december/i.test(text) && /at \\d|\\d+:\\d+/.test(text)) return true;
+                            if ((text.match(/-/g) || []).length > 3 && text.length < 80) return true;
+                            if (/^[^a-zA-Z]*[a-zA-Z]-+[a-zA-Z]-+[a-zA-Z]/.test(text)) return true;
+                            return false;
+                        }
+                        const SKIP = /^(Like|Reply|Share|Comment|Facebook|Anonymous participant|\\d+[smhd]|Just now|Yesterday|See more|\\d+ min|\\d+ hr|\\d+ (w|d|m|y))/i;
+                        function isProfileUrl(url) {
+                            if (!url || !url.includes('facebook.com')) return false;
+                            if (url.includes('/groups/') || url.includes('/pages/') || url.includes('/events/')) return false;
+                            return true;
+                        }
+                        function commentKey(authorName, authorUrl, commentText, timestamp) {
+                            const who = (authorUrl || authorName || '').trim().toLowerCase();
+                            const body = (commentText || '').trim().toLowerCase();
+                            const ts = (timestamp || '').trim().toLowerCase();
+                            return `${who}|${body}|${ts}`;
+                        }
+
+                        const articles = document.querySelectorAll('div[role="article"][aria-label^="Comment by"]');
+                        for (const parent of articles) {
+                            if (comments.length >= maxComments) break;
+                            const authorLink = parent.querySelector('a[href*="facebook.com"]');
+                            if (!authorLink || !isProfileUrl(authorLink.href)) continue;
+                            const authorName = getText(authorLink);
+                            const authorUrl = authorLink.href;
+                            if (!authorName || authorName.length < 2) continue;
+
+                            let commentText = '';
+                            const textDivs = parent.querySelectorAll('div[dir="auto"][style*="text-align"], div[dir="auto"], span[dir="auto"]');
+                            for (const d of textDivs) {
+                                const t = getText(d);
+                                if (t && t.length > 10 && t !== authorName && !SKIP.test(t) && !isObfuscated(t)) {
+                                    commentText = t;
+                                    break;
+                                }
+                            }
+                            if (!commentText) {
+                                const lines = getText(parent).split('\\n').map((l) => l.trim()).filter((l) =>
+                                    l.length > 10 && l !== authorName && !SKIP.test(l) && !isObfuscated(l)
+                                );
+                                if (lines.length) commentText = lines[0];
+                            }
+
+                            let timestamp = null;
+                            for (const s of parent.querySelectorAll('span, abbr')) {
+                                const t = getText(s);
+                                if (/\\d+[smhd]|Just now|Yesterday|\\d+ min|\\d+ hr|\\d+ (w|d|m|y)/i.test(t)) {
+                                    timestamp = t;
+                                    break;
+                                }
+                            }
+
+                            if (authorName && commentText && commentText.length > 5 && !isObfuscated(commentText)) {
+                                const key = commentKey(authorName, authorUrl, commentText, timestamp || 'Unknown');
+                                if (seen.has(key)) continue;
+                                seen.add(key);
+                                comments.push({
+                                    author_name: authorName,
+                                    author_profile_url: authorUrl,
+                                    comment_text: commentText,
+                                    comment_timestamp: timestamp || 'Unknown'
+                                });
                             }
                         }
-                        if (!commentText) {
-                            const lines = getText(parent).split('\\n').map(l => l.trim()).filter(l =>
-                                l.length > 10 && l !== authorName && !SKIP.test(l) && !isObfuscated(l)
-                            );
-                            if (lines.length) commentText = lines[0];
-                        }
-
-                        let timestamp = null;
-                        for (const s of parent.querySelectorAll('span, abbr')) {
-                            const t = getText(s);
-                            if (/\\d+[smhd]|Just now|Yesterday|\\d+ min|\\d+ hr|\\d+ (w|d|m|y)/i.test(t)) {
-                                timestamp = t;
-                                break;
-                            }
-                        }
-
-                        if (authorName && commentText && commentText.length > 5 && !isObfuscated(commentText)) {
-                            seen.add(authorUrl);
-                            comments.push({
-                                author_name: authorName,
-                                author_profile_url: authorUrl,
-                                comment_text: commentText,
-                                comment_timestamp: timestamp || 'Unknown'
-                            });
-                        }
+                        return comments;
                     }
-                    return comments;
-                }
-                """,
-                max_comments
-            )
-            
-            # Save comments to database
+                    """,
+                    limit,
+                )
+
             saved_count = 0
             for comment_data in comments_data:
                 try:
@@ -328,27 +534,33 @@ class FacebookScraper:
                         author_name=comment_data.get('author_name'),
                         author_profile_url=comment_data.get('author_profile_url'),
                         comment_text=comment_data.get('comment_text'),
-                        comment_timestamp=comment_data.get('comment_timestamp')
+                        comment_timestamp=comment_data.get('comment_timestamp'),
                     )
                     self.db.add(comment)
                     saved_count += 1
-                except Exception as e:
-                    logger.warning(f"  Failed to save comment: {e}")
-            
+                except Exception as exc:
+                    logger.warning(f"  Failed to save comment: {exc}")
+
             if saved_count > 0:
                 self.db.commit()
-                logger.info(f"  ✓ Saved {saved_count} comments")
+                logger.info(f"  Saved {saved_count} comments")
             else:
-                logger.info(f"  No comments found")
-            
+                logger.info("  No comments found")
+
+            if has_dialog:
+                try:
+                    await page.keyboard.press("Escape")
+                    await asyncio.sleep(0.4)
+                except Exception:
+                    pass
+
             return saved_count
-            
-        except Exception as e:
-            logger.error(f"  ✗ Error extracting comments: {e}")
+        except Exception as exc:
+            logger.error(f"  Error extracting comments: {exc}")
             return 0
 
     async def _click_comments_and_extract_from_dialog(
-        self, page: Page, profile_url: str, max_comments: int = 10
+        self, page: Page, profile_url: str, max_comments: int = 0
     ) -> List[Dict]:
         """
         On the search results page: find the post containing this profile link,
@@ -358,20 +570,33 @@ class FacebookScraper:
         """
         comments_data = []
         try:
+            limit = self._resolve_comment_limit(max_comments)
             # Normalize profile URL for matching (strip trailing slash, lowercase for comparison)
             profile_path = profile_url.split("?")[0].rstrip("/").lower()
 
-            # Find the article containing this profile link and click its Comments button
+            # Find the card containing this profile link and click its Comments button
             clicked = await page.evaluate(
                 """
                 (profilePath) => {
-                    const pathToMatch = profilePath;
+                    function normalizeUrl(u) {
+                        try {
+                            const url = new URL(u, window.location.origin);
+                            return (url.origin + url.pathname).replace(/\\/$/, '').toLowerCase();
+                        } catch (_) {
+                            return (u || '').split('?')[0].replace(/\\/$/, '').toLowerCase();
+                        }
+                    }
+
+                    const pathToMatch = normalizeUrl(profilePath);
+                    const feed = document.querySelector('div[role="feed"]');
                     const articles = document.querySelectorAll('div[role="article"]');
-                    for (const article of articles) {
-                        const anchors = article.querySelectorAll('a[href]');
+                    const containers = articles.length > 0 ? Array.from(articles) : (feed ? Array.from(feed.children) : []);
+
+                    for (const article of containers) {
+                        const anchors = article.querySelectorAll('a[href*="facebook.com"]');
                         let match = false;
                         for (const a of anchors) {
-                            const href = (a.href || '').split('?')[0].replace(/\\/$/, '').toLowerCase();
+                            const href = normalizeUrl(a.href || '');
                             if (pathToMatch && href && (href.includes(pathToMatch) || pathToMatch.includes(href))) {
                                 match = true;
                                 break;
@@ -380,7 +605,7 @@ class FacebookScraper:
                         if (!match) continue;
 
                         // Click "X comments" (e.g. "12 comments") - NOT "Comment" or "Leave a comment"
-                        const buttons = article.querySelectorAll('div[role="button"]');
+                        const buttons = article.querySelectorAll('div[role="button"], span[role="button"], a[role="button"]');
                         for (const btn of buttons) {
                             const text = (btn.textContent || '').trim();
                             if (/\\d+\\s*comments?/i.test(text) && !/leave\\s*a\\s*comment/i.test(text)) {
@@ -396,7 +621,6 @@ class FacebookScraper:
                                 return true;
                             }
                         }
-                        return false;
                     }
                     return false;
                 }
@@ -408,18 +632,11 @@ class FacebookScraper:
                 logger.info("  Comments button not found for this post, skipping dialog extraction")
                 return comments_data
 
-            await asyncio.sleep(random.uniform(2, 3))  # Wait for dialog to open
-
-            try:
-                view_more = await page.query_selector('[role="dialog"] div[role="button"]:has-text("View more comments"), [role="dialog"] span:has-text("View more comments")')
-                if view_more:
-                    await view_more.click()
-                    await asyncio.sleep(random.uniform(1.5, 2.5))
-            except Exception:
-                pass
+            await asyncio.sleep(random.uniform(2.0, 3.5))  # Wait for dialog to open
+            await expand_all_comments_in_dialog(page, root_selector='[role="dialog"]')
 
             # Extract comments from the dialog (innerText, Comment-by filter, obfuscation rejection)
-            comments_data = await page.evaluate(EXTRACT_FROM_DIALOG_JS, max_comments)
+            comments_data = await page.evaluate(EXTRACT_FROM_DIALOG_JS, limit)
 
             logger.info(f"  Extracted {len(comments_data)} comments from dialog")
 
@@ -555,7 +772,7 @@ class FacebookScraper:
             logger.info("Verifying login success...")
             nav = await page.query_selector('div[role="navigation"]')
             if nav:
-                logger.info(f"✓ Successfully logged in as {uid}")
+                logger.info(f"âœ“ Successfully logged in as {uid}")
                 return True
 
             logger.error(f"Login failed for {uid} - no navigation found")
@@ -566,9 +783,15 @@ class FacebookScraper:
             raise
 
     async def search_keyword(
-        self, keyword: str, max_results: int = 10
-    ) -> List[Dict]:
+        self,
+        keyword: str,
+        max_results: int = 10,
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> int:
         """Search for a keyword and extract posts."""
+        if should_stop and should_stop():
+            logger.warning("Stop requested before search start. Skipping keyword.")
+            return 0
         logger.info(f"=== Starting search for keyword: '{keyword}' ===")
         logger.info(f"Max results target: {max_results}")
 
@@ -595,29 +818,14 @@ class FacebookScraper:
             # Check for logged-in indicators - try multiple selectors
             is_logged_in = False
             try:
-                # Check for navigation bar (main indicator)
-                nav = await self._current_page.query_selector('div[role="navigation"]')
-                if nav:
-                    logger.info("✓ Already logged in (session restored from cookies) - navigation found")
+                auth_state = await self._inspect_auth_state(self._current_page)
+                if auth_state["logged_in"]:
+                    logger.info("âœ“ Already logged in (session restored from cookies)")
                     is_logged_in = True
+                elif auth_state["logged_out"]:
+                    logger.info("Login required (logged-out markers detected)")
                 else:
-                    # Check for other logged-in indicators
-                    # Profile link, home feed, or search box
-                    profile_link = await self._current_page.query_selector('a[href*="/profile.php"], a[aria-label*="Your profile"]')
-                    search_box = await self._current_page.query_selector('input[type="search"], input[placeholder*="Search"]')
-                    feed = await self._current_page.query_selector('div[role="feed"]')
-                    
-                    if profile_link or search_box or feed:
-                        logger.info("✓ Already logged in (session restored from cookies) - profile/search/feed found")
-                        is_logged_in = True
-                    else:
-                        # Final check: look for login form (if present, we're NOT logged in)
-                        login_form = await self._current_page.query_selector('input[name="email"], input[name="pass"]')
-                        if not login_form:
-                            logger.info("✓ Already logged in (no login form present)")
-                            is_logged_in = True
-                        else:
-                            logger.info("Login form detected - not logged in")
+                    logger.info("Auth state uncertain; will require explicit login to avoid false positives")
             except Exception as e:
                 logger.warning(f"Error checking login status: {e}")
             
@@ -626,7 +834,7 @@ class FacebookScraper:
                 login_success = await self.login(self._current_page, account)
                 if not login_success:
                     logger.error("Login failed, aborting search")
-                    return []
+                    return 0
                 logger.info("Login successful")
                 
                 # Save cookies after successful login
@@ -647,14 +855,21 @@ class FacebookScraper:
             # Human-like delay before searching
             delay = random.uniform(3, 7)
             logger.info(f"Waiting {delay:.1f}s before searching...")
-            await asyncio.sleep(delay)
+            if await self._sleep_with_stop(delay, should_stop=should_stop):
+                logger.warning("Stop requested before search navigation.")
+                return 0
             
             # Check if we're already on Facebook, if not navigate there
             current_url = page.url
-            if not current_url.startswith("https://www.facebook.com"):
+            if not (
+                current_url.startswith("https://www.facebook.com")
+                or current_url.startswith("https://web.facebook.com")
+            ):
                 logger.info("Navigating to Facebook homepage...")
                 await page.goto("https://www.facebook.com", wait_until="domcontentloaded", timeout=60000)
-                await asyncio.sleep(random.uniform(2, 4))
+                if await self._sleep_with_stop(random.uniform(2, 4), should_stop=should_stop):
+                    logger.warning("Stop requested after homepage navigation.")
+                    return 0
             else:
                 logger.info(f"Already on Facebook (URL: {current_url}), skipping navigation")
             
@@ -672,42 +887,84 @@ class FacebookScraper:
             # Wait and look around before scraping
             wait_time = random.uniform(4, 8)
             logger.info(f"Waiting {wait_time:.1f}s for results to load...")
-            await asyncio.sleep(wait_time)
+            if await self._sleep_with_stop(wait_time, should_stop=should_stop):
+                logger.warning("Stop requested while waiting for results load.")
+                return 0
+
+            # Guardrail: if search URL landed on logged-out/page-not-found login wall, login and retry once.
+            auth_after_search = await self._inspect_auth_state(page)
+            if auth_after_search["logged_out"]:
+                logger.warning("Search page appears logged out. Attempting login and retrying search URL once...")
+                account = getattr(self, "_current_account", {}) or {}
+                if not account.get("password"):
+                    logger.error(
+                        "Cannot auto-login for account %s: password missing in credentials.",
+                        account.get("uid", "unknown"),
+                    )
+                    return 0
+
+                login_success = await self.login(page, account)
+                if not login_success:
+                    logger.error("Login retry failed after logged-out search page.")
+                    return 0
+
+                await self.browser_manager.save_cookies(page)
+                logger.info("Login retry succeeded, re-opening search URL...")
+                await page.goto(search_url, wait_until="domcontentloaded", timeout=120000)
+                if await self._sleep_with_stop(random.uniform(3, 5), should_stop=should_stop):
+                    logger.warning("Stop requested while waiting after login retry.")
+                    return 0
             
             logger.info("Waiting for post elements to appear...")
             # Try multiple selectors for posts
             try:
                 await page.wait_for_selector('blockquote.html-blockquote, div[data-ad-rendering-role="story_message"], div[role="article"]', timeout=30000)
-                logger.info("✓ Post elements found, starting extraction...")
+                logger.info("âœ“ Post elements found, starting extraction...")
                 
             except Exception as e:
                 logger.warning(f"Standard selectors not found, trying alternative approach: {e}")
                 # Wait a bit and try to extract anyway
-                await asyncio.sleep(5)
+                if await self._sleep_with_stop(5, should_stop=should_stop):
+                    logger.warning("Stop requested while waiting for alternative post detection.")
+                    return 0
 
             # Process posts one by one as we scroll
-            posts_processed = await self._scroll_and_process_posts(page, keyword, max_results)
+            posts_processed = await self._scroll_and_process_posts(page, keyword, max_results, should_stop=should_stop)
             logger.info(f"Processing completed. Processed {posts_processed} posts")
 
             logger.info(f"=== Search completed for '{keyword}': {posts_processed} posts processed ===")
-            return []  # Return empty since we save as we go
+            return posts_processed
 
         except Exception as e:
             logger.error(f"Error searching for '{keyword}': {e}", exc_info=True)
-            return []
+            return 0
         # Note: Don't close page here - reuse it for next keyword
 
     async def _scroll_and_process_posts(
-        self, page: Page, keyword: str, max_results: int
+        self,
+        page: Page,
+        keyword: str,
+        max_results: int,
+        should_stop: Optional[Callable[[], bool]] = None,
     ) -> int:
         """Scroll, extract author profile links semantically, visit profiles, save users to database."""
         logger.info(f"Starting extraction for keyword: '{keyword}' (target: {max_results} posts)")
         
-        # Scroll a few times to load more posts
-        logger.info("Scrolling to load posts...")
-        for i in range(2):
-            await human_scroll(page, scrolls=2)
-            await asyncio.sleep(random.uniform(3, 5))
+        # Scroll repeatedly up-front so Facebook actually loads feed cards before extraction.
+        logger.info("Preloading search feed with progressive scrolls...")
+        for i in range(8):
+            if should_stop and should_stop():
+                logger.warning("Stop requested before scroll warmup completed.")
+                return 0
+            await page.evaluate("window.scrollBy(0, 1800)")
+            if await self._sleep_with_stop(random.uniform(1.5, 2.8), should_stop=should_stop):
+                logger.warning("Stop requested during scroll warmup delay.")
+                return 0
+            if i % 3 == 2:
+                # Periodic longer pause gives FB time to hydrate newer cards.
+                if await self._sleep_with_stop(random.uniform(2.5, 4.5), should_stop=should_stop):
+                    logger.warning("Stop requested during extended warmup pause.")
+                    return 0
 
         # Save a screenshot for debugging
         try:
@@ -741,7 +998,7 @@ class FacebookScraper:
         current_user_id = self._current_account.get('uid', '')
         logger.info(f"Current user ID (to exclude): {current_user_id}")
 
-        # Extract author profile links — use a.href (resolved absolute URL by browser)
+        # Extract author profile links â€” use a.href (resolved absolute URL by browser)
         # NOT a[href*="facebook.com"] which only matches the raw HTML attribute
         logger.info("Extracting author profile links and post content via semantic DOM traversal...")
         all_links = await page.evaluate(
@@ -769,11 +1026,11 @@ class FacebookScraper:
                     
                     try {
                         const u = new URL(absoluteHref);
-                        const parts = u.pathname.replace(/^\//, '').replace(/\/$/, '').split('/');
+                        const parts = u.pathname.replace(/^\\//, '').replace(/\\/$/, '').split('/');
                         const slug = parts[0];
                         if (!slug) return false;
                         if (NON_PROFILE.has(slug.toLowerCase())) return false;
-                        if (/^(groups|events|pages|hashtag|watch|gaming|marketplace|reel|reels|stories|live|photo|photos|video|videos|posts|permalink|story\.php|share|sharer|composer|checkpoint|login|ajax)/.test(slug)) return false;
+                        if (/^(groups|events|pages|hashtag|watch|gaming|marketplace|reel|reels|stories|live|photo|photos|video|videos|posts|permalink|story\\.php|share|sharer|composer|checkpoint|login|ajax)/.test(slug)) return false;
                         if (u.search.includes('comment_id=')) return false;
                         // profile.php is always personal
                         if (slug === 'profile.php') return true;
@@ -804,10 +1061,167 @@ class FacebookScraper:
                     return text.length > 500 ? text.substring(0, 500) + '...' : text;
                 }
 
-                function addLink(absoluteHref, text, postContent, postUrl) {
+                function parseCount(raw) {
+                    if (!raw) return null;
+                    const text = String(raw).trim().toUpperCase();
+                    const cleaned = text.replace(/,/g, '').replace(/\s+/g, '');
+                    const m = cleaned.match(/^(\d+(?:\.\d+)?)([KMB])?$/);
+                    if (!m) return null;
+                    const num = parseFloat(m[1]);
+                    const unit = m[2] || '';
+                    if (!Number.isFinite(num)) return null;
+                    if (unit === 'K') return Math.round(num * 1000);
+                    if (unit === 'M') return Math.round(num * 1000000);
+                    if (unit === 'B') return Math.round(num * 1000000000);
+                    return Math.round(num);
+                }
+
+                function extractEngagementCounts(article) {
+                    const result = { reactions: null, comments: null, shares: null };
+                    const fullText = article.innerText || '';
+
+                    // Examples: "23 comments", "2 shares", "1.2K comments"
+                    const commentMatch = fullText.match(/(\d+(?:\.\d+)?\s*[KMB]?)\s+comments?/i);
+                    const shareMatch = fullText.match(/(\d+(?:\.\d+)?\s*[KMB]?)\s+shares?/i);
+                    if (commentMatch) result.comments = parseCount(commentMatch[1]);
+                    if (shareMatch) result.shares = parseCount(shareMatch[1]);
+
+                    // Reaction summary often appears in aria-label or compact text near footer.
+                    const ariaNodes = article.querySelectorAll('[aria-label]');
+                    for (const node of ariaNodes) {
+                        const label = (node.getAttribute('aria-label') || '').trim();
+                        if (!label) continue;
+
+                        // Examples: "23 reactions", "1.2K people reacted to this"
+                        const m =
+                            label.match(/(\d+(?:\.\d+)?\s*[KMB]?)\s+reactions?/i) ||
+                            label.match(/(\d+(?:\.\d+)?\s*[KMB]?)\s+people\s+reacted/i);
+                        if (m) {
+                            result.reactions = parseCount(m[1]);
+                            break;
+                        }
+                    }
+
+                    if (result.reactions == null) {
+                        const reactionTextMatch = fullText.match(/(\d+(?:\.\d+)?\s*[KMB]?)\s+reactions?/i);
+                        if (reactionTextMatch) {
+                            result.reactions = parseCount(reactionTextMatch[1]);
+                        }
+                    }
+
+                    return result;
+                }
+
+                function isPostUrl(href) {
+                    if (!href) return false;
+                    return (
+                        href.includes('/posts/') ||
+                        href.includes('/permalink/') ||
+                        href.includes('story_fbid') ||
+                        href.includes('/photo/')
+                    );
+                }
+
+                function normalizeText(value) {
+                    return (value || '').replace(/\\s+/g, ' ').trim();
+                }
+
+                function isLikelyPostDate(value) {
+                    const text = normalizeText(value);
+                    if (!text) return false;
+                    if (/^(?:\\d+\\s*(?:s|m|min|h|hr|d|w|mo|y)|just now|yesterday)$/i.test(text)) return true;
+                    if (/\\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december|today|yesterday)\\b/i.test(text)) return true;
+                    if (/\\b\\d{1,2}:\\d{2}\\b/.test(text)) return true;
+                    if (/\\b\\d+\\s*(?:mins?|minutes?|hrs?|hours?|days?|weeks?|months?|years?)\\b/i.test(text)) return true;
+                    return false;
+                }
+
+                function readFromAriaLabelledBy(node) {
+                    if (!node || !node.getAttribute) return null;
+                    const labelledBy = node.getAttribute('aria-labelledby');
+                    if (!labelledBy) return null;
+                    for (const id of labelledBy.split(/\s+/).filter(Boolean)) {
+                        const target = document.getElementById(id);
+                        if (!target) continue;
+                        const text = normalizeText(target.innerText || target.textContent || '');
+                        if (isLikelyPostDate(text)) return text;
+                    }
+                    return null;
+                }
+
+                function extractPostDate(article, postUrl) {
+                    const candidates = [];
+                    const links = article.querySelectorAll('a[href]');
+                    for (const link of links) {
+                        const href = link.href || '';
+                        if (!href) continue;
+                        if (postUrl && href === postUrl) {
+                            candidates.push(link);
+                            continue;
+                        }
+                        if (isPostUrl(href) && !isProfileHref(href)) {
+                            candidates.push(link);
+                        }
+                    }
+
+                    function extractFromAnchor(anchor) {
+                        if (!anchor) return null;
+
+                        const directAria = normalizeText(anchor.getAttribute('aria-label') || '');
+                        if (isLikelyPostDate(directAria)) return directAria;
+
+                        const labelledByText = readFromAriaLabelledBy(anchor);
+                        if (labelledByText) return labelledByText;
+
+                        const labelledDesc = anchor.querySelector('[aria-labelledby]');
+                        const labelledDescText = readFromAriaLabelledBy(labelledDesc);
+                        if (labelledDescText) return labelledDescText;
+
+                        const timeEl = anchor.querySelector('time[datetime]');
+                        if (timeEl) {
+                            const dt = normalizeText(timeEl.getAttribute('datetime') || '');
+                            if (dt) return dt;
+                        }
+
+                        const abbrEl = anchor.querySelector('abbr[title], abbr[data-utime]');
+                        if (abbrEl) {
+                            const title = normalizeText(abbrEl.getAttribute('title') || '');
+                            if (title) return title;
+                            const abbrText = normalizeText(abbrEl.innerText || abbrEl.textContent || '');
+                            if (isLikelyPostDate(abbrText)) return abbrText;
+                        }
+
+                        const visibleText = normalizeText(anchor.innerText || anchor.textContent || '');
+                        if (isLikelyPostDate(visibleText)) return visibleText;
+                        return null;
+                    }
+
+                    for (const anchor of candidates) {
+                        const value = extractFromAnchor(anchor);
+                        if (value) return value;
+                    }
+
+                    const fallbackTime = article.querySelector('time[datetime]');
+                    if (fallbackTime) {
+                        const dt = normalizeText(fallbackTime.getAttribute('datetime') || '');
+                        if (dt) return dt;
+                    }
+
+                    const fallbackAbbr = article.querySelector('abbr[title], abbr[data-utime]');
+                    if (fallbackAbbr) {
+                        const title = normalizeText(fallbackAbbr.getAttribute('title') || '');
+                        if (title) return title;
+                        const abbrText = normalizeText(fallbackAbbr.innerText || fallbackAbbr.textContent || '');
+                        if (isLikelyPostDate(abbrText)) return abbrText;
+                    }
+
+                    return null;
+                }
+
+                function addLink(absoluteHref, text, postContent, postUrl, postDate, engagement, visibleIndex = null) {
                     try {
                         const u = new URL(absoluteHref);
-                        const key = u.pathname.replace(/\/$/, '');
+                        const key = `${postUrl || u.pathname.replace(/\/$/, '')}|${(postContent || '').slice(0, 80)}`;
                         if (seen.has(key)) return;
                         seen.add(key);
                         results.push({ 
@@ -815,7 +1229,12 @@ class FacebookScraper:
                             text: (text || '').trim(), 
                             type: 'direct',
                             post_content: postContent || null,
-                            post_url: postUrl || null
+                            post_url: postUrl || null,
+                            post_date: postDate || null,
+                            post_reaction_count: engagement?.reactions ?? null,
+                            post_comment_count: engagement?.comments ?? null,
+                            post_share_count: engagement?.shares ?? null,
+                            visible_index: visibleIndex,
                         });
                     } catch(e) {}
                 }
@@ -837,9 +1256,7 @@ class FacebookScraper:
                         for (const link of links) {
                             const href = link.href;
                             // Avoid profile links, only get post/photo/story links
-                            if (href && !isProfileHref(href) && 
-                                (href.includes('/posts/') || href.includes('/permalink/') || 
-                                 href.includes('story_fbid') || href.includes('/photo/'))) {
+                            if (href && !isProfileHref(href) && isPostUrl(href)) {
                                 return href;
                             }
                         }
@@ -853,12 +1270,14 @@ class FacebookScraper:
 
                 // Strategy 1: first profile link inside each post article (within main content only)
                 const articles = mainContent.querySelectorAll('div[role="article"]');
-                articles.forEach(article => {
+                articles.forEach((article, idx) => {
                     const postContent = extractPostContent(article);
                     const postUrl = extractPostUrl(article);
+                    const postDate = extractPostDate(article, postUrl);
+                    const engagement = extractEngagementCounts(article);
                     for (const a of article.querySelectorAll('a[href]')) {
                         if (isProfileHref(a.href)) { 
-                            addLink(a.href, a.textContent, postContent, postUrl); 
+                            addLink(a.href, a.textContent, postContent, postUrl, postDate, engagement, idx); 
                             break; 
                         }
                     }
@@ -868,11 +1287,14 @@ class FacebookScraper:
                 if (results.length === 0) {
                     const feed = mainContent.querySelector('div[role="feed"]');
                     if (feed) {
-                        Array.from(feed.children).forEach(child => {
+                        Array.from(feed.children).forEach((child, idx) => {
                             const postContent = extractPostContent(child);
+                            const postUrl = extractPostUrl(child);
+                            const postDate = extractPostDate(child, postUrl);
+                            const engagement = extractEngagementCounts(child);
                             for (const a of child.querySelectorAll('a[href]')) {
                                 if (isProfileHref(a.href)) { 
-                                    addLink(a.href, a.textContent, postContent); 
+                                    addLink(a.href, a.textContent, postContent, postUrl, postDate, engagement, idx); 
                                     break; 
                                 }
                             }
@@ -887,7 +1309,10 @@ class FacebookScraper:
                             // Try to find parent article for post content
                             let parent = a.closest('div[role="article"]');
                             const postContent = parent ? extractPostContent(parent) : null;
-                            addLink(a.href, a.textContent, postContent);
+                            const postUrl = parent ? extractPostUrl(parent) : null;
+                            const postDate = parent ? extractPostDate(parent, postUrl) : null;
+                            const engagement = parent ? extractEngagementCounts(parent) : null;
+                            addLink(a.href, a.textContent, postContent, postUrl, postDate, engagement, null);
                         }
                     });
                 }
@@ -898,9 +1323,9 @@ class FacebookScraper:
             current_user_id
         )
 
-        logger.info(f"✓ Total extracted: {len(all_links)} profile links via semantic extraction")
+        logger.info(f"âœ“ Total extracted: {len(all_links)} profile links via semantic extraction")
         
-        # Pre-filter: drop any link whose URL is a /groups/ page — those are never individual users
+        # Pre-filter: drop any link whose URL is a /groups/ page â€” those are never individual users
         import re as _re
         def _is_user_profile_url(url: str) -> bool:
             clean = url.split('?')[0].split('&')[0]
@@ -918,18 +1343,201 @@ class FacebookScraper:
 
         user_links = [l for l in all_links if _is_user_profile_url(l['url'])]
         logger.info(f"After pre-filtering groups/pages: {len(user_links)} candidate user links (dropped {len(all_links) - len(user_links)})")
+
+        def _link_key(link: Dict) -> str:
+            base = str(link.get("post_url") or link.get("url") or "")
+            content = str(link.get("post_content") or "")[:80]
+            return f"{base}|{content}"
+
+        seen_link_keys = {_link_key(link) for link in user_links}
+
+        # Additional extraction rounds: keep scrolling and harvesting until we stall.
+        if len(user_links) < max_results:
+            logger.info(
+                "Initial extraction below target (%d/%d). Continuing progressive scan...",
+                len(user_links),
+                max_results,
+            )
+            no_growth_rounds = 0
+            for scan_round in range(1, 10):
+                if should_stop and should_stop():
+                    break
+
+                await page.evaluate("window.scrollBy(0, 2500)")
+                if await self._sleep_with_stop(random.uniform(2.0, 3.5), should_stop=should_stop):
+                    break
+
+                # Secondary broad extraction: less strict, catches feed cards that lack role=article.
+                extra_links = await page.evaluate(
+                    """
+                    (currentUserId) => {
+                        const out = [];
+                        const seen = new Set();
+                        const feed = document.querySelector('div[role="feed"]');
+                        if (!feed) return out;
+
+                        function isProfileHref(href) {
+                            if (!href || !href.includes('facebook.com')) return false;
+                            if (currentUserId && href.includes(currentUserId)) return false;
+                            if (href.includes('/groups/') || href.includes('/events/') || href.includes('/pages/')) return false;
+                            if (href.includes('/search/') || href.includes('/hashtag/')) return false;
+                            return href.includes('profile.php') || /facebook\\.com\\/[A-Za-z0-9._-]{2,}(?:\\?|$)/.test(href);
+                        }
+
+                        function cardText(el) {
+                            const t = (el.innerText || '').trim();
+                            return t.length > 500 ? t.slice(0, 500) + '...' : t;
+                        }
+
+                        function normalizeText(value) {
+                            return (value || '').replace(/\\s+/g, ' ').trim();
+                        }
+
+                        function isLikelyPostDate(value) {
+                            const text = normalizeText(value);
+                            if (!text) return false;
+                            if (/^(?:\\d+\\s*(?:s|m|min|h|hr|d|w|mo|y)|just now|yesterday)$/i.test(text)) return true;
+                            if (/\\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december|today|yesterday)\\b/i.test(text)) return true;
+                            if (/\\b\\d{1,2}:\\d{2}\\b/.test(text)) return true;
+                            if (/\\b\\d+\\s*(?:mins?|minutes?|hrs?|hours?|days?|weeks?|months?|years?)\\b/i.test(text)) return true;
+                            return false;
+                        }
+
+                        function readFromAriaLabelledBy(node) {
+                            if (!node || !node.getAttribute) return null;
+                            const labelledBy = node.getAttribute('aria-labelledby');
+                            if (!labelledBy) return null;
+                            for (const id of labelledBy.split(/\s+/).filter(Boolean)) {
+                                const target = document.getElementById(id);
+                                if (!target) continue;
+                                const text = normalizeText(target.innerText || target.textContent || '');
+                                if (isLikelyPostDate(text)) return text;
+                            }
+                            return null;
+                        }
+
+                        function extractPostDate(card, postLinkEl) {
+                            const candidateAnchors = [];
+                            if (postLinkEl) candidateAnchors.push(postLinkEl);
+                            for (const a of card.querySelectorAll('a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid"], a[href*="/photo/"]')) {
+                                if (postLinkEl && a === postLinkEl) continue;
+                                candidateAnchors.push(a);
+                            }
+
+                            for (const anchor of candidateAnchors) {
+                                const directAria = normalizeText(anchor.getAttribute('aria-label') || '');
+                                if (isLikelyPostDate(directAria)) return directAria;
+
+                                const labelled = readFromAriaLabelledBy(anchor);
+                                if (labelled) return labelled;
+
+                                const nestedLabelled = anchor.querySelector('[aria-labelledby]');
+                                const nestedLabelledText = readFromAriaLabelledBy(nestedLabelled);
+                                if (nestedLabelledText) return nestedLabelledText;
+
+                                const timeEl = anchor.querySelector('time[datetime]');
+                                if (timeEl) {
+                                    const dt = normalizeText(timeEl.getAttribute('datetime') || '');
+                                    if (dt) return dt;
+                                }
+
+                                const abbrEl = anchor.querySelector('abbr[title], abbr[data-utime]');
+                                if (abbrEl) {
+                                    const title = normalizeText(abbrEl.getAttribute('title') || '');
+                                    if (title) return title;
+                                    const abbrText = normalizeText(abbrEl.innerText || abbrEl.textContent || '');
+                                    if (isLikelyPostDate(abbrText)) return abbrText;
+                                }
+
+                                const visible = normalizeText(anchor.innerText || anchor.textContent || '');
+                                if (isLikelyPostDate(visible)) return visible;
+                            }
+
+                            const fallbackTime = card.querySelector('time[datetime]');
+                            if (fallbackTime) {
+                                const dt = normalizeText(fallbackTime.getAttribute('datetime') || '');
+                                if (dt) return dt;
+                            }
+
+                            const fallbackAbbr = card.querySelector('abbr[title], abbr[data-utime]');
+                            if (fallbackAbbr) {
+                                const title = normalizeText(fallbackAbbr.getAttribute('title') || '');
+                                if (title) return title;
+                                const abbrText = normalizeText(fallbackAbbr.innerText || fallbackAbbr.textContent || '');
+                                if (isLikelyPostDate(abbrText)) return abbrText;
+                            }
+
+                            return null;
+                        }
+
+                        Array.from(feed.children).forEach((child, idx) => {
+                            const postContent = cardText(child);
+                            const postLink = child.querySelector('a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid"], a[href*="/photo/"]');
+                            const postUrl = postLink ? postLink.href : null;
+                            const postDate = extractPostDate(child, postLink);
+                            const profileLink = Array.from(child.querySelectorAll('a[href]')).find((a) => isProfileHref(a.href));
+                            if (!profileLink) return;
+                            const key = `${postUrl || profileLink.href}|${(postContent || '').slice(0, 80)}`;
+                            if (seen.has(key)) return;
+                            seen.add(key);
+                            out.push({
+                                url: profileLink.href,
+                                text: (profileLink.textContent || '').trim(),
+                                type: 'direct',
+                                post_content: postContent || null,
+                                post_url: postUrl || null,
+                                post_date: postDate || null,
+                                post_reaction_count: null,
+                                post_comment_count: null,
+                                post_share_count: null,
+                                visible_index: idx,
+                            });
+                        });
+                        return out;
+                    }
+                    """,
+                    current_user_id,
+                )
+
+                added = 0
+                for link in extra_links:
+                    if not _is_user_profile_url(link.get("url", "")):
+                        continue
+                    key = _link_key(link)
+                    if key in seen_link_keys:
+                        continue
+                    seen_link_keys.add(key)
+                    user_links.append(link)
+                    added += 1
+
+                if added == 0:
+                    no_growth_rounds += 1
+                    logger.info("Progressive scan round %d: no new links (%d/3)", scan_round, no_growth_rounds)
+                else:
+                    no_growth_rounds = 0
+                    logger.info(
+                        "Progressive scan round %d: +%d links (total=%d)",
+                        scan_round,
+                        added,
+                        len(user_links),
+                    )
+
+                if len(user_links) >= max_results or no_growth_rounds >= 3:
+                    break
         
         # Visit each profile and check if it's a user
-        # Process in batches for parallel execution
         users_saved = 0
-        batch_size = 3  # Process 3 profiles simultaneously
         
         filtered_links = user_links  # JS already deduplicates
         logger.info(f"Processing {len(filtered_links)} links sequentially (one at a time)")
         use_index_based_comments = (page_diag.get("articles", 0) == 0 and page_diag.get("feed"))
 
-        # One loop per profile: scrape comments for THIS post → visit THIS profile → save to DB → next
+        # One loop per profile: scrape comments for THIS post â†’ visit THIS profile â†’ save to DB â†’ next
         for i, link in enumerate(filtered_links):
+            if should_stop and should_stop():
+                logger.warning("Stop requested while processing profiles. Exiting keyword early.")
+                break
+
             if users_saved >= max_results:
                 logger.info(f"Reached max_results ({max_results}), stopping")
                 break
@@ -939,11 +1547,18 @@ class FacebookScraper:
             # 1) Scrape comments for this post (on search page), then we'll save with this profile
             comments_data = []
             try:
-                if use_index_based_comments:
+                # Primary path: locate the correct card by profile URL and open its comments dialog.
+                comments_data = await self._click_comments_and_extract_from_dialog(page, link["url"], max_comments=0)
+
+                # Fallback for feed-only layouts where DOM changes can break URL matching.
+                if not comments_data and use_index_based_comments:
                     from .facebook_comment_fix import extract_comments_from_post_on_search_page
-                    comments_data = await extract_comments_from_post_on_search_page(page, i, max_comments=20)
-                else:
-                    comments_data = await self._click_comments_and_extract_from_dialog(page, link["url"], max_comments=10)
+                    post_index = int(link.get("visible_index", i))
+                    comments_data = await extract_comments_from_post_on_search_page(
+                        page,
+                        post_index,
+                        max_comments=0,
+                    )
                 if comments_data:
                     logger.info(f"  Scraped {len(comments_data)} comments (will save with this profile)")
             except Exception as e:
@@ -956,17 +1571,26 @@ class FacebookScraper:
                 result = await self._process_single_profile(new_page, link, keyword, i + 1, len(filtered_links), comments_data=comments_data)
                 if result:  # Successfully saved
                     users_saved += 1
-                    logger.info(f"✓ Progress: {users_saved}/{max_results} profiles saved")
+                    logger.info(f"âœ“ Progress: {users_saved}/{max_results} profiles saved")
             except Exception as e:
-                logger.error(f"  ✗ Error processing profile: {e}")
+                logger.error(f"  âœ— Error processing profile: {e}")
             
             # Small delay between profiles to look more human
             if i < len(filtered_links) - 1 and users_saved < max_results:
                 delay = random.uniform(3, 7)
                 logger.info(f"Waiting {delay:.1f}s before next profile...")
-                await asyncio.sleep(delay)
+                remaining = delay
+                while remaining > 0:
+                    if should_stop and should_stop():
+                        logger.warning("Stop requested during profile delay.")
+                        break
+                    chunk = min(1.0, remaining)
+                    await asyncio.sleep(chunk)
+                    remaining -= chunk
+                if should_stop and should_stop():
+                    break
         
-        logger.info(f"✓ Completed: {users_saved} users saved to database")
+        logger.info(f"âœ“ Completed: {users_saved} users saved to database")
         return users_saved
 
     async def _process_single_profile(self, page, link, keyword, idx, total, comments_data: Optional[List[Dict]] = None):
@@ -979,9 +1603,13 @@ class FacebookScraper:
         logger.info(f"[{idx}/{total}] Checking {link_type} link: {name}")
         logger.info(f"  URL: {link_url}")
         
-        # Store the post content and post URL from the search results page before navigating away
+        # Store post fields from the search results page before navigating away
         post_content = link.get('post_content', None)
         post_url = link.get('post_url', None)  # Capture post URL if available
+        post_date = link.get('post_date', None)
+        post_reaction_count = link.get('post_reaction_count', None)
+        post_comment_count = link.get('post_comment_count', None)
+        post_share_count = link.get('post_share_count', None)
         
         try:
             # Handle group posts differently
@@ -996,7 +1624,7 @@ class FacebookScraper:
                 view_profile_link = await page.query_selector('a[aria-label="View profile"]')
                 
                 if not view_profile_link:
-                    logger.info(f"  ✗ 'View profile' link not found, skipping")
+                    logger.info(f"  âœ— 'View profile' link not found, skipping")
                     await page.close()
                     return False
                 
@@ -1108,8 +1736,7 @@ class FacebookScraper:
             
             location_text = ', '.join(unique_locations) if unique_locations else None
 
-            # Determine if this is a personal profile (not a group/page)
-            # Check for personal profile indicators: Add Friend, Message, or Follow buttons
+            # Determine if this is a personal profile (not a group/page/page-like entity)
             is_personal_profile = await page.evaluate(
                 """
                 () => {
@@ -1120,24 +1747,35 @@ class FacebookScraper:
                         text.includes('Join Group') || html.includes('group_type')) {
                         return false;
                     }
-                    // Page indicators
-                    if (text.includes('Like Page') || text.includes('Suggest Page')) {
+                    // Strong page indicators
+                    if (
+                        text.includes('Like Page') ||
+                        text.includes('Suggest Page') ||
+                        text.includes('Follow Page') ||
+                        text.includes('Page transparency') ||
+                        text.includes('likes this') ||
+                        text.includes('people like this') ||
+                        text.includes('Page ·')
+                    ) {
                         return false;
                     }
-                    // Personal profile indicators
+
+                    // Personal profile indicators (friend-centric controls)
                     const hasAddFriend = !!document.querySelector('[aria-label="Add friend"], [aria-label="Add Friend"]');
-                    const hasMessage = !!document.querySelector('[aria-label="Message"]');
-                    const hasFollow = !!document.querySelector('[aria-label="Follow"]');
-                    return hasAddFriend || hasMessage || hasFollow;
+                    const hasFriends = !!document.querySelector('[aria-label="Friends"], [aria-label="Remove friend"], [aria-label="Edit friend list"]');
+                    const hasMutualFriendsText = /mutual friends?/i.test(text);
+
+                    // Message/Follow exist on pages too, so don't use them alone.
+                    return hasAddFriend || hasFriends || hasMutualFriendsText;
                 }
                 """
             )
 
             if is_personal_profile:
                 if location_text:
-                    logger.info(f"  ✓ Personal profile detected. Location: {location_text}")
+                    logger.info(f"  âœ“ Personal profile detected. Location: {location_text}")
                 else:
-                    logger.info(f"  ✓ Personal profile detected (no public location)")
+                    logger.info(f"  âœ“ Personal profile detected (no public location)")
                 
                 try:
                     search_result = SearchResult(
@@ -1145,13 +1783,17 @@ class FacebookScraper:
                         location=location_text,
                         post_content=post_content,  # Include post content
                         post_url=post_url,  # Include post URL (may be None)
+                        post_date=post_date,
+                        post_reaction_count=post_reaction_count,
+                        post_comment_count=post_comment_count,
+                        post_share_count=post_share_count,
                         profile_url=profile_url,
                         search_keyword=keyword,
                         status=ResultStatus.PENDING,
                     )
                     self.db.add(search_result)
                     self.db.commit()
-                    logger.info(f"  ✓ Saved to database (ID: {search_result.id})")
+                    logger.info(f"  âœ“ Saved to database (ID: {search_result.id})")
 
                     # Save comments from search results dialog (if we scraped them before visiting profile)
                     if comments_data:
@@ -1166,7 +1808,7 @@ class FacebookScraper:
                                 )
                                 self.db.add(pc)
                             self.db.commit()
-                            logger.info(f"  ✓ Saved {len(comments_data)} comments from search results dialog")
+                            logger.info(f"  âœ“ Saved {len(comments_data)} comments from search results dialog")
                         except Exception as e:
                             logger.warning(f"  Failed to save dialog comments: {e}")
                             self.db.rollback()
@@ -1174,7 +1816,7 @@ class FacebookScraper:
                     # Extract comments from user's recent posts on their profile
                     # Since search results don't provide post URLs, we scrape from profile
                     try:
-                        logger.info(f"  📝 Extracting comments from recent posts on profile...")
+                        logger.info(f"  ðŸ“ Extracting comments from recent posts on profile...")
                         
                         # Find recent post links on the profile page
                         recent_posts = await page.evaluate(
@@ -1206,36 +1848,36 @@ class FacebookScraper:
                                     await asyncio.sleep(random.uniform(2, 3))
                                     
                                     # Extract comments from this post
-                                    comment_count = await self._extract_comments(page, search_result.id, max_comments=5)
+                                    comment_count = await self._extract_comments(page, search_result.id, max_comments=0)
                                     total_comments += comment_count
                                     
                                     if comment_count > 0:
-                                        logger.info(f"  ✓ Extracted {comment_count} comments from this post")
+                                        logger.info(f"  âœ“ Extracted {comment_count} comments from this post")
                                     
                                     # Small delay between posts
                                     await asyncio.sleep(random.uniform(1, 2))
                                 except Exception as e:
-                                    logger.warning(f"  ⚠ Could not extract comments from post: {e}")
+                                    logger.warning(f"  âš  Could not extract comments from post: {e}")
                             
                             if total_comments > 0:
-                                logger.info(f"  ✓ Total comments extracted: {total_comments}")
+                                logger.info(f"  âœ“ Total comments extracted: {total_comments}")
                             else:
-                                logger.info(f"  ℹ No comments found in recent posts")
+                                logger.info(f"  â„¹ No comments found in recent posts")
                         else:
-                            logger.info(f"  ℹ No recent posts found on profile")
+                            logger.info(f"  â„¹ No recent posts found on profile")
                             
                     except Exception as e:
-                        logger.warning(f"  ⚠ Could not extract comments from profile: {e}")
+                        logger.warning(f"  âš  Could not extract comments from profile: {e}")
                     
                     await page.close()
                     return True
                 except Exception as e:
-                    logger.error(f"  ✗ Failed to save to database: {e}")
+                    logger.error(f"  âœ— Failed to save to database: {e}")
                     self.db.rollback()
                     await page.close()
                     return False
             else:
-                logger.info(f"  ✗ Not a personal profile (group/page) — skipping")
+                logger.info(f"  âœ— Not a personal profile (group/page) â€” skipping")
                 # Still save a SearchResult (INVALID) so we can attach scraped comments and not lose them
                 if comments_data:
                     try:
@@ -1244,13 +1886,17 @@ class FacebookScraper:
                             location=location_text,
                             post_content=post_content,
                             post_url=post_url,
+                            post_date=post_date,
+                            post_reaction_count=post_reaction_count,
+                            post_comment_count=post_comment_count,
+                            post_share_count=post_share_count,
                             profile_url=profile_url,
                             search_keyword=keyword,
                             status=ResultStatus.INVALID,
                         )
                         self.db.add(search_result)
                         self.db.commit()
-                        logger.info(f"  ✓ Saved as INVALID (ID: {search_result.id}) to store {len(comments_data)} comments")
+                        logger.info(f"  âœ“ Saved as INVALID (ID: {search_result.id}) to store {len(comments_data)} comments")
                         for c in comments_data:
                             pc = PostComment(
                                 search_result_id=search_result.id,
@@ -1261,7 +1907,7 @@ class FacebookScraper:
                             )
                             self.db.add(pc)
                         self.db.commit()
-                        logger.info(f"  ✓ Saved {len(comments_data)} comments")
+                        logger.info(f"  âœ“ Saved {len(comments_data)} comments")
                     except Exception as e:
                         logger.warning(f"  Failed to save skipped profile + comments: {e}")
                         self.db.rollback()
@@ -1269,7 +1915,7 @@ class FacebookScraper:
                 return False
             
         except Exception as e:
-            logger.error(f"  ✗ Error checking profile: {e}")
+            logger.error(f"  âœ— Error checking profile: {e}")
             try:
                 await page.close()
             except:
@@ -1293,15 +1939,20 @@ class FacebookScraper:
                 location=post.get("location"),
                 post_content=post.get("content"),
                 post_url=post_url,
+                post_date=post.get("post_date"),
+                post_reaction_count=post.get("reaction_count"),
+                post_comment_count=post.get("comment_count"),
+                post_share_count=post.get("share_count"),
                 profile_url=post.get("profileUrl"),
                 search_keyword=keyword,
                 status=ResultStatus.PENDING,
             )
             self.db.add(search_result)
             self.db.commit()
-            logger.info(f"✓ Saved post to database: {post_name[:50]}... (ID: {search_result.id})")
+            logger.info(f"âœ“ Saved post to database: {post_name[:50]}... (ID: {search_result.id})")
             return True
         except Exception as e:
             logger.error(f"Failed to save post to database: {e}", exc_info=True)
             self.db.rollback()
             return False
+

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Comment extraction for Facebook search results.
 When Comments button opens a dialog (hasDialog=True), extract from the dialog.
 """
@@ -62,6 +62,13 @@ EXTRACT_FROM_DIALOG_JS = """
         return false;
     }
 
+    function commentKey(authorName, authorUrl, commentText, timestamp) {
+        const who = (authorUrl || authorName || '').trim().toLowerCase();
+        const body = (commentText || '').trim().toLowerCase();
+        const ts = (timestamp || '').trim().toLowerCase();
+        return `${who}|${body}|${ts}`;
+    }
+
     const allDialogs = document.querySelectorAll('[role="dialog"], [aria-modal="true"]');
     let dialog = document.body;
     for (const d of allDialogs) {
@@ -110,8 +117,6 @@ EXTRACT_FROM_DIALOG_JS = """
         }
         if (!authorName || authorName.length < 2) continue;
         if (TIMESTAMP_ONLY.test(authorName) || SKIP.test(authorName) || isObfuscatedOrMetadata(authorName)) continue;
-        const key = authorUrl || authorName;
-        if (seen.has(key)) continue;
 
         let commentText = '';
         const msgBody = container.querySelector('[data-ad-rendering-role="story_message"], [data-ad-comet-preview="message"], div.x1lliihq.xjkvuk6.x1iorvi4');
@@ -146,6 +151,8 @@ EXTRACT_FROM_DIALOG_JS = """
         }
 
         if (authorName && commentText && commentText.length > 5 && !isNotificationOrActivity(commentText) && !isObfuscatedOrMetadata(commentText) && !looksLikeAuthorNameOnly(commentText)) {
+            const key = commentKey(authorName, authorUrl, commentText, timestamp || 'Unknown');
+            if (seen.has(key)) continue;
             seen.add(key);
             comments.push({
                 author_name: authorName,
@@ -182,8 +189,6 @@ EXTRACT_FROM_DIALOG_JS = """
         }
         if (!authorName || authorName.length < 2) continue;
         if (TIMESTAMP_ONLY.test(authorName) || SKIP.test(authorName) || isObfuscatedOrMetadata(authorName)) continue;
-        const key = authorUrl || authorName;
-        if (seen.has(key)) continue;
 
         let commentText = '';
         const storyMsg = container.querySelector('[data-ad-rendering-role="story_message"], [data-ad-comet-preview="message"]');
@@ -215,6 +220,8 @@ EXTRACT_FROM_DIALOG_JS = """
         }
 
         if (authorName && commentText && commentText.length > 5 && !isNotificationOrActivity(commentText) && !isObfuscatedOrMetadata(commentText) && !looksLikeAuthorNameOnly(commentText)) {
+            const key = commentKey(authorName, authorUrl, commentText, timestamp || 'Unknown');
+            if (seen.has(key)) continue;
             seen.add(key);
             comments.push({
                 author_name: authorName,
@@ -237,7 +244,6 @@ EXTRACT_FROM_DIALOG_JS = """
         const authorName = getText(link);
         if (!authorName || authorName.length < 2) continue;
         if (TIMESTAMP_ONLY.test(authorName) || SKIP.test(authorName) || isObfuscatedOrMetadata(authorName)) continue;
-        if (seen.has(link.href)) continue;
 
         let commentText = '';
         const textDivs = parent.querySelectorAll('div[dir="auto"][style*="text-align"], div[dir="auto"], span[dir="auto"]');
@@ -261,7 +267,9 @@ EXTRACT_FROM_DIALOG_JS = """
         }
 
         if (authorName && commentText && commentText.length > 5 && !isNotificationOrActivity(commentText) && !isObfuscatedOrMetadata(commentText) && !looksLikeAuthorNameOnly(commentText)) {
-            seen.add(link.href);
+            const key = commentKey(authorName, link.href, commentText, timestamp || 'Unknown');
+            if (seen.has(key)) continue;
+            seen.add(key);
             comments.push({
                 author_name: authorName,
                 author_profile_url: link.href,
@@ -275,10 +283,85 @@ EXTRACT_FROM_DIALOG_JS = """
 """
 
 
+async def expand_all_comments_in_dialog(
+    page: Page,
+    root_selector: str = '[role="dialog"]',
+    max_cycles: int = 160,
+    stall_limit: int = 12,
+) -> None:
+    """
+    Expand visible "more comments/replies" controls and wait for lazy loading.
+    Stops after repeated cycles with no growth and no clickable expand controls.
+    """
+    no_progress_cycles = 0
+    best_count = 0
+
+    for _ in range(max_cycles):
+        state = await page.evaluate(
+            """
+            (rootSelector) => {
+                const root = document.querySelector(rootSelector) || document;
+                const clickables = root.querySelectorAll('div[role="button"], span[role="button"], a[role="button"], a, span');
+                const include = [
+                    /view more comments?/i,
+                    /view previous comments?/i,
+                    /see more comments?/i,
+                    /more comments?/i,
+                    /view\\s+\\d+\\s+more\\s+repl/i,
+                    /view more repl(?:y|ies)/i,
+                    /more repl(?:y|ies)/i,
+                ];
+                const exclude = /(leave\\s*a\\s*comment|write\\s*a\\s*comment|comment\\s+as|most relevant|all comments|newest)/i;
+                let clicked = 0;
+
+                for (const el of clickables) {
+                    const text = (el.innerText || el.textContent || '').trim();
+                    if (!text || text.length > 120) continue;
+                    if (exclude.test(text)) continue;
+                    if (!include.some((rx) => rx.test(text))) continue;
+                    const visible = !!(el.offsetParent || (el.getClientRects && el.getClientRects().length));
+                    if (!visible) continue;
+                    try {
+                        el.click();
+                        clicked += 1;
+                    } catch (_) {}
+                }
+
+                const count = root.querySelectorAll('div[role="article"][aria-label^="Comment by"]').length;
+                return { clicked, count };
+            }
+            """,
+            root_selector,
+        )
+
+        clicked = int(state.get("clicked", 0))
+        count = int(state.get("count", 0))
+        if count > best_count:
+            best_count = count
+            no_progress_cycles = 0
+        elif clicked == 0:
+            no_progress_cycles += 1
+
+        await page.evaluate(
+            """
+            (rootSelector) => {
+                const root = document.querySelector(rootSelector);
+                if (root) root.scrollTop = root.scrollHeight;
+                else window.scrollBy(0, 900);
+            }
+            """,
+            root_selector,
+        )
+        await asyncio.sleep(random.uniform(1.8, 3.8) if clicked > 0 else random.uniform(1.0, 2.2))
+
+        if no_progress_cycles >= stall_limit:
+            break
+
+
 async def extract_comments_from_post_on_search_page(
     page: Page,
     post_index: int,
-    max_comments: int = 20,
+    max_comments: int = 0,
 ) -> List[Dict]:
     """
     Scroll to post by index, click Comments, wait for dialog, extract comments, close with ESC.
@@ -286,7 +369,8 @@ async def extract_comments_from_post_on_search_page(
     """
     comments_data: List[Dict] = []
     try:
-        logger.info(f"  Extracting comments for post #{post_index} (max={max_comments})")
+        limit = max_comments if max_comments and max_comments > 0 else 5000
+        logger.info(f"  Extracting comments for post #{post_index} (limit={limit if max_comments > 0 else 'ALL'})")
 
         # Scroll to post to make it visible
         logger.info(f"  Scrolling to post #{post_index} to make it visible...")
@@ -339,7 +423,7 @@ async def extract_comments_from_post_on_search_page(
             logger.info("  Comment button not found for this post")
             return comments_data
 
-        logger.info("  ✓ Comment button clicked, waiting for comments to appear...")
+        logger.info("  âœ“ Comment button clicked, waiting for comments to appear...")
 
         await asyncio.sleep(random.uniform(2, 3))
 
@@ -357,22 +441,12 @@ async def extract_comments_from_post_on_search_page(
 
         # FIX: When hasDialog is True, the comments dialog opened - extract from it
         if diag.get("hasDialog"):
-            logger.info("  ✓ Dialog opened, extracting comments...")
-            try:
-                view_more = await page.query_selector(
-                    '[role="dialog"] div[role="button"]:has-text("View more comments"), '
-                    '[role="dialog"] span:has-text("View more comments")'
-                )
-                if view_more:
-                    await view_more.click()
-                    await asyncio.sleep(random.uniform(1.5, 2.5))
-            except Exception:
-                pass
-
-            comments_data = await page.evaluate(EXTRACT_FROM_DIALOG_JS, max_comments)
-            logger.info(f"  ✓ Extracted {len(comments_data)} comments from dialog")
+            logger.info("  Dialog opened, expanding all comments/replies...")
+            await expand_all_comments_in_dialog(page, root_selector='[role="dialog"]')
+            comments_data = await page.evaluate(EXTRACT_FROM_DIALOG_JS, limit)
+            logger.info(f"  Extracted {len(comments_data)} comments from dialog")
         else:
-            logger.info("  ⚠ No dialog found after click - comments may not have loaded")
+            logger.info("  âš  No dialog found after click - comments may not have loaded")
             logger.info(f"  Debug: {diag}")
 
     except Exception as e:
@@ -385,3 +459,4 @@ async def extract_comments_from_post_on_search_page(
             pass
 
     return comments_data
+

@@ -5,12 +5,14 @@ from .core.config import settings
 from .api.routes import search, results, proxy, dashboard, comments
 from .core.database import engine, Base
 from .core.logging_config import setup_logging
+from .core.startup_migrations import run_startup_migrations
 
 # Setup logging
 setup_logging()
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
+run_startup_migrations()
 
 app = FastAPI(
     title=settings.PROJECT_NAME,

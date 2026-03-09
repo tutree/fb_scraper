@@ -10,6 +10,10 @@ class SearchResultBase(BaseModel):
     location: Optional[str] = None
     post_content: Optional[str] = None
     post_url: Optional[str] = None
+    post_date: Optional[str] = None
+    post_reaction_count: Optional[int] = None
+    post_comment_count: Optional[int] = None
+    post_share_count: Optional[int] = None
     search_keyword: str
     profile_url: Optional[str] = None
 
@@ -39,3 +43,29 @@ class SearchResultResponse(SearchResultBase):
 class SearchResultList(BaseModel):
     total: int
     items: List[SearchResultResponse]
+
+
+class AnalyzeResultItem(BaseModel):
+    id: UUID
+    success: bool
+    message: str
+    user_type: Optional[str] = None
+    confidence_score: Optional[float] = None
+    analyzed_at: Optional[datetime] = None
+
+
+class AnalyzeSingleResponse(BaseModel):
+    item: AnalyzeResultItem
+
+
+class AnalyzeBatchRequest(BaseModel):
+    result_ids: List[UUID]
+    force_reanalyze: bool = True
+
+
+class AnalyzeBatchResponse(BaseModel):
+    total: int
+    succeeded: int
+    failed: int
+    skipped: int
+    items: List[AnalyzeResultItem]
