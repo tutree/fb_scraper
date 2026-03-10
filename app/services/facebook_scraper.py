@@ -400,7 +400,7 @@ class FacebookScraper:
                 no_progress_cycles += 1
 
             await page.evaluate("window.scrollBy(0, 900)")
-            await asyncio.sleep(random.uniform(2.0, 4.0) if clicked > 0 else random.uniform(1.0, 2.2))
+            await asyncio.sleep(7)
 
             if no_progress_cycles >= stall_limit:
                 break
@@ -418,26 +418,86 @@ class FacebookScraper:
 
             await asyncio.sleep(random.uniform(1.2, 2.2))
 
+            comment_button_clicked = False
             try:
                 logger.info("  Looking for 'Comment' button...")
                 comment_button_selectors = [
+                    '[aria-label="Leave a comment"]',
                     'div[aria-label="Comment"]',
                     'div[role="button"]:has-text("Comment")',
                     'span:has-text("Comment")',
-                    '[aria-label="Leave a comment"]',
                 ]
                 for selector in comment_button_selectors:
                     try:
                         if await page.is_visible(selector, timeout=2000):
                             await page.click(selector)
-                            await asyncio.sleep(random.uniform(2.0, 3.2))
+                            comment_button_clicked = True
+                            await asyncio.sleep(10)
                             break
                     except Exception:
                         continue
+
+                # Fallback: Facebook often nests the clickable action around this marker.
+                if not comment_button_clicked:
+                    comment_button_clicked = await page.evaluate(
+                        """
+                        () => {
+                            const isVisible = (el) => !!(el && (el.offsetParent || (el.getClientRects && el.getClientRects().length)));
+                            const clickEl = (el) => {
+                                if (!el || !isVisible(el)) return false;
+                                try { el.click(); return true; } catch (_) { return false; }
+                            };
+
+                            const marker = document.querySelector('[data-ad-rendering-role="comment_button"]');
+                            if (marker) {
+                                const btn = marker.closest('[role="button"], [role="link"]');
+                                if (clickEl(btn)) return true;
+                            }
+
+                            const ariaCandidates = document.querySelectorAll('div[role="button"][aria-label], span[role="button"][aria-label], a[role="button"][aria-label]');
+                            for (const el of ariaCandidates) {
+                                const aria = (el.getAttribute('aria-label') || '').trim().toLowerCase();
+                                if (!aria) continue;
+                                if (/leave\\s*a\\s*comment|\\bcomment\\b/i.test(aria) && !/share|reaction|react/i.test(aria)) {
+                                    if (clickEl(el)) return true;
+                                }
+                            }
+
+                            const textCandidates = document.querySelectorAll('div[role="button"], span[role="button"], a[role="button"]');
+                            for (const el of textCandidates) {
+                                const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+                                if (text === 'comment' || text === 'comments') {
+                                    if (clickEl(el)) return true;
+                                }
+                            }
+                            return false;
+                        }
+                        """
+                    )
+                    if comment_button_clicked:
+                        await asyncio.sleep(10)
             except Exception as exc:
                 logger.debug(f"  Could not click Comment button: {exc}")
 
-            has_dialog = await page.evaluate("() => !!document.querySelector('[role=\"dialog\"]')")
+            if comment_button_clicked:
+                try:
+                    await page.wait_for_selector('[role="dialog"]', timeout=10000)
+                except Exception:
+                    pass
+
+            has_dialog = await page.evaluate(
+                """
+                () => {
+                    const dialog = document.querySelector('[role="dialog"]');
+                    if (!dialog) return false;
+                    const text = (dialog.innerText || dialog.textContent || '').toLowerCase();
+                    return (
+                        text.includes('comment') ||
+                        !!dialog.querySelector('div[role="article"][aria-label^="Comment by"], [aria-label^="Write a comment"]')
+                    );
+                }
+                """
+            )
 
             if has_dialog:
                 logger.info("  Comments opened in dialog, expanding all comments/replies...")
@@ -560,24 +620,37 @@ class FacebookScraper:
             return 0
 
     async def _click_comments_and_extract_from_dialog(
-        self, page: Page, profile_url: str, max_comments: int = 0
-    ) -> List[Dict]:
+        self,
+        page: Page,
+        profile_url: str,
+        max_comments: int = 0,
+        visible_index: Optional[int] = None,
+    ):
         """
         On the search results page: find the post containing this profile link,
         click its Comments button to open the dialog, extract comments, then close with ESC.
-        Returns list of comment dicts (author_name, author_profile_url, comment_text, comment_timestamp).
+        Returns (comments: List[Dict], post_url: Optional[str]).
+        post_url is the canonical /posts/ URL read directly from the dialog — the most
+        reliable source since every comment timestamp link contains it.
         Caller should persist these after profile extraction and storage (when search_result_id is known).
         """
         comments_data = []
+        post_url_from_dialog = None
         try:
             limit = self._resolve_comment_limit(max_comments)
             # Normalize profile URL for matching (strip trailing slash, lowercase for comparison)
             profile_path = profile_url.split("?")[0].rstrip("/").lower()
 
+            logger.info(f"  [Comments] Starting comment extraction for profile: {profile_path}")
+            logger.info(f"  [Comments] visible_index={visible_index}, limit={limit if max_comments > 0 else 'ALL'}")
+
             # Find the card containing this profile link and click its Comments button
-            clicked = await page.evaluate(
+            click_result = await page.evaluate(
                 """
-                (profilePath) => {
+                (payload) => {
+                    const profilePath = (payload && payload.profilePath) || '';
+                    const preferredIdx = payload && payload.preferredIdx;
+
                     function normalizeUrl(u) {
                         try {
                             const url = new URL(u, window.location.origin);
@@ -587,12 +660,85 @@ class FacebookScraper:
                         }
                     }
 
+                    function isVisible(el) {
+                        return !!(el && (el.offsetParent || (el.getClientRects && el.getClientRects().length)));
+                    }
+
+                    function clickEl(el) {
+                        if (!el || !isVisible(el)) return false;
+                        try { el.click(); return true; } catch (_) { return false; }
+                    }
+
+                    function clickCommentTrigger(article) {
+                        if (!article) return null;
+
+                        // Strategy 1: "N comments" count button (most reliable).
+                        const summaryNodes = article.querySelectorAll('div[role="button"], span[role="button"], a[role="button"], span, a');
+                        for (const node of summaryNodes) {
+                            const text = (node.innerText || node.textContent || '').trim();
+                            if (!text || !isVisible(node)) continue;
+                            if (/^\\d+[\\s,.]*comments?$/i.test(text)) {
+                                if (clickEl(node)) return 'count_link:' + text;
+                            }
+                        }
+
+                        // Strategy 2: data-ad-rendering-role="comment_button" marker (stable).
+                        const marker = article.querySelector('[data-ad-rendering-role="comment_button"]');
+                        if (marker) {
+                            const btn = marker.closest('[role="button"], [role="link"]');
+                            if (clickEl(btn)) return 'comment_button_marker';
+                        }
+
+                        // Strategy 3: aria-label "Leave a comment" / "Comment".
+                        const ariaButtons = article.querySelectorAll('div[role="button"][aria-label], span[role="button"][aria-label], a[role="button"][aria-label]');
+                        for (const el of ariaButtons) {
+                            const aria = (el.getAttribute('aria-label') || '').trim().toLowerCase();
+                            if (!aria) continue;
+                            if (/leave\\s*a\\s*comment|\\bcomment\\b/i.test(aria) && !/share|reaction|react/i.test(aria)) {
+                                if (clickEl(el)) return 'aria_label:' + aria;
+                            }
+                        }
+
+                        // Strategy 4: Text fallback.
+                        const actionButtons = article.querySelectorAll('div[role="button"], span[role="button"], a[role="button"]');
+                        for (const el of actionButtons) {
+                            const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+                            if ((text === 'comment' || text === 'comments') && clickEl(el)) return 'text_fallback:' + text;
+                        }
+
+                        return null;
+                    }
+
                     const pathToMatch = normalizeUrl(profilePath);
-                    const feed = document.querySelector('div[role="feed"]');
-                    const articles = document.querySelectorAll('div[role="article"]');
+                    const main = document.querySelector('div[role="main"]') || document;
+                    const feed = main.querySelector('div[role="feed"]') || document.querySelector('div[role="feed"]');
+                    const articles = main.querySelectorAll('div[role="article"]');
                     const containers = articles.length > 0 ? Array.from(articles) : (feed ? Array.from(feed.children) : []);
 
-                    for (const article of containers) {
+                    const diag = {
+                        clicked: false,
+                        method: null,
+                        matchedIdx: -1,
+                        containersCount: containers.length,
+                        articlesCount: articles.length,
+                        hasFeed: !!feed,
+                        pageUrl: location.href.substring(0, 100),
+                    };
+
+                    // Primary: use known visible index when available.
+                    if (typeof preferredIdx === 'number' && preferredIdx >= 0 && preferredIdx < containers.length) {
+                        const method = clickCommentTrigger(containers[preferredIdx]);
+                        if (method) {
+                            diag.clicked = true;
+                            diag.method = method;
+                            diag.matchedIdx = preferredIdx;
+                            return diag;
+                        }
+                    }
+
+                    // URL-based matching.
+                    for (let i = 0; i < containers.length; i++) {
+                        const article = containers[i];
                         const anchors = article.querySelectorAll('a[href*="facebook.com"]');
                         let match = false;
                         for (const a of anchors) {
@@ -603,42 +749,135 @@ class FacebookScraper:
                             }
                         }
                         if (!match) continue;
-
-                        // Click "X comments" (e.g. "12 comments") - NOT "Comment" or "Leave a comment"
-                        const buttons = article.querySelectorAll('div[role="button"], span[role="button"], a[role="button"]');
-                        for (const btn of buttons) {
-                            const text = (btn.textContent || '').trim();
-                            if (/\\d+\\s*comments?/i.test(text) && !/leave\\s*a\\s*comment/i.test(text)) {
-                                btn.click();
-                                return true;
-                            }
-                        }
-                        const spans = article.querySelectorAll('span');
-                        for (const s of spans) {
-                            const t = (s.textContent || '').trim();
-                            if (/^\\d+\\s*comments?$/i.test(t) && s.offsetParent) {
-                                s.click();
-                                return true;
-                            }
+                        const method = clickCommentTrigger(article);
+                        if (method) {
+                            diag.clicked = true;
+                            diag.method = method;
+                            diag.matchedIdx = i;
+                            return diag;
                         }
                     }
-                    return false;
+
+                    // Last-resort: try first 8 visible cards.
+                    for (let i = 0; i < Math.min(containers.length, 8); i++) {
+                        const method = clickCommentTrigger(containers[i]);
+                        if (method) {
+                            diag.clicked = true;
+                            diag.method = 'fallback_card_' + i;
+                            diag.matchedIdx = i;
+                            return diag;
+                        }
+                    }
+
+                    return diag;
                 }
                 """,
-                profile_path,
+                {
+                    "profilePath": profile_path,
+                    "preferredIdx": int(visible_index) if isinstance(visible_index, int) else None,
+                },
             )
 
+            # Support both old (bool) and new (dict) return shapes
+            if isinstance(click_result, dict):
+                clicked = bool(click_result.get("clicked"))
+                logger.info(
+                    f"  [Comments click] clicked={clicked} | method={click_result.get('method')} | "
+                    f"matchedIdx={click_result.get('matchedIdx')} | containers={click_result.get('containersCount')} "
+                    f"(articles={click_result.get('articlesCount')}, hasFeed={click_result.get('hasFeed')}) | "
+                    f"pageUrl={click_result.get('pageUrl')}"
+                )
+            else:
+                clicked = bool(click_result)
+                logger.info(f"  [Comments click] clicked={clicked} (legacy bool result)")
+
             if not clicked:
-                logger.info("  Comments button not found for this post, skipping dialog extraction")
+                # Log diagnostic info to help debug why click failed
+                dom_diag = await page.evaluate(
+                    """
+                    () => ({
+                        url: location.href.substring(0, 120),
+                        roleMain: !!document.querySelector('[role="main"]'),
+                        roleFeed: !!document.querySelector('[role="feed"]'),
+                        roleArticle: document.querySelectorAll('[role="article"]').length,
+                        commentButtonMarkers: document.querySelectorAll('[data-ad-rendering-role="comment_button"]').length,
+                        leaveCommentBtns: document.querySelectorAll('[aria-label*="comment" i][role="button"]').length,
+                    })
+                    """
+                )
+                logger.warning(f"  [Comments click] FAILED - no comment button found. DOM state: {dom_diag}")
                 return comments_data
 
-            await asyncio.sleep(random.uniform(2.0, 3.5))  # Wait for dialog to open
+            logger.info("  [Comments click] SUCCESS - waiting for dialog to open...")
+            await asyncio.sleep(10)  # Wait for dialog to open
+            try:
+                await page.wait_for_selector('[role="dialog"]', timeout=10000)
+                logger.info("  [Comments] dialog selector appeared in DOM")
+            except Exception:
+                logger.warning("  [Comments] wait_for_selector('[role=dialog]') timed out after 10s")
+
+            # Check dialog state with richer diagnostics
+            dialog_diag = await page.evaluate(
+                """
+                () => {
+                    const dialogs = document.querySelectorAll('[role="dialog"]');
+                    if (dialogs.length === 0) return { hasDialog: false, dialogCount: 0, reason: 'no_dialog' };
+                    const dialog = dialogs[0];
+                    const text = (dialog.innerText || dialog.textContent || '').toLowerCase();
+                    const commentArticles = dialog.querySelectorAll('div[role="article"][aria-label^="Comment by"]').length;
+                    const writeCommentInput = !!dialog.querySelector('[aria-label^="Write a comment"]');
+                    const profileNames = dialog.querySelectorAll('[data-ad-rendering-role="profile_name"]').length;
+                    const hasCommentText = text.includes('comment');
+                    const snippet = (dialog.innerText || '').substring(0, 200).replace(/\\n+/g, ' | ');
+                    return {
+                        hasDialog: hasCommentText || commentArticles > 0 || writeCommentInput || profileNames > 2,
+                        dialogCount: dialogs.length,
+                        commentArticles,
+                        writeCommentInput,
+                        profileNames,
+                        hasCommentText,
+                        snippet,
+                        reason: hasCommentText ? 'has_comment_text' : (commentArticles > 0 ? 'has_articles' : 'unknown'),
+                    };
+                }
+                """
+            )
+            logger.info(
+                f"  [Comments dialog] hasDialog={dialog_diag.get('hasDialog')} | "
+                f"dialogs={dialog_diag.get('dialogCount')} | articles={dialog_diag.get('commentArticles')} | "
+                f"writeInput={dialog_diag.get('writeCommentInput')} | profileNames={dialog_diag.get('profileNames')} | "
+                f"hasCommentText={dialog_diag.get('hasCommentText')} | reason={dialog_diag.get('reason')}"
+            )
+            logger.info(f"  [Comments dialog snippet] {dialog_diag.get('snippet', '')[:150]}")
+
+            has_dialog = bool(dialog_diag.get("hasDialog"))
+            if not has_dialog:
+                logger.warning("  [Comments] Comment click did NOT open a recognizable comments dialog")
+                return comments_data
+
+            logger.info("  [Comments] Dialog confirmed - expanding all comments/replies...")
             await expand_all_comments_in_dialog(page, root_selector='[role="dialog"]')
 
-            # Extract comments from the dialog (innerText, Comment-by filter, obfuscation rejection)
+            # Extract comments from the dialog
             comments_data = await page.evaluate(EXTRACT_FROM_DIALOG_JS, limit)
+            logger.info(f"  [Comments] Extracted {len(comments_data)} comments from dialog")
 
-            logger.info(f"  Extracted {len(comments_data)} comments from dialog")
+            # Extract post URL directly from the dialog — every comment timestamp link
+            # contains the canonical /posts/ URL, so this is more reliable than share-button.
+            post_url_from_dialog = await page.evaluate(
+                """
+                () => {
+                    const a = document.querySelector(
+                        'a[href*="/posts/"], a[href*="/permalink.php"]'
+                    );
+                    return a ? a.getAttribute('href').split('?')[0] : null;
+                }
+                """
+            )
+            if post_url_from_dialog:
+                logger.info(f"  [PostURL] Extracted from dialog: {post_url_from_dialog}")
+            else:
+                logger.info("  [PostURL] No /posts/ link found in dialog")
 
         except Exception as e:
             logger.warning(f"  Could not extract comments from dialog: {e}")
@@ -650,7 +889,199 @@ class FacebookScraper:
             except Exception:
                 pass
 
-        return comments_data
+        return comments_data, post_url_from_dialog
+
+    async def _capture_post_url_via_share_button(
+        self,
+        page: Page,
+        link: Dict,
+    ) -> Optional[str]:
+        """
+        Open a post card's Share sheet and click "Copy link".
+        Returns copied URL when available.
+        """
+        visible_index = link.get("visible_index")
+        if visible_index is None:
+            return None
+
+        try:
+            post_index = int(visible_index)
+        except Exception:
+            return None
+
+        try:
+            card_found = await page.evaluate(
+                """
+                (idx) => {
+                    const main = document.querySelector('div[role="main"]') || document;
+                    const articles = main.querySelectorAll('div[role="article"]');
+                    const feed = main.querySelector('div[role="feed"]');
+                    const cards = articles.length > 0 ? Array.from(articles) : (feed ? Array.from(feed.children) : []);
+                    const card = cards[idx];
+                    if (!card) return false;
+                    card.scrollIntoView({ block: 'center', behavior: 'instant' });
+                    return true;
+                }
+                """,
+                post_index,
+            )
+            if not card_found:
+                return None
+
+            await asyncio.sleep(random.uniform(0.8, 1.5))
+
+            clicked_share = await page.evaluate(
+                """
+                (idx) => {
+                    const main = document.querySelector('div[role="main"]') || document;
+                    const articles = main.querySelectorAll('div[role="article"]');
+                    const feed = main.querySelector('div[role="feed"]');
+                    const cards = articles.length > 0 ? Array.from(articles) : (feed ? Array.from(feed.children) : []);
+                    const card = cards[idx];
+                    if (!card) return false;
+
+                    const inner = card.querySelector('div[data-ad-rendering-role="share_button"]');
+                    let button = inner ? inner.closest('div[role="button"]') : null;
+
+                    if (!button) {
+                        const candidates = card.querySelectorAll('div[role="button"], span[role="button"], a[role="button"]');
+                        for (const el of candidates) {
+                            const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+                            const aria = (el.getAttribute('aria-label') || '').trim().toLowerCase();
+                            if (
+                                text === 'share' ||
+                                aria.includes('send this to friends') ||
+                                aria.includes('share')
+                            ) {
+                                button = el;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!button) return false;
+                    button.click();
+                    return true;
+                }
+                """,
+                post_index,
+            )
+            if not clicked_share:
+                logger.debug("  [PostURL] Share button not found for card index %d", post_index)
+                return None
+
+            logger.debug("  [PostURL] Share button clicked, waiting for share dialog...")
+            await asyncio.sleep(random.uniform(1.1, 2.0))
+
+            # Step 1: Try to extract URL directly from share dialog (most reliable - no clipboard needed)
+            direct_url = await page.evaluate(
+                """
+                () => {
+                    const dialog = document.querySelector('[role="dialog"]') || document;
+                    // Check for text inputs / readonly inputs containing a URL
+                    const inputs = dialog.querySelectorAll('input[type="text"], input[readonly], input');
+                    for (const input of inputs) {
+                        const val = (input.value || '').trim();
+                        if (val.startsWith('http') && val.includes('facebook.com')) {
+                            return val.split('&__')[0];
+                        }
+                    }
+                    // Check for /share/p/ links
+                    const anchors = Array.from(dialog.querySelectorAll('a[href]'));
+                    for (const anchor of anchors) {
+                        const href = (anchor.href || '').trim();
+                        if (!href) continue;
+                        if (href.includes('/share/p/')) {
+                            return href.split('&__')[0];
+                        }
+                        // Link whose text= param contains a FB post URL
+                        try {
+                            const url = new URL(href);
+                            const textParam = url.searchParams.get('text');
+                            if (!textParam) continue;
+                            const decoded = decodeURIComponent(textParam);
+                            const match = decoded.match(/https?:\\/\\/[^\\s]+/i);
+                            if (match && match[0] && match[0].includes('facebook.com')) {
+                                return match[0].replace(/([?&])fbclid=[^&]+/i, '');
+                            }
+                        } catch (_) {}
+                    }
+                    return '';
+                }
+                """
+            )
+            direct_url = str(direct_url or "").strip()
+            if direct_url.startswith("http"):
+                logger.debug("  [PostURL] Got URL from share dialog directly: %s", direct_url[:80])
+                return direct_url
+
+            # Step 2: Try clicking "Copy link" and reading clipboard
+            copy_clicked = await page.evaluate(
+                """
+                () => {
+                    const dialog = document.querySelector('[role="dialog"]');
+                    if (!dialog) return false;
+
+                    const labels = Array.from(dialog.querySelectorAll('span, div')).filter((el) => {
+                        const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+                        return text === 'copy link';
+                    });
+                    for (const label of labels) {
+                        const button = label.closest('div[role="button"], a[role="link"], span[role="button"]');
+                        if (button) {
+                            button.click();
+                            return true;
+                        }
+                    }
+
+                    const direct = Array.from(dialog.querySelectorAll('div[role="button"], a[role="link"]')).find((el) => {
+                        const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+                        return text.includes('copy link');
+                    });
+                    if (direct) {
+                        direct.click();
+                        return true;
+                    }
+                    return false;
+                }
+                """
+            )
+            if not copy_clicked:
+                logger.debug("  [PostURL] 'Copy link' button not found in share dialog")
+                return None
+
+            await asyncio.sleep(random.uniform(0.3, 0.9))
+
+            copied_url = await page.evaluate(
+                """
+                async () => {
+                    try {
+                        if (navigator.clipboard && navigator.clipboard.readText) {
+                            const value = await navigator.clipboard.readText();
+                            return (value || '').trim();
+                        }
+                    } catch (_) {}
+                    return '';
+                }
+                """
+            )
+            copied_url = str(copied_url or "").strip()
+            if copied_url.startswith("http"):
+                logger.debug("  [PostURL] Got URL from clipboard: %s", copied_url[:80])
+                return copied_url
+
+            logger.debug("  [PostURL] Clipboard read failed or empty, share flow exhausted")
+
+        except Exception as exc:
+            logger.debug("  [PostURL] Share -> Copy link flow failed: %s", exc)
+        finally:
+            try:
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.25)
+            except Exception:
+                pass
+
+        return None
 
     @retry(
         stop=stop_after_attempt(3),
@@ -885,7 +1316,7 @@ class FacebookScraper:
                 await page.goto(search_url, wait_until="domcontentloaded", timeout=120000)
             
             # Wait and look around before scraping
-            wait_time = random.uniform(4, 8)
+            wait_time = 10
             logger.info(f"Waiting {wait_time:.1f}s for results to load...")
             if await self._sleep_with_stop(wait_time, should_stop=should_stop):
                 logger.warning("Stop requested while waiting for results load.")
@@ -918,13 +1349,13 @@ class FacebookScraper:
             logger.info("Waiting for post elements to appear...")
             # Try multiple selectors for posts
             try:
-                await page.wait_for_selector('blockquote.html-blockquote, div[data-ad-rendering-role="story_message"], div[role="article"]', timeout=30000)
+                await page.wait_for_selector('blockquote.html-blockquote, div[data-ad-rendering-role="story_message"], div[role="article"]', timeout=10000)
                 logger.info("âœ“ Post elements found, starting extraction...")
                 
             except Exception as e:
                 logger.warning(f"Standard selectors not found, trying alternative approach: {e}")
                 # Wait a bit and try to extract anyway
-                if await self._sleep_with_stop(5, should_stop=should_stop):
+                if await self._sleep_with_stop(10, should_stop=should_stop):
                     logger.warning("Stop requested while waiting for alternative post detection.")
                     return 0
 
@@ -957,14 +1388,9 @@ class FacebookScraper:
                 logger.warning("Stop requested before scroll warmup completed.")
                 return 0
             await page.evaluate("window.scrollBy(0, 1800)")
-            if await self._sleep_with_stop(random.uniform(1.5, 2.8), should_stop=should_stop):
+            if await self._sleep_with_stop(8, should_stop=should_stop):
                 logger.warning("Stop requested during scroll warmup delay.")
                 return 0
-            if i % 3 == 2:
-                # Periodic longer pause gives FB time to hydrate newer cards.
-                if await self._sleep_with_stop(random.uniform(2.5, 4.5), should_stop=should_stop):
-                    logger.warning("Stop requested during extended warmup pause.")
-                    return 0
 
         # Save a screenshot for debugging
         try:
@@ -1364,7 +1790,7 @@ class FacebookScraper:
                     break
 
                 await page.evaluate("window.scrollBy(0, 2500)")
-                if await self._sleep_with_stop(random.uniform(2.0, 3.5), should_stop=should_stop):
+                if await self._sleep_with_stop(8, should_stop=should_stop):
                     break
 
                 # Secondary broad extraction: less strict, catches feed cards that lack role=article.
@@ -1544,27 +1970,60 @@ class FacebookScraper:
 
             logger.info(f"Processing link {i+1}/{len(filtered_links)}: {link.get('text', '') or link['url'][:50]}")
 
-            # 1) Scrape comments for this post (on search page), then we'll save with this profile
+            # 1) Use Share -> Copy link from post card to capture canonical post URL.
+            extracted_post_url = link.get('post_url')
+            logger.info(f"  [PostURL] JS-extracted post_url={extracted_post_url!r} (from extractPostUrl during scroll)")
+            try:
+                shared_post_url = await self._capture_post_url_via_share_button(page, link)
+                if shared_post_url:
+                    link["post_url"] = shared_post_url
+                    logger.info(f"  [PostURL] Captured via Share->CopyLink: {shared_post_url[:80]}")
+                else:
+                    logger.info(f"  [PostURL] Share->CopyLink returned nothing, keeping JS-extracted: {extracted_post_url!r}")
+            except Exception as e:
+                logger.debug("  [PostURL] Share link capture error: %s", e)
+
+            # 2) Scrape comments for this post (on search page), then we'll save with this profile
             comments_data = []
             try:
                 # Primary path: locate the correct card by profile URL and open its comments dialog.
-                comments_data = await self._click_comments_and_extract_from_dialog(page, link["url"], max_comments=0)
+                comments_data, dialog_post_url = await self._click_comments_and_extract_from_dialog(
+                    page,
+                    link["url"],
+                    max_comments=0,
+                    visible_index=link.get("visible_index"),
+                )
+
+                # Use the URL read directly from the dialog as the canonical post URL.
+                # This is more reliable than the share-button approach because every
+                # comment timestamp link already contains the full /posts/ URL.
+                if dialog_post_url:
+                    link["post_url"] = dialog_post_url
+                    logger.info(f"  [PostURL] Set from dialog: {dialog_post_url}")
+                elif not link.get("post_url"):
+                    logger.info("  [PostURL] Dialog gave no URL and share button also failed — post_url will be None")
 
                 # Fallback for feed-only layouts where DOM changes can break URL matching.
                 if not comments_data and use_index_based_comments:
                     from .facebook_comment_fix import extract_comments_from_post_on_search_page
                     post_index = int(link.get("visible_index", i))
-                    comments_data = await extract_comments_from_post_on_search_page(
+                    logger.info(f"  [Comments] Primary path returned 0 comments, trying index-based fallback (idx={post_index})")
+                    comments_data, fallback_post_url = await extract_comments_from_post_on_search_page(
                         page,
                         post_index,
                         max_comments=0,
                     )
+                    if fallback_post_url and not link.get("post_url"):
+                        link["post_url"] = fallback_post_url
+                        logger.info(f"  [PostURL] Set from fallback dialog: {fallback_post_url}")
                 if comments_data:
-                    logger.info(f"  Scraped {len(comments_data)} comments (will save with this profile)")
+                    logger.info(f"  [Comments] Final count: {len(comments_data)} comments to save with this profile")
+                else:
+                    logger.info(f"  [Comments] No comments scraped for this post")
             except Exception as e:
-                logger.debug(f"  Comment extraction skipped: {e}")
+                logger.warning(f"  [Comments] Comment extraction error: {e}")
 
-            # 2) Fetch profile and store to DB (with the comments we just scraped)
+            # 3) Fetch profile and store to DB (with the comments we just scraped)
             account_uid = getattr(self, '_current_account', {}).get('uid', '')
             new_page = await self.browser_manager.create_page_with_cookies(account_uid)
             try:

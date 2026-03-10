@@ -401,10 +401,17 @@ function App() {
               <button type="button" className="rounded-full px-3 py-1 text-xl text-slate-500 hover:bg-slate-100" onClick={closeDetail}>x</button>
             </div>
             <div className="space-y-4 px-6 py-5 text-sm text-slate-700">
-              <p><span className="font-semibold">Name:</span> {selectedResult.name || 'N/A'}</p>
-              <p><span className="font-semibold">Keyword:</span> {selectedResult.search_keyword || 'N/A'}</p>
-              <p><span className="font-semibold">Location:</span> {selectedResult.location || 'N/A'}</p>
-              <p><span className="font-semibold">Status:</span> {selectedResult.status || 'N/A'}</p>
+              <div className="grid gap-3 md:grid-cols-2">
+                <p><span className="font-semibold">Name:</span> {selectedResult.name || 'N/A'}</p>
+                <p><span className="font-semibold">Keyword:</span> {selectedResult.search_keyword || 'N/A'}</p>
+                <p><span className="font-semibold">Location:</span> {selectedResult.location || 'N/A'}</p>
+                <p><span className="font-semibold">Status:</span> {selectedResult.status || 'N/A'}</p>
+                <p><span className="font-semibold">Reactions:</span> {selectedResult.post_reaction_count ?? 'N/A'}</p>
+                <p><span className="font-semibold">Comments:</span> {selectedResult.post_comment_count ?? 'N/A'}</p>
+                <p><span className="font-semibold">Shares:</span> {selectedResult.post_share_count ?? 'N/A'}</p>
+                <p><span className="font-semibold">Post Date:</span> {selectedResult.post_date ?? 'N/A'}</p>
+                <p className="md:col-span-2"><span className="font-semibold">Analyzed At:</span> {selectedResult.analyzed_at ? new Date(selectedResult.analyzed_at).toLocaleString() : 'N/A'}</p>
+              </div>
               <div>
                 <p><span className="font-semibold">Profile URL:</span></p>
                 {selectedResult.profile_url ? (
@@ -435,11 +442,6 @@ function App() {
                   <p>N/A</p>
                 )}
               </div>
-              <p><span className="font-semibold">Reactions:</span> {selectedResult.post_reaction_count ?? 'N/A'}</p>
-              <p><span className="font-semibold">Comments:</span> {selectedResult.post_comment_count ?? 'N/A'}</p>
-              <p><span className="font-semibold">Shares:</span> {selectedResult.post_share_count ?? 'N/A'}</p>
-              <p><span className="font-semibold">Post Date:</span> {selectedResult.post_date ?? 'N/A'}</p>
-              <p><span className="font-semibold">Analyzed At:</span> {selectedResult.analyzed_at ? new Date(selectedResult.analyzed_at).toLocaleString() : 'N/A'}</p>
               <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 whitespace-pre-wrap">{selectedResult.post_content || 'N/A'}</div>
               {selectedResult.analysis_message && <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 whitespace-pre-wrap">{selectedResult.analysis_message}</div>}
               <div>

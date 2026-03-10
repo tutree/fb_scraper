@@ -352,7 +352,7 @@ async def expand_all_comments_in_dialog(
             """,
             root_selector,
         )
-        await asyncio.sleep(random.uniform(1.8, 3.8) if clicked > 0 else random.uniform(1.0, 2.2))
+        await asyncio.sleep(7)
 
         if no_progress_cycles >= stall_limit:
             break
@@ -362,12 +362,15 @@ async def extract_comments_from_post_on_search_page(
     page: Page,
     post_index: int,
     max_comments: int = 0,
-) -> List[Dict]:
+):
     """
     Scroll to post by index, click Comments, wait for dialog, extract comments, close with ESC.
+    Returns (comments: List[Dict], post_url: Optional[str]).
+    post_url is the canonical /posts/ URL read from the dialog.
     Fix: When hasDialog=True, comments ARE there - extract from dialog (don't fail on hasPanel).
     """
     comments_data: List[Dict] = []
+    post_url_from_dialog = None
     try:
         limit = max_comments if max_comments and max_comments > 0 else 5000
         logger.info(f"  Extracting comments for post #{post_index} (limit={limit if max_comments > 0 else 'ALL'})")
@@ -385,54 +388,115 @@ async def extract_comments_from_post_on_search_page(
             """,
             post_index,
         )
-        await asyncio.sleep(random.uniform(1.5, 2.5))
+        await asyncio.sleep(8)
 
-        # Click "X comments" button - try feed children when articles=0
+        # Click a comments trigger (count summary or action button) for this post.
         clicked = await page.evaluate(
             """
             (idx) => {
                 const feed = document.querySelector('div[role="feed"]');
                 const articles = document.querySelectorAll('div[role="article"]');
                 const containers = articles.length > 0 ? Array.from(articles) : (feed ? Array.from(feed.children) : []);
-                const el = containers[idx];
-                if (!el) return false;
 
-                const buttons = el.querySelectorAll('div[role="button"]');
-                for (const btn of buttons) {
-                    const text = (btn.textContent || '').trim();
-                    if (/\\d+\\s*comments?/i.test(text) && !/leave\\s*a\\s*comment/i.test(text)) {
-                        btn.click();
+                function isVisible(el) {
+                    return !!(el && (el.offsetParent || (el.getClientRects && el.getClientRects().length)));
+                }
+
+                function clickEl(el) {
+                    if (!el || !isVisible(el)) return false;
+                    try {
+                        el.click();
                         return true;
+                    } catch (_) {
+                        return false;
                     }
                 }
-                const spans = el.querySelectorAll('span');
-                for (const s of spans) {
-                    const t = (s.textContent || '').trim();
-                    if (/^\\d+\\s*comments?$/i.test(t) && s.offsetParent) {
-                        s.click();
-                        return true;
+
+                function clickCommentTrigger(card) {
+                    if (!card) return {clicked: false, method: null, reason: 'no_card'};
+
+                    const summaryNodes = card.querySelectorAll('div[role="button"], span[role="button"], a[role="button"], span, a');
+                    for (const node of summaryNodes) {
+                        const text = (node.innerText || node.textContent || '').trim();
+                        if (!text || !isVisible(node)) continue;
+                        if (/^\\d+[\\s,.]*comments?$/i.test(text)) {
+                            if (clickEl(node)) return {clicked: true, method: 'count_text'};
+                        }
                     }
+
+                    const marker = card.querySelector('[data-ad-rendering-role="comment_button"]');
+                    if (marker) {
+                        const btn = marker.closest('[role="button"], [role="link"]');
+                        if (clickEl(btn)) return {clicked: true, method: 'ad_rendering_role'};
+                    }
+
+                    const ariaButtons = card.querySelectorAll('div[role="button"][aria-label], span[role="button"][aria-label], a[role="button"][aria-label]');
+                    for (const el of ariaButtons) {
+                        const aria = (el.getAttribute('aria-label') || '').trim().toLowerCase();
+                        if (!aria) continue;
+                        if (/leave\\s*a\\s*comment|\\bcomment\\b/i.test(aria) && !/share|reaction|react/i.test(aria)) {
+                            if (clickEl(el)) return {clicked: true, method: 'aria_label'};
+                        }
+                    }
+
+                    const actionButtons = card.querySelectorAll('div[role="button"], span[role="button"], a[role="button"]');
+                    for (const el of actionButtons) {
+                        const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+                        if ((text === 'comment' || text === 'comments') && clickEl(el)) return {clicked: true, method: 'action_button_text'};
+                    }
+
+                    return {clicked: false, method: null, reason: 'no_trigger_found'};
                 }
-                return false;
+
+                const el = containers[idx];
+                if (!el) return {clicked: false, method: null, reason: 'no_container_at_idx', containersCount: containers.length, articlesCount: articles.length, hasFeed: !!feed};
+                const result = clickCommentTrigger(el);
+                result.containersCount = containers.length;
+                result.articlesCount = articles.length;
+                result.hasFeed = !!feed;
+                return result;
             }
             """,
             post_index,
         )
 
-        if not clicked:
-            logger.info("  Comment button not found for this post")
+        click_ok = bool(clicked.get("clicked")) if isinstance(clicked, dict) else bool(clicked)
+        logger.info(
+            "  [fix click] post_index=%d clicked=%s | method=%s | containers=%s articles=%s hasFeed=%s | reason=%s",
+            post_index,
+            click_ok,
+            clicked.get("method") if isinstance(clicked, dict) else "n/a",
+            clicked.get("containersCount") if isinstance(clicked, dict) else "n/a",
+            clicked.get("articlesCount") if isinstance(clicked, dict) else "n/a",
+            clicked.get("hasFeed") if isinstance(clicked, dict) else "n/a",
+            clicked.get("reason", "") if isinstance(clicked, dict) else "",
+        )
+        if not click_ok:
+            logger.info("  [fix] Comment button not found for post #%d", post_index)
             return comments_data
 
-        logger.info("  âœ“ Comment button clicked, waiting for comments to appear...")
+        logger.info("  [fix] Comment button clicked via method=%s, waiting for dialog...", clicked.get("method") if isinstance(clicked, dict) else "unknown")
 
-        await asyncio.sleep(random.uniform(2, 3))
+        await asyncio.sleep(10)
+        try:
+            await page.wait_for_selector('[role="dialog"]', timeout=10000)
+        except Exception:
+            pass
 
         # Check for dialog OR panel - hasDialog=True means success!
         diag = await page.evaluate(
             """
             () => ({
                 hasPanel: !!document.querySelector('[role="dialog"] [data-pagelet]'),
-                hasDialog: !!document.querySelector('[role="dialog"]'),
+                hasDialog: (() => {
+                    const dialog = document.querySelector('[role="dialog"]');
+                    if (!dialog) return false;
+                    const text = (dialog.innerText || dialog.textContent || '').toLowerCase();
+                    return (
+                        text.includes('comment') ||
+                        !!dialog.querySelector('div[role="article"][aria-label^="Comment by"], [aria-label^="Write a comment"]')
+                    );
+                })(),
                 articleCount: document.querySelectorAll('div[role="article"]').length,
                 bodySnippet: document.body ? document.body.innerText.slice(0, 400) : 'NO BODY'
             })
@@ -445,8 +509,22 @@ async def extract_comments_from_post_on_search_page(
             await expand_all_comments_in_dialog(page, root_selector='[role="dialog"]')
             comments_data = await page.evaluate(EXTRACT_FROM_DIALOG_JS, limit)
             logger.info(f"  Extracted {len(comments_data)} comments from dialog")
+
+            # Extract the canonical post URL — every comment timestamp link contains it.
+            post_url_from_dialog = await page.evaluate(
+                """
+                () => {
+                    const a = document.querySelector(
+                        'a[href*="/posts/"], a[href*="/permalink.php"]'
+                    );
+                    return a ? a.getAttribute('href').split('?')[0] : null;
+                }
+                """
+            )
+            if post_url_from_dialog:
+                logger.info(f"  [PostURL] Extracted from dialog: {post_url_from_dialog}")
         else:
-            logger.info("  âš  No dialog found after click - comments may not have loaded")
+            logger.info("  \u26a0  No dialog found after click - comments may not have loaded")
             logger.info(f"  Debug: {diag}")
 
     except Exception as e:
@@ -458,5 +536,5 @@ async def extract_comments_from_post_on_search_page(
         except Exception:
             pass
 
-    return comments_data
+    return comments_data, post_url_from_dialog
 
