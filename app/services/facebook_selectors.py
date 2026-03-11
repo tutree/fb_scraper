@@ -218,38 +218,135 @@ EXTRACT_DIALOG_COMMENTS_JS = """
         const text = (d.innerText || d.textContent || '').toLowerCase();
         return text.includes('write a comment') || text.includes('leave a comment');
     }
+
+    function getText(el) {
+        if (!el) return '';
+        return (el.innerText || el.textContent || '').trim();
+    }
+
+    function isProfileUrl(url) {
+        if (!url || !url.includes('facebook.com')) return false;
+        if (url.includes('/groups/') || url.includes('/pages/') || url.includes('/events/')) return false;
+        return true;
+    }
+
+    const SKIP = /^(Like|Reply|Share|Comment|Facebook|Anonymous participant|\d+[smhdw]|Just now|Yesterday|See more|\d+ min|\d+ hr|\d+ (w|d|m|y))/i;
+    const TIMESTAMP_RE = /^(\d+[smhdw]?|Just now|Yesterday|\d+ min|\d+ hr|\d+ (w|d|m|y))$/i;
+
+    function looksLikeAuthorNameOnly(text) {
+        if (!text || text.length > 100) return false;
+        if (/[.!?]/.test(text)) return false;
+        const words = text.trim().split(/\s+/);
+        if (words.length > 4) return false;
+        if (/^[A-Z][a-z']+(\s+[A-Z][a-z']+){0,3}$/.test(text.trim())) return true;
+        return words.length <= 3 && text.length < 40;
+    }
+
+    function isAuthorProfileLink(a) {
+        if (!a || !a.href) return false;
+        if (!isProfileUrl(a.href)) return false;
+        const text = getText(a);
+        if (!text || TIMESTAMP_RE.test(text) || SKIP.test(text)) return false;
+        return true;
+    }
+
+    function extractTimestamp(container, label) {
+        for (const s of container.querySelectorAll('span, abbr, a')) {
+            const text = getText(s);
+            if (TIMESTAMP_RE.test(text)) return text;
+        }
+        const cleaned = (label || '').replace(/^Comment by\s+/i, '').trim();
+        const tsMatch = cleaned.match(/(Just now|Yesterday|\d+\s*(?:min|hr|[smhdwmy]))$/i);
+        return tsMatch ? tsMatch[1].trim() : '';
+    }
+
+    function extractAuthor(container, label) {
+        for (const a of container.querySelectorAll('a[href*="facebook.com"]')) {
+            if (isAuthorProfileLink(a)) {
+                return {
+                    name: getText(a),
+                    url: a.getAttribute('href').split('?')[0],
+                };
+            }
+        }
+
+        const fromLabel = (label || '').match(/^Comment by\s+(.+?)(?:,\s*|\s+(?:Just now|Yesterday|\d+\s*(?:min|hr|[smhdwmy]))$)/i);
+        if (fromLabel) {
+            return { name: fromLabel[1].trim(), url: null };
+        }
+
+        const pn = container.querySelector('[data-ad-rendering-role="profile_name"]');
+        const fallbackName = getText(pn);
+        return { name: fallbackName || 'Unknown', url: null };
+    }
+
+    function extractBody(container, authorName) {
+        const selectors = [
+            '[data-ad-rendering-role="story_message"]',
+            '[data-ad-comet-preview="message"]',
+            'div.x1lliihq.xjkvuk6.x1iorvi4'
+        ];
+
+        for (const selector of selectors) {
+            const root = container.querySelector(selector);
+            if (!root) continue;
+            const candidates = root.querySelectorAll('div[dir="auto"], span[dir="auto"], div[data-ad-preview="message"]');
+            for (const node of candidates) {
+                const text = getText(node);
+                if (text && text !== authorName && !SKIP.test(text) && !looksLikeAuthorNameOnly(text)) {
+                    return text;
+                }
+            }
+            const rootText = getText(root);
+            if (rootText && rootText !== authorName && !looksLikeAuthorNameOnly(rootText)) {
+                return rootText;
+            }
+        }
+
+        const candidates = container.querySelectorAll('div[dir="auto"], span[dir="auto"]');
+        for (const node of candidates) {
+            const text = getText(node);
+            if (!text || text === authorName || SKIP.test(text) || looksLikeAuthorNameOnly(text)) continue;
+            if (TIMESTAMP_RE.test(text)) continue;
+            return text;
+        }
+
+        const lines = getText(container)
+            .split('\\n')
+            .map((line) => line.trim())
+            .filter((line) => line && line !== authorName && !SKIP.test(line) && !TIMESTAMP_RE.test(line) && !looksLikeAuthorNameOnly(line));
+        return lines.length ? lines[0] : '';
+    }
+
     const dialog = Array.from(document.querySelectorAll('[role="dialog"]')).find(isCommentDialog);
     if (!dialog) return [];
+
     const limit = (typeof maxComments === 'number' && maxComments > 0) ? maxComments : Number.MAX_SAFE_INTEGER;
-    const articles = Array.from(
-        dialog.querySelectorAll('div[role="article"][aria-label^="Comment by"]')
-    );
+    const articles = Array.from(dialog.querySelectorAll('div[role="article"][aria-label^="Comment by"]'));
     const out = [];
+    const seen = new Set();
+
     for (let idx = 0; idx < articles.length && out.length < limit; idx++) {
-        const a = articles[idx];
-        const label = a.getAttribute('aria-label') || '';
-        const m = label.match(/^Comment by ([^,]+)/);
-        const name = m ? m[1].trim() : 'Unknown';
+        const article = articles[idx];
+        const label = article.getAttribute('aria-label') || '';
+        const author = extractAuthor(article, label);
+        const timestamp = extractTimestamp(article, label);
+        const bodyText = extractBody(article, author.name);
 
-        const profileLink = a.querySelector('a[href*="facebook.com"]');
-        const profileUrl = profileLink
-            ? profileLink.getAttribute('href').split('?')[0]
-            : null;
+        if (!author.name || !bodyText) continue;
 
-        const bodyEl = a.querySelector('[dir="auto"]');
-        const bodyText = bodyEl
-            ? (bodyEl.innerText || bodyEl.textContent || '').trim()
-            : (a.innerText || a.textContent || '').trim();
-
-        const ts = label.replace(/^Comment by [^,]+,?\s*/, '').trim();
+        const key = `${(author.url || author.name).toLowerCase()}|${bodyText.toLowerCase()}|${timestamp.toLowerCase()}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
 
         out.push({
-            author_name: name,
-            author_profile_url: profileUrl,
+            author_name: author.name,
+            author_profile_url: author.url,
             comment_text: bodyText,
-            comment_timestamp: ts,
+            comment_timestamp: timestamp || null,
         });
     }
+
     return out;
 }
 """

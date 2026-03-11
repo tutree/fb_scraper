@@ -42,9 +42,6 @@ async def process_single_profile(
     post_content = link.get("post_content")
     post_url = link.get("post_url")
     post_date = link.get("post_date")
-    post_reaction_count = link.get("post_reaction_count")
-    post_comment_count = link.get("post_comment_count")
-    post_share_count = link.get("post_share_count")
 
     try:
         if link_type == "group":
@@ -197,9 +194,6 @@ async def process_single_profile(
                     post_content=post_content,
                     post_url=post_url,
                     post_date=post_date,
-                    post_reaction_count=post_reaction_count,
-                    post_comment_count=post_comment_count,
-                    post_share_count=post_share_count,
                     profile_url=profile_url,
                     search_keyword=keyword,
                     status=ResultStatus.PENDING,
@@ -287,9 +281,6 @@ async def process_single_profile(
                         post_content=post_content,
                         post_url=post_url,
                         post_date=post_date,
-                        post_reaction_count=post_reaction_count,
-                        post_comment_count=post_comment_count,
-                        post_share_count=post_share_count,
                         profile_url=profile_url,
                         search_keyword=keyword,
                         status=ResultStatus.INVALID,

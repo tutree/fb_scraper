@@ -110,7 +110,7 @@ async def get_results(
     ),
     sort_by: Optional[str] = Query(
         "scraped_at",
-        description="Sort field: scraped_at, post_date, confidence_score, analyzed_at, name, status, post_comment_count, post_reaction_count, post_share_count",
+        description="Sort field: scraped_at, post_date, confidence_score, analyzed_at, name, status",
     ),
     sort_order: Optional[str] = Query(
         "desc",
@@ -139,9 +139,6 @@ async def get_results(
         "analyzed_at": SearchResult.analyzed_at,
         "name": SearchResult.name,
         "status": SearchResult.status,
-        "post_comment_count": SearchResult.post_comment_count,
-        "post_reaction_count": SearchResult.post_reaction_count,
-        "post_share_count": SearchResult.post_share_count,
     }
     sort_col = sort_map.get((sort_by or "scraped_at").strip().lower(), SearchResult.scraped_at)
     order = (sort_order or "desc").strip().lower()

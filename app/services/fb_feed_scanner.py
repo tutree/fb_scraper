@@ -82,7 +82,7 @@ async def scroll_and_process_posts(
             logger.warning("Stop requested during scroll warmup delay.")
             return 0
 
-    await _screenshot(page, f"01_results_loaded_{keyword[:30].replace(' ', '_')}")
+    # await _screenshot(page, f"01_results_loaded_{keyword[:30].replace(' ', '_')}")
 
     current_url = page.url
     logger.info(f"Current page URL: {current_url}")
@@ -155,28 +155,6 @@ async def scroll_and_process_posts(
                 }
                 const text = article.textContent.trim();
                 return text.length > 500 ? text.substring(0, 500) + '...' : text;
-            }
-
-            function extractEngagementCounts(article) {
-                const result = { reactions: null, comments: null, shares: null };
-                for (const n of article.querySelectorAll(
-                    'div[role="button"], span[role="button"], a[role="button"], span, a')) {
-                    const t = (n.innerText || n.textContent || '').trim();
-                    const m = t.match(/^(\\d+)[\\s,.]*comments?$/i);
-                    if (m) { result.comments = parseInt(m[1]); break; }
-                }
-                for (const btn of article.querySelectorAll('[role="button"][aria-label]')) {
-                    const label = btn.getAttribute('aria-label') || '';
-                    const m = label.match(/(\\d+)[\\s]+(reaction|like|people)/i);
-                    if (m) { result.reactions = parseInt(m[1]); break; }
-                }
-                for (const n of article.querySelectorAll(
-                    'div[role="button"], span[role="button"], span, a')) {
-                    const t = (n.innerText || n.textContent || '').trim();
-                    const m = t.match(/^(\\d+)[\\s,.]*shares?$/i);
-                    if (m) { result.shares = parseInt(m[1]); break; }
-                }
-                return result;
             }
 
             function isPostUrl(href) {
@@ -270,7 +248,7 @@ async def scroll_and_process_posts(
                 return null;
             }
 
-            function addLink(absoluteHref, text, postContent, postUrl, postDate, engagement, visibleIndex = null) {
+            function addLink(absoluteHref, text, postContent, postUrl, postDate, visibleIndex = null) {
                 try {
                     const u = new URL(absoluteHref);
                     const key = `${postUrl || u.pathname.replace(/\\/$/, '')}|${(postContent || '').slice(0, 80)}`;
@@ -283,9 +261,6 @@ async def scroll_and_process_posts(
                         post_content: postContent || null,
                         post_url: postUrl || null,
                         post_date: postDate || null,
-                        post_reaction_count: engagement?.reactions ?? null,
-                        post_comment_count: engagement?.comments ?? null,
-                        post_share_count: engagement?.shares ?? null,
                         visible_index: visibleIndex,
                     });
                 } catch(e) {}
@@ -314,10 +289,9 @@ async def scroll_and_process_posts(
                 const postContent = extractPostContent(article);
                 const postUrl = extractPostUrl(article);
                 const postDate = extractPostDate(article, postUrl);
-                const engagement = extractEngagementCounts(article);
                 for (const a of article.querySelectorAll('a[href]')) {
                     if (isProfileHref(a.href)) {
-                        addLink(a.href, a.textContent, postContent, postUrl, postDate, engagement, idx);
+                        addLink(a.href, a.textContent, postContent, postUrl, postDate, idx);
                         break;
                     }
                 }
@@ -331,10 +305,9 @@ async def scroll_and_process_posts(
                         const postContent = extractPostContent(child);
                         const postUrl = extractPostUrl(child);
                         const postDate = extractPostDate(child, postUrl);
-                        const engagement = extractEngagementCounts(child);
                         for (const a of child.querySelectorAll('a[href]')) {
                             if (isProfileHref(a.href)) {
-                                addLink(a.href, a.textContent, postContent, postUrl, postDate, engagement, idx);
+                                addLink(a.href, a.textContent, postContent, postUrl, postDate, idx);
                                 break;
                             }
                         }
@@ -350,8 +323,7 @@ async def scroll_and_process_posts(
                         const postContent = parent ? extractPostContent(parent) : null;
                         const postUrl = parent ? extractPostUrl(parent) : null;
                         const postDate = parent ? extractPostDate(parent, postUrl) : null;
-                        const engagement = parent ? extractEngagementCounts(parent) : null;
-                        addLink(a.href, a.textContent, postContent, postUrl, postDate, engagement, null);
+                        addLink(a.href, a.textContent, postContent, postUrl, postDate, null);
                     }
                 });
             }
@@ -505,9 +477,6 @@ async def scroll_and_process_posts(
                             post_content: postContent || null,
                             post_url: postUrl || null,
                             post_date: postDate || null,
-                            post_reaction_count: null,
-                            post_comment_count: null,
-                            post_share_count: null,
                             visible_index: idx,
                         });
                     });

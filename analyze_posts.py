@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Batch analyzer for Facebook posts using Gemini AI.
+Batch analyzer for Facebook posts using the configured AI provider.
 Analyzes scraped posts to classify users as customers or tutors.
 """
 import asyncio
@@ -31,10 +31,9 @@ async def analyze_pending_posts(limit: int = None, force_reanalyze: bool = False
     
     try:
         logger.info("=" * 80)
-        logger.info("STARTING GEMINI BATCH ANALYSIS")
+        logger.info("STARTING POST ANALYSIS")
         logger.info("=" * 80)
         
-        # Initialize Gemini classifier
         classifier = GeminiClassifier()
         
         # Query posts to analyze
@@ -75,7 +74,6 @@ async def analyze_pending_posts(limit: int = None, force_reanalyze: bool = False
                 unknown_count += 1
                 continue
 
-            # Classify with Gemini
             result = await classifier.classify_user(
                 post_content=post.post_content,
                 user_name=post.name
@@ -164,7 +162,7 @@ async def show_analysis_stats():
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="Analyze Facebook posts with Gemini AI")
+    parser = argparse.ArgumentParser(description="Analyze Facebook posts with the configured AI provider")
     parser.add_argument("--limit", type=int, help="Maximum number of posts to analyze")
     parser.add_argument("--force", action="store_true", help="Re-analyze already analyzed posts")
     parser.add_argument("--stats", action="store_true", help="Show analysis statistics only")

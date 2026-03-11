@@ -28,8 +28,15 @@ class Settings(BaseSettings):
     SCRAPE_DELAY_MAX: int = 8
     MAX_RETRIES: int = 3
 
+    # AI provider
+    AI_PROVIDER: str = "ollama"
+
     # Gemini API
     GEMINI_API_KEY: str = ""
+
+    # Ollama
+    OLLAMA_BASE_URL: str = "http://ollama:11434"
+    OLLAMA_MODEL: str = "qwen2.5:3b"
 
     # Default Keywords (fallback)
     DEFAULT_KEYWORDS: List[str] = [

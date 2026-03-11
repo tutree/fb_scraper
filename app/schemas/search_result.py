@@ -11,9 +11,6 @@ class SearchResultBase(BaseModel):
     post_content: Optional[str] = None
     post_url: Optional[str] = None
     post_date: Optional[str] = None
-    post_reaction_count: Optional[int] = None
-    post_comment_count: Optional[int] = None
-    post_share_count: Optional[int] = None
     search_keyword: str
     profile_url: Optional[str] = None
 

@@ -47,6 +47,8 @@ function App() {
   const [commentsError, setCommentsError] = useState(null)
   const [commentsLoadedForId, setCommentsLoadedForId] = useState(null)
   const [commentsExpanded, setCommentsExpanded] = useState(false)
+  const [selectedComment, setSelectedComment] = useState(null)
+  const [showCommentDialog, setShowCommentDialog] = useState(false)
   const selectAllRef = useRef(null)
 
   const fetchData = async () => {
@@ -154,6 +156,18 @@ function App() {
     setCommentsError(null)
     setCommentsLoadedForId(null)
     setCommentsExpanded(false)
+    setSelectedComment(null)
+    setShowCommentDialog(false)
+  }
+
+  const openCommentDetail = (comment) => {
+    setSelectedComment(comment)
+    setShowCommentDialog(true)
+  }
+
+  const closeCommentDetail = () => {
+    setShowCommentDialog(false)
+    setSelectedComment(null)
   }
 
   const fetchComments = async (resultId) => {
@@ -260,7 +274,7 @@ function App() {
         )}
 
         <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="grid gap-3 md:grid-cols-7">
+          <div className="grid gap-3 md:grid-cols-6">
             <select value={filters.userType} onChange={(e) => { setFilters({ ...filters, userType: e.target.value }); setCurrentPage(1) }} className="rounded-lg border border-slate-300 px-3 py-2 text-sm">
               <option value="">All Types</option>
               <option value="customer">Customers</option>
@@ -286,9 +300,6 @@ function App() {
               <option value="analyzed_at">Sort: Analyzed At</option>
               <option value="name">Sort: Name</option>
               <option value="status">Sort: Status</option>
-              <option value="post_comment_count">Sort: Comment Count</option>
-              <option value="post_reaction_count">Sort: Reaction Count</option>
-              <option value="post_share_count">Sort: Share Count</option>
             </select>
             <select value={filters.sortOrder} onChange={(e) => { setFilters({ ...filters, sortOrder: e.target.value }); setCurrentPage(1) }} className="rounded-lg border border-slate-300 px-3 py-2 text-sm">
               <option value="desc">Order: Desc</option>
@@ -315,7 +326,6 @@ function App() {
                   <th className="px-4 py-3">Confidence</th>
                   <th className="px-4 py-3">Location</th>
                   <th className="px-4 py-3">Keyword</th>
-                  <th className="px-4 py-3">Engagement</th>
                   <th className="px-4 py-3">Status</th>
                   <th className="px-4 py-3">Post</th>
                   <th className="px-4 py-3">Actions</th>
@@ -323,7 +333,7 @@ function App() {
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {results.length === 0 ? (
-                  <tr><td colSpan={10} className="px-4 py-10 text-center text-sm text-slate-500">No leads found.</td></tr>
+                  <tr><td colSpan={9} className="px-4 py-10 text-center text-sm text-slate-500">No leads found.</td></tr>
                 ) : (
                   results.map((result) => {
                     const userType = result.user_type || 'unknown'
@@ -340,12 +350,6 @@ function App() {
                         <td className="px-4 py-3 text-sm">{result.confidence_score != null ? `${(result.confidence_score * 100).toFixed(0)}%` : '-'}</td>
                         <td className="px-4 py-3 text-sm">{result.location || 'N/A'}</td>
                         <td className="px-4 py-3 text-sm">{result.search_keyword || 'N/A'}</td>
-                        <td className="px-4 py-3 text-xs text-slate-600">
-                          <div>R: {result.post_reaction_count ?? '-'}</div>
-                          <div>C: {result.post_comment_count ?? '-'}</div>
-                          <div>S: {result.post_share_count ?? '-'}</div>
-                          <div>D: {result.post_date ?? '-'}</div>
-                        </td>
                         <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
                           <select value={status} onChange={(e) => updateStatus(result.id, e.target.value)} className={`rounded-full px-2.5 py-1 text-xs font-semibold capitalize ${STATUS_BADGES[status] || STATUS_BADGES.pending}`}>
                             <option value="pending">Pending</option>
@@ -406,9 +410,6 @@ function App() {
                 <p><span className="font-semibold">Keyword:</span> {selectedResult.search_keyword || 'N/A'}</p>
                 <p><span className="font-semibold">Location:</span> {selectedResult.location || 'N/A'}</p>
                 <p><span className="font-semibold">Status:</span> {selectedResult.status || 'N/A'}</p>
-                <p><span className="font-semibold">Reactions:</span> {selectedResult.post_reaction_count ?? 'N/A'}</p>
-                <p><span className="font-semibold">Comments:</span> {selectedResult.post_comment_count ?? 'N/A'}</p>
-                <p><span className="font-semibold">Shares:</span> {selectedResult.post_share_count ?? 'N/A'}</p>
                 <p><span className="font-semibold">Post Date:</span> {selectedResult.post_date ?? 'N/A'}</p>
                 <p className="md:col-span-2"><span className="font-semibold">Analyzed At:</span> {selectedResult.analyzed_at ? new Date(selectedResult.analyzed_at).toLocaleString() : 'N/A'}</p>
               </div>
@@ -468,10 +469,15 @@ function App() {
                     {commentsError && <p className="text-xs text-rose-700">{commentsError}</p>}
                     {!commentsError && comments.length === 0 && <p className="text-xs text-slate-500">No comments for this post.</p>}
                     {!commentsError && comments.map((comment) => (
-                      <div key={comment.id} className="rounded-md border border-slate-200 bg-white p-2">
+                      <button
+                        key={comment.id}
+                        type="button"
+                        onClick={() => openCommentDetail(comment)}
+                        className="w-full rounded-md border border-slate-200 bg-white p-2 text-left hover:bg-slate-100"
+                      >
                         <p className="text-xs font-semibold text-slate-800">{comment.author_name || 'Unknown'}</p>
                         <p className="text-xs text-slate-600">{comment.comment_text || ''}</p>
-                      </div>
+                      </button>
                     ))}
                   </div>
                 )}
@@ -482,6 +488,45 @@ function App() {
               <button type="button" className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:bg-slate-400" onClick={() => analyzeSingle(selectedResult.id)} disabled={analyzingId === selectedResult.id || analyzingBatch}>
                 {analyzingId === selectedResult.id ? 'Analyzing...' : 'Analyze with Gemini'}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showCommentDialog && selectedComment && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/60 p-4" onClick={closeCommentDetail}>
+          <div className="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="sticky top-0 flex items-center justify-between border-b border-slate-200 bg-white px-6 py-4">
+              <h3 className="text-lg font-semibold text-slate-900">Comment Analysis</h3>
+              <button type="button" className="rounded-full px-3 py-1 text-xl text-slate-500 hover:bg-slate-100" onClick={closeCommentDetail}>x</button>
+            </div>
+
+            <div className="space-y-4 px-6 py-5 text-sm text-slate-700">
+              <div className="grid gap-2 md:grid-cols-2">
+                <p><span className="font-semibold">Author:</span> {selectedComment.author_name || 'Unknown'}</p>
+                <p><span className="font-semibold">Timestamp:</span> {selectedComment.comment_timestamp || 'N/A'}</p>
+                <p><span className="font-semibold">Type:</span> {(selectedComment.user_type || 'unknown').toUpperCase()}</p>
+                <p><span className="font-semibold">Confidence:</span> {selectedComment.confidence_score != null ? `${(selectedComment.confidence_score * 100).toFixed(0)}%` : 'N/A'}</p>
+                <p className="md:col-span-2"><span className="font-semibold">Analyzed At:</span> {selectedComment.analyzed_at ? new Date(selectedComment.analyzed_at).toLocaleString() : 'N/A'}</p>
+              </div>
+
+              <div>
+                <p className="mb-1 font-semibold">Original Comment</p>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 whitespace-pre-wrap">
+                  {selectedComment.comment_text || 'N/A'}
+                </div>
+              </div>
+
+              <div>
+                <p className="mb-1 font-semibold">Analysis</p>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 whitespace-pre-wrap">
+                  {selectedComment.analysis_message || 'No analysis message available.'}
+                </div>
+              </div>
+            </div>
+
+            <div className="sticky bottom-0 flex justify-end border-t border-slate-200 bg-white px-6 py-4">
+              <button type="button" className="rounded-md border border-slate-300 px-4 py-2 text-sm" onClick={closeCommentDetail}>Close</button>
             </div>
           </div>
         </div>

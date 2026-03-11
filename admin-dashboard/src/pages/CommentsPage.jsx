@@ -26,6 +26,8 @@ export default function CommentsPage() {
   const [analyzingId, setAnalyzingId] = useState(null)
   const [analyzingBatch, setAnalyzingBatch] = useState(false)
   const [feedback, setFeedback] = useState(null)
+  const [selectedComment, setSelectedComment] = useState(null)
+  const [showCommentDialog, setShowCommentDialog] = useState(false)
   const selectAllRef = useRef(null)
 
   useEffect(() => {
@@ -120,6 +122,16 @@ export default function CommentsPage() {
       else next.add(id)
       return next
     })
+  }
+
+  const openCommentDetail = (comment) => {
+    setSelectedComment(comment)
+    setShowCommentDialog(true)
+  }
+
+  const closeCommentDetail = () => {
+    setShowCommentDialog(false)
+    setSelectedComment(null)
   }
 
   const totalPages = Math.max(1, Math.ceil(total / perPage))
@@ -234,13 +246,13 @@ export default function CommentsPage() {
                     </tr>
                   ) : (
                     comments.map((comment) => (
-                      <tr key={comment.id} className="hover:bg-slate-50">
-                        <td className="px-4 py-3">
+                      <tr key={comment.id} className="cursor-pointer hover:bg-slate-50" onClick={() => openCommentDetail(comment)}>
+                        <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
                           <input type="checkbox" checked={selectedIds.has(comment.id)} onChange={() => toggleRow(comment.id)} className="h-4 w-4 rounded border-slate-300" />
                         </td>
                         <td className="px-4 py-3 text-sm">
                           {comment.author_profile_url ? (
-                            <a href={comment.author_profile_url} target="_blank" rel="noopener noreferrer" className="text-sky-700 hover:underline">
+                            <a href={comment.author_profile_url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} className="text-sky-700 hover:underline">
                               {comment.author_name || '-'}
                             </a>
                           ) : (comment.author_name || '-')}
@@ -258,7 +270,7 @@ export default function CommentsPage() {
                         <td className="px-4 py-3 text-sm text-slate-600">
                           {comment.comment_timestamp || (comment.scraped_at ? new Date(comment.scraped_at).toLocaleDateString() : '-')}
                         </td>
-                        <td className="px-4 py-3">
+                        <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
                           <button
                             type="button"
                             onClick={() => analyzeSingle(comment.id)}
@@ -284,6 +296,45 @@ export default function CommentsPage() {
           </section>
         )}
       </div>
+
+      {showCommentDialog && selectedComment && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4" onClick={closeCommentDetail}>
+          <div className="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="sticky top-0 flex items-center justify-between border-b border-slate-200 bg-white px-6 py-4">
+              <h3 className="text-lg font-semibold text-slate-900">Comment Details</h3>
+              <button type="button" className="rounded-full px-3 py-1 text-xl text-slate-500 hover:bg-slate-100" onClick={closeCommentDetail}>x</button>
+            </div>
+
+            <div className="space-y-4 px-6 py-5 text-sm text-slate-700">
+              <div className="grid gap-2 md:grid-cols-2">
+                <p><span className="font-semibold">Author:</span> {selectedComment.author_name || 'Unknown'}</p>
+                <p><span className="font-semibold">Timestamp:</span> {selectedComment.comment_timestamp || 'N/A'}</p>
+                <p><span className="font-semibold">Type:</span> {(selectedComment.user_type || 'unknown').toUpperCase()}</p>
+                <p><span className="font-semibold">Confidence:</span> {selectedComment.confidence_score != null ? `${(selectedComment.confidence_score * 100).toFixed(0)}%` : 'N/A'}</p>
+                <p className="md:col-span-2"><span className="font-semibold">Analyzed At:</span> {selectedComment.analyzed_at ? new Date(selectedComment.analyzed_at).toLocaleString() : 'N/A'}</p>
+              </div>
+
+              <div>
+                <p className="mb-1 font-semibold">Original Comment</p>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 whitespace-pre-wrap">
+                  {selectedComment.comment_text || 'N/A'}
+                </div>
+              </div>
+
+              <div>
+                <p className="mb-1 font-semibold">Analysis</p>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 whitespace-pre-wrap">
+                  {selectedComment.analysis_message || 'No analysis message available.'}
+                </div>
+              </div>
+            </div>
+
+            <div className="sticky bottom-0 flex justify-end border-t border-slate-200 bg-white px-6 py-4">
+              <button type="button" className="rounded-md border border-slate-300 px-4 py-2 text-sm" onClick={closeCommentDetail}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

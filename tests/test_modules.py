@@ -217,7 +217,11 @@ class TestDialogPageSelectors:
 
     def test_first_comment_author_name(self, dialog_page: Page):
         comments = dialog_page.evaluate(EXTRACT_DIALOG_COMMENTS_JS, 0)
-        assert comments[0]["author_name"] == "Karen Brown 3 weeks ago"
+        assert comments[0]["author_name"] == "Karen Brown"
+
+    def test_first_comment_timestamp(self, dialog_page: Page):
+        comments = dialog_page.evaluate(EXTRACT_DIALOG_COMMENTS_JS, 0)
+        assert comments[0]["comment_timestamp"] == "3w"
 
     def test_first_comment_profile_url(self, dialog_page: Page):
         comments = dialog_page.evaluate(EXTRACT_DIALOG_COMMENTS_JS, 0)
@@ -225,7 +229,11 @@ class TestDialogPageSelectors:
 
     def test_last_comment_author_name(self, dialog_page: Page):
         comments = dialog_page.evaluate(EXTRACT_DIALOG_COMMENTS_JS, 0)
-        assert comments[-1]["author_name"] == "Holly Butcher 3 weeks ago"
+        assert comments[-1]["author_name"] == "Holly Butcher"
+
+    def test_last_comment_timestamp(self, dialog_page: Page):
+        comments = dialog_page.evaluate(EXTRACT_DIALOG_COMMENTS_JS, 0)
+        assert comments[-1]["comment_timestamp"] == "3w"
 
     def test_last_comment_profile_url(self, dialog_page: Page):
         comments = dialog_page.evaluate(EXTRACT_DIALOG_COMMENTS_JS, 0)
