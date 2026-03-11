@@ -36,7 +36,7 @@ class Settings(BaseSettings):
 
     # Ollama
     OLLAMA_BASE_URL: str = "http://ollama:11434"
-    OLLAMA_MODEL: str = "qwen2.5:3b"
+    OLLAMA_MODEL: str = "deepseek-r1:7b"
 
     # Default Keywords (fallback)
     DEFAULT_KEYWORDS: List[str] = [
