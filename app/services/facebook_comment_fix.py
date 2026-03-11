@@ -300,7 +300,15 @@ async def expand_all_comments_in_dialog(
         state = await page.evaluate(
             """
             (rootSelector) => {
-                const root = document.querySelector(rootSelector) || document;
+                function isCommentDialog(d) {
+                    if (d.querySelector('[aria-label^="Write a comment"], [placeholder*="comment" i]')) return true;
+                    if (d.querySelectorAll('div[role="article"][aria-label^="Comment by"]').length > 0) return true;
+                    const t = (d.innerText || d.textContent || '').toLowerCase();
+                    return t.includes('write a comment') || t.includes('leave a comment');
+                }
+                const root = Array.from(document.querySelectorAll('[role="dialog"]')).find(isCommentDialog)
+                    || document.querySelector(rootSelector)
+                    || document;
                 const clickables = root.querySelectorAll('div[role="button"], span[role="button"], a[role="button"], a, span');
                 const include = [
                     /view more comments?/i,
@@ -345,7 +353,14 @@ async def expand_all_comments_in_dialog(
         await page.evaluate(
             """
             (rootSelector) => {
-                const root = document.querySelector(rootSelector);
+                function isCommentDialog(d) {
+                    if (d.querySelector('[aria-label^="Write a comment"], [placeholder*="comment" i]')) return true;
+                    if (d.querySelectorAll('div[role="article"][aria-label^="Comment by"]').length > 0) return true;
+                    const t = (d.innerText || d.textContent || '').toLowerCase();
+                    return t.includes('write a comment') || t.includes('leave a comment');
+                }
+                const root = Array.from(document.querySelectorAll('[role="dialog"]')).find(isCommentDialog)
+                    || document.querySelector(rootSelector);
                 if (root) root.scrollTop = root.scrollHeight;
                 else window.scrollBy(0, 900);
             }

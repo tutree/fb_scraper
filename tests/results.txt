@@ -1,5 +1,5 @@
 ======================================================================
-  SCRAPE EXTRACTION RESULTS  —  generated 2026-03-09 17:24:54
+  SCRAPE EXTRACTION RESULTS  —  generated 2026-03-11 12:40:57
   Card fixture   : tests/fixtures/cards/card1.html
   Dialog fixture : tests/fixtures/dialogs/dialog1.html
 ======================================================================
