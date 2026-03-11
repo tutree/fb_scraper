@@ -461,6 +461,18 @@ class BrowserManager:
             storage_state=None,  # Will be set per account
         )
 
+        try:
+            await context.grant_permissions(
+                ["clipboard-read", "clipboard-write"],
+                origin="https://www.facebook.com",
+            )
+            await context.grant_permissions(
+                ["clipboard-read", "clipboard-write"],
+                origin="https://web.facebook.com",
+            )
+        except Exception as exc:
+            logger.debug("Could not grant clipboard permissions: %s", exc)
+
         logger.info("Injecting stealth scripts...")
         await context.add_init_script(STEALTH_SCRIPT)
 
@@ -514,6 +526,18 @@ class BrowserManager:
             device_scale_factor=1,
             storage_state=storage_state,
         )
+
+        try:
+            await context.grant_permissions(
+                ["clipboard-read", "clipboard-write"],
+                origin="https://www.facebook.com",
+            )
+            await context.grant_permissions(
+                ["clipboard-read", "clipboard-write"],
+                origin="https://web.facebook.com",
+            )
+        except Exception as exc:
+            logger.debug("Could not grant clipboard permissions: %s", exc)
 
         # NOTE: Resource blocking disabled - it was causing timeouts with high-latency proxy
         # Facebook pages need all resources to load properly

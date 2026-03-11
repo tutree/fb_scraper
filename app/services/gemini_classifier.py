@@ -1,6 +1,9 @@
 import google.generativeai as genai
 import json
 from typing import Dict, Optional
+
+import httpx
+
 from ..core.config import settings
 from ..core.logging_config import get_logger
 
@@ -14,13 +17,58 @@ class GeminiClassifier:
     """
     
     def __init__(self, api_key: Optional[str] = None):
+        self.provider = (settings.AI_PROVIDER or "gemini").strip().lower()
         self.api_key = api_key or settings.GEMINI_API_KEY
-        if not self.api_key:
-            raise ValueError("GEMINI_API_KEY not configured")
-        
-        genai.configure(api_key=self.api_key)
-        self.model = genai.GenerativeModel('gemini-2.5-flash')
-        logger.info("GeminiClassifier initialized with gemini-2.5-flash-latest model")
+        self.ollama_base_url = settings.OLLAMA_BASE_URL.rstrip("/")
+        self.ollama_model = settings.OLLAMA_MODEL
+
+        if self.provider == "gemini":
+            if not self.api_key:
+                raise ValueError("GEMINI_API_KEY not configured")
+            genai.configure(api_key=self.api_key)
+            self.model = genai.GenerativeModel("gemini-2.5-flash")
+            logger.info("AI classifier using provider=gemini model=gemini-2.5-flash")
+        elif self.provider == "ollama":
+            self.model = None
+            logger.info(
+                "AI classifier using provider=ollama model=%s base_url=%s",
+                self.ollama_model,
+                self.ollama_base_url,
+            )
+        else:
+            raise ValueError(f"Unsupported AI_PROVIDER: {self.provider}")
+
+    async def _generate_json(self, prompt: str) -> Dict:
+        if self.provider == "gemini":
+            response = self.model.generate_content(prompt)
+            response_text = response.text.strip()
+        else:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                response = await client.post(
+                    f"{self.ollama_base_url}/api/generate",
+                    json={
+                        "model": self.ollama_model,
+                        "prompt": prompt,
+                        "stream": False,
+                        "format": "json",
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
+                response_text = (data.get("response") or "").strip()
+
+        if response_text.startswith("```"):
+            response_text = response_text.split("```")[1]
+            if response_text.startswith("json"):
+                response_text = response_text[4:]
+            response_text = response_text.strip()
+
+        result = json.loads(response_text)
+        if "type" not in result or "confidence" not in result:
+            raise ValueError("Invalid response structure")
+        result["type"] = result["type"].upper()
+        result["confidence"] = max(0.0, min(1.0, float(result["confidence"])))
+        return result
     
     async def classify_user(self, post_content: str, user_name: str = "") -> Dict:
         """
@@ -59,84 +107,69 @@ Analyze now:
         
         try:
             logger.debug(f"Sending classification request for user: {user_name}")
-            response = self.model.generate_content(prompt)
-            response_text = response.text.strip()
-            
-            # Remove markdown code blocks if present
-            if response_text.startswith('```'):
-                response_text = response_text.split('```')[1]
-                if response_text.startswith('json'):
-                    response_text = response_text[4:]
-                response_text = response_text.strip()
-            
-            result = json.loads(response_text)
-            
-            # Validate response structure
-            if "type" not in result or "confidence" not in result:
-                raise ValueError("Invalid response structure")
-            
-            # Normalize type to uppercase
-            result["type"] = result["type"].upper()
-            
-            # Ensure confidence is between 0 and 1
-            result["confidence"] = max(0.0, min(1.0, float(result["confidence"])))
-            
-            logger.info(f"Classification result: {result['type']} (confidence: {result['confidence']:.2f})")
+            result = await self._generate_json(prompt)
+            logger.debug(f"Classification result: {result['type']} (confidence: {result['confidence']:.2f})")
             return result
             
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse Gemini response as JSON: {e}")
-            logger.error(f"Response text: {response_text if 'response_text' in locals() else 'N/A'}")
+            logger.error(f"Failed to parse AI response as JSON: {e}")
             return {
                 "type": "UNKNOWN",
                 "confidence": 0.0,
                 "reason": f"Failed to parse AI response: {str(e)}"
             }
         except Exception as e:
-            logger.error(f"Gemini classification error: {e}", exc_info=True)
+            logger.error(f"AI classification error: {e}", exc_info=True)
             return {
                 "type": "UNKNOWN",
                 "confidence": 0.0,
                 "reason": f"Classification error: {str(e)}"
             }
 
-    async def classify_comment_user(self, comment_text: str, author_name: str = "") -> Dict:
+    async def classify_comment_user(
+        self,
+        comment_text: str,
+        author_name: str = "",
+        post_context: str = "",
+        search_keyword: str = "",
+    ) -> Dict:
         """
-        Classify a comment author as potential customer or tutor based on their comment.
-        Used by the comment analyzer (analyze_comments.py).
-
-        Returns:
-            Dict with keys: type (CUSTOMER/TUTOR/UNKNOWN), confidence (0-1), reason
+        Classify a comment author as potential customer or tutor.
+        post_context and search_keyword are used so the model understands
+        what the commenter is replying to — a comment like "Yes please!"
+        means something very different depending on the post it appears on.
         """
         if not comment_text or not comment_text.strip():
             return {"type": "UNKNOWN", "confidence": 0.0, "reason": "No comment text"}
-        prompt = f"""
-Analyze this comment on a Facebook post (about math tutoring / education) and classify the comment author.
 
+        context_block = ""
+        if search_keyword:
+            context_block += f"Search keyword that found this post: {search_keyword}\n"
+        if post_context:
+            context_block += f"Post the comment appears on:\n{post_context[:600]}\n"
+
+        prompt = f"""You are analyzing Facebook comments to find people who are looking for a math tutor (CUSTOMER) or people offering tutoring services (TUTOR).
+
+{context_block}
 Comment author: {author_name or "Unknown"}
 Comment: {comment_text}
 
-Classification:
-- CUSTOMER: The person is looking for a tutor, asking for recommendations, or saying they need help.
-- TUTOR: The person is offering tutoring, advertising their business, or promoting tutoring services.
-- UNKNOWN: Unclear, irrelevant, or neither (e.g. generic reply, off-topic).
+Classification rules:
+- CUSTOMER: The commenter is looking for a tutor, asking for help, recommending someone, or expressing a need for tutoring.
+- TUTOR: The commenter is offering tutoring, advertising services, or promoting their own teaching.
+- UNKNOWN: The comment is a generic reply, off-topic, or impossible to classify reliably without more context.
 
-Return ONLY valid JSON in this exact format (no markdown, no extra text):
-{{"type": "CUSTOMER", "confidence": 0.9, "reason": "Asks for tutor recommendations"}}
+Important context rule:
+- If the post context is clearly from a tutor offering tutoring services, then short greeting or intent-to-connect comments (e.g. "hi", "hello", "interested", "dm", "inbox", "message me", "check dm") should usually be treated as CUSTOMER rather than UNKNOWN.
+- Only classify as UNKNOWN for greetings when the post context is unclear or unrelated to tutoring.
+
+Consider the post context when interpreting ambiguous comments like "Yes please!", "Me too", "DM sent", etc.
+
+Return ONLY valid JSON, no markdown:
+{{"type": "CUSTOMER", "confidence": 0.9, "reason": "Short explanation"}}
 """
         try:
-            response = self.model.generate_content(prompt)
-            response_text = response.text.strip()
-            if response_text.startswith("```"):
-                response_text = response_text.split("```")[1]
-                if response_text.startswith("json"):
-                    response_text = response_text[4:]
-                response_text = response_text.strip()
-            result = json.loads(response_text)
-            if "type" not in result or "confidence" not in result:
-                raise ValueError("Invalid response structure")
-            result["type"] = result["type"].upper()
-            result["confidence"] = max(0.0, min(1.0, float(result["confidence"])))
+            result = await self._generate_json(prompt)
             return result
         except (json.JSONDecodeError, ValueError, Exception) as e:
             logger.debug(f"Comment classification failed: {e}")

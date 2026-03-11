@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, Text, Enum, Integer, Index, Float
+from sqlalchemy import Column, String, DateTime, Text, Enum, Index, Float
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -29,9 +29,6 @@ class SearchResult(Base):
     post_content = Column(Text, nullable=True)
     post_url = Column(String, nullable=True)  # Removed unique constraint
     post_date = Column(String, nullable=True)
-    post_reaction_count = Column(Integer, nullable=True)
-    post_comment_count = Column(Integer, nullable=True)
-    post_share_count = Column(Integer, nullable=True)
     search_keyword = Column(String, nullable=False)
     source = Column(String, default="facebook")
     status = Column(Enum(ResultStatus), default=ResultStatus.PENDING)

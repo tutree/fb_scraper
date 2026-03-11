@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Batch analyzer for Facebook post comments using Gemini AI.
+Batch analyzer for Facebook post comments using the configured AI provider.
 Classifies comment authors as potential customers or tutors (with score).
 """
 import asyncio
@@ -14,7 +14,7 @@ from app.core.database import SessionLocal
 from app.core.logging_config import setup_logging, get_logger
 from app.services.gemini_classifier import GeminiClassifier
 from app.models.post_comment import PostComment
-from app.models.search_result import UserType
+from app.models.search_result import SearchResult, UserType
 
 setup_logging(level="INFO")
 logger = get_logger(__name__)
@@ -27,11 +27,16 @@ async def analyze_pending_comments(limit: int = None, force_reanalyze: bool = Fa
     db = SessionLocal()
     try:
         logger.info("=" * 80)
-        logger.info("STARTING GEMINI COMMENT ANALYSIS")
+        logger.info("STARTING COMMENT ANALYSIS")
         logger.info("=" * 80)
 
         classifier = GeminiClassifier()
         query = db.query(PostComment)
+
+        analyzed_count = 0
+        customer_count = 0
+        tutor_count = 0
+        unknown_count = 0
 
         if not force_reanalyze:
             query = query.filter(PostComment.user_type == None)
@@ -48,13 +53,12 @@ async def analyze_pending_comments(limit: int = None, force_reanalyze: bool = Fa
                 logger.info("No pending comments (all %d already have user_type). Use --force to re-analyze all.", total)
             return
 
-        logger.info(f"Found {len(comments)} comments to analyze")
-        logger.info("")
-
-        analyzed_count = 0
-        customer_count = 0
-        tutor_count = 0
-        unknown_count = 0
+        # Pre-load post context (post_content + keyword) keyed by search_result_id
+        search_result_ids = list({c.search_result_id for c in comments})
+        post_contexts = {
+            str(sr.id): (sr.post_content or "", sr.search_keyword or "")
+            for sr in db.query(SearchResult).filter(SearchResult.id.in_(search_result_ids))
+        }
 
         for idx, comment in enumerate(comments, 1):
             logger.info(f"[{idx}/{len(comments)}] {comment.author_name or 'Unknown'}")
@@ -68,9 +72,13 @@ async def analyze_pending_comments(limit: int = None, force_reanalyze: bool = Fa
                 analyzed_count += 1
                 continue
 
+            post_content, search_keyword = post_contexts.get(str(comment.search_result_id), ("", ""))
+
             result = await classifier.classify_comment_user(
                 comment_text=comment.comment_text,
                 author_name=comment.author_name or "",
+                post_context=post_content,
+                search_keyword=search_keyword,
             )
 
             type_mapping = {
@@ -146,7 +154,7 @@ async def show_comment_stats():
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Analyze Facebook comments with Gemini AI")
+    parser = argparse.ArgumentParser(description="Analyze Facebook comments with the configured AI provider")
     parser.add_argument("--limit", type=int, help="Maximum number of comments to analyze")
     parser.add_argument("--force", action="store_true", help="Re-analyze already analyzed comments")
     parser.add_argument("--stats", action="store_true", help="Show comment analysis statistics only")

@@ -15,7 +15,7 @@ from ...schemas.post_comment import (
     AnalyzeCommentItem,
 )
 from ...models.post_comment import PostComment
-from ...models.search_result import UserType
+from ...models.search_result import SearchResult, UserType
 from ...services.gemini_classifier import GeminiClassifier
 
 router = APIRouter(prefix="/comments", tags=["comments"])
@@ -40,6 +40,8 @@ async def _analyze_comment(
     comment: PostComment,
     classifier: GeminiClassifier,
     force_reanalyze: bool,
+    post_context: str = "",
+    search_keyword: str = "",
 ) -> AnalyzeCommentItem:
     if comment.user_type is not None and not force_reanalyze:
         return _format_comment_item(comment, True, "Skipped: already analyzed")
@@ -55,6 +57,8 @@ async def _analyze_comment(
         result = await classifier.classify_comment_user(
             comment_text=comment.comment_text,
             author_name=comment.author_name or "",
+            post_context=post_context,
+            search_keyword=search_keyword,
         )
         type_mapping = {
             "CUSTOMER": UserType.CUSTOMER,
@@ -121,7 +125,17 @@ async def analyze_single_comment(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    item = await _analyze_comment(comment, classifier, force_reanalyze)
+    post = db.query(SearchResult).filter(SearchResult.id == comment.search_result_id).first()
+    post_context = post.post_content if post and post.post_content else ""
+    search_keyword = post.search_keyword if post and post.search_keyword else ""
+
+    item = await _analyze_comment(
+        comment,
+        classifier,
+        force_reanalyze,
+        post_context=post_context,
+        search_keyword=search_keyword,
+    )
     if item.success:
         db.commit()
         db.refresh(comment)
@@ -152,6 +166,11 @@ async def analyze_batch_comments(
         .filter(PostComment.id.in_(request.comment_ids))
         .all()
     }
+    search_result_ids = {c.search_result_id for c in comment_map.values()}
+    result_map = {
+        r.id: r
+        for r in db.query(SearchResult).filter(SearchResult.id.in_(search_result_ids)).all()
+    }
 
     items: List[AnalyzeCommentItem] = []
     for comment_id in request.comment_ids:
@@ -165,7 +184,18 @@ async def analyze_batch_comments(
                 )
             )
             continue
-        items.append(await _analyze_comment(comment, classifier, request.force_reanalyze))
+        post = result_map.get(comment.search_result_id)
+        post_context = post.post_content if post and post.post_content else ""
+        search_keyword = post.search_keyword if post and post.search_keyword else ""
+        items.append(
+            await _analyze_comment(
+                comment,
+                classifier,
+                request.force_reanalyze,
+                post_context=post_context,
+                search_keyword=search_keyword,
+            )
+        )
 
     if any(item.success for item in items):
         db.commit()

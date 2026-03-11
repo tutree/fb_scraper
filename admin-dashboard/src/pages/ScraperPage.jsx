@@ -197,7 +197,7 @@ export default function ScraperPage() {
   const [feedback, setFeedback] = useState(null)
   const [scraperConfig, setScraperConfig] = useState({
     keywords: '',
-    maxResults: 100,
+    maxResults: 10,
     useDefaultKeywords: false,
   })
   const [logLines, setLogLines] = useState(120)
