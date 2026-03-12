@@ -88,3 +88,4 @@ temp/
 Thumbs.db
 .DS_Store
 config/credentials.json
+config/credentials.json
