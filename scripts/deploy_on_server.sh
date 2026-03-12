@@ -84,4 +84,16 @@ until curl --fail --silent --show-error "$API_HEALTH_URL" >/dev/null; do
     SECONDS_WAITED=$((SECONDS_WAITED + 5))
 done
 
+log "Configuring Nginx reverse proxy..."
+if [[ -f nginx/facebook_scraper.conf ]] && command -v nginx >/dev/null 2>&1; then
+    sudo cp nginx/facebook_scraper.conf /etc/nginx/sites-available/facebook_scraper
+    if [[ ! -h /etc/nginx/sites-enabled/facebook_scraper ]]; then
+        sudo ln -s /etc/nginx/sites-available/facebook_scraper /etc/nginx/sites-enabled/
+    fi
+    sudo systemctl reload nginx
+    log "Nginx configuration updated and reloaded."
+else
+    log "Skipping Nginx setup (nginx/facebook_scraper.conf not found or nginx not installed)."
+fi
+
 log "Deployment completed successfully at commit $(git rev-parse --short HEAD)"
