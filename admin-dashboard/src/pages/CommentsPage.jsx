@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
-import axios from 'axios'
 
-const API_BASE = '/api/v1'
+import api from '../api'
+
+
 
 const USER_TYPE_BADGES = {
   customer: 'bg-sky-100 text-sky-800',
@@ -44,7 +44,7 @@ export default function CommentsPage() {
       params.append('limit', perPage)
       if (userTypeFilter) params.append('user_type', userTypeFilter)
       if (analyzedFilter) params.append('analyzed', analyzedFilter)
-      const res = await axios.get(`${API_BASE}/comments?${params}`)
+      const res = await api.get(`/comments?${params}`)
       const items = Array.isArray(res.data?.items) ? res.data.items : []
       const idsOnPage = new Set(items.map((item) => item.id))
       setComments(items)
@@ -62,7 +62,7 @@ export default function CommentsPage() {
     setAnalyzingId(commentId)
     setFeedback(null)
     try {
-      const res = await axios.post(`${API_BASE}/comments/${commentId}/analyze`, null, {
+      const res = await api.post(`/comments/${commentId}/analyze`, null, {
         params: { force_reanalyze: true },
       })
       setFeedback({ type: 'success', text: `Comment analyzed: ${res.data?.item?.message || 'Done'}` })
@@ -91,12 +91,12 @@ export default function CommentsPage() {
     setFeedback(null)
     try {
       if (deleteConfirm.type === 'bulk') {
-        const res = await axios.post(`${API_BASE}/comments/bulk-delete`, { ids: deleteConfirm.ids })
+        const res = await api.post(`/comments/bulk-delete`, { ids: deleteConfirm.ids })
         setFeedback({ type: 'success', text: res.data?.message || 'Deleted successfully' })
         setSelectedIds(new Set())
       } else {
         const id = deleteConfirm.ids[0];
-        const res = await axios.delete(`${API_BASE}/comments/${id}`)
+        const res = await api.delete(`/comments/${id}`)
         setFeedback({ type: 'success', text: res.data?.message || 'Deleted successfully' })
         setSelectedIds((prev) => {
           const next = new Set(prev)
@@ -122,7 +122,7 @@ export default function CommentsPage() {
     setAnalyzingBatch(true)
     setFeedback(null)
     try {
-      const res = await axios.post(`${API_BASE}/comments/analyze/batch`, {
+      const res = await api.post(`/comments/analyze/batch`, {
         comment_ids: ids,
         force_reanalyze: true,
       })
@@ -182,20 +182,6 @@ export default function CommentsPage() {
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-100 to-sky-50 px-4 py-8">
       <div className="mx-auto max-w-[1400px] space-y-6">
-        <header className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-          <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-            <div>
-              <h1 className="text-3xl font-bold text-slate-900">Comments</h1>
-              <p className="mt-1 text-sm text-slate-600">Analyze comment authors directly from this table.</p>
-            </div>
-            <nav className="flex gap-2">
-              <Link to="/" className="rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">Leads</Link>
-              <Link to="/comments" className="rounded-md bg-slate-900 px-3 py-2 text-sm font-medium text-white">Comments</Link>
-              <Link to="/scraper" className="rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">Scraper</Link>
-            </nav>
-          </div>
-        </header>
-
         {feedback && (
           <div className={`rounded-xl border px-4 py-3 text-sm ${feedback.type === 'error' ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
             {feedback.text}

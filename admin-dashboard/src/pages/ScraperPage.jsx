@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
-import axios from 'axios'
 
-const API_BASE = '/api/v1'
+import api from '../api'
+
+
 
 const SCRAPER_STATUS_BADGES = {
   idle: 'bg-slate-100 text-slate-700',
@@ -218,7 +218,7 @@ export default function ScraperPage() {
 
   const fetchScraperStatus = useCallback(async () => {
     try {
-      const res = await axios.get(`${API_BASE}/search/current`)
+      const res = await api.get(`/search/current`)
       setScraperTask(res.data || null)
     } catch {
       setScraperTask(null)
@@ -227,7 +227,7 @@ export default function ScraperPage() {
 
   const fetchScraperLogs = useCallback(async (lines = logLines) => {
     try {
-      const res = await axios.get(`${API_BASE}/search/logs`, { params: { lines } })
+      const res = await api.get(`/search/logs`, { params: { lines } })
       setScraperLogs(Array.isArray(res.data?.lines) ? res.data.lines : [])
     } catch {
       setScraperLogs([])
@@ -236,7 +236,7 @@ export default function ScraperPage() {
 
   const fetchCookieStatus = useCallback(async () => {
     try {
-      const res = await axios.get(`${API_BASE}/search/cookies/status`)
+      const res = await api.get(`/search/cookies/status`)
       setCookieStatus(res.data || null)
     } catch {
       setCookieStatus(null)
@@ -256,7 +256,7 @@ export default function ScraperPage() {
         return
       }
 
-      await axios.post(`${API_BASE}/search/start`, {
+      await api.post(`/search/start`, {
         keywords: scraperConfig.useDefaultKeywords ? null : keywords,
         max_results: Math.max(1, Number(scraperConfig.maxResults) || 100),
         use_proxy: true,
@@ -280,7 +280,7 @@ export default function ScraperPage() {
     setScraperStopping(true)
     setFeedback(null)
     try {
-      const res = await axios.post(`${API_BASE}/search/stop`)
+      const res = await api.post(`/search/stop`)
       setFeedback({
         type: 'success',
         text: res.data?.message || 'Stop requested. Waiting for scraper to halt.',
@@ -297,7 +297,7 @@ export default function ScraperPage() {
     setCookieSubmitting(true)
     setFeedback(null)
     try {
-      const res = await axios.post(`${API_BASE}/search/cookies`, {
+      const res = await api.post(`/search/cookies`, {
         cookie_json: cookieJsonInput,
       })
       setFeedback({
@@ -348,20 +348,6 @@ export default function ScraperPage() {
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-100 to-sky-50 px-4 py-8">
       <div className="mx-auto max-w-[1400px] space-y-6">
-        <header className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-          <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-            <div>
-              <h1 className="text-3xl font-bold text-slate-900">Scraper Control</h1>
-              <p className="text-sm text-slate-600">Run management with live progress, activity, and issue tracking.</p>
-            </div>
-            <nav className="flex gap-2">
-              <Link to="/" className="rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">Leads</Link>
-              <Link to="/comments" className="rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">Comments</Link>
-              <Link to="/scraper" className="rounded-md bg-slate-900 px-3 py-2 text-sm font-medium text-white">Scraper</Link>
-            </nav>
-          </div>
-        </header>
-
         {feedback && (
           <div className={`rounded-xl border px-4 py-3 text-sm ${feedback.type === 'error' ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
             {feedback.text}

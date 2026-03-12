@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "Math Tutor Scraper API"
     DEBUG: bool = False
 
+    # Authentication Settings
+    SECRET_KEY: str = "729cf1fb8ef4bacc9f4addba0bb8eb5b3eb2b03fb4053d2bb0a0cfb2e3ac115a"
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
+
     # Scraper Settings
     MAX_RESULTS_PER_KEYWORD: int = 100
     SCRAPE_DELAY_MIN: int = 3  # seconds

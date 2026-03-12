@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
-import axios from 'axios'
 
-const API_BASE = '/api/v1'
+import api from './api'
+
+
 
 const USER_TYPE_BADGES = {
   customer: 'bg-sky-100 text-sky-800',
@@ -66,8 +66,8 @@ function App() {
       params.append('limit', itemsPerPage)
 
       const [resultsRes, statsRes] = await Promise.all([
-        axios.get(`${API_BASE}/results/?${params}`),
-        axios.get(`${API_BASE}/dashboard/stats`),
+        api.get(`/results/?${params}`),
+        api.get(`/dashboard/stats`),
       ])
 
       const items = Array.isArray(resultsRes.data?.items) ? resultsRes.data.items : []
@@ -90,7 +90,7 @@ function App() {
 
   const updateStatus = async (id, newStatus) => {
     try {
-      await axios.patch(`${API_BASE}/results/${id}`, { status: newStatus })
+      await api.patch(`/results/${id}`, { status: newStatus })
       await fetchData()
     } catch (err) {
       setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to update status') })
@@ -101,13 +101,13 @@ function App() {
     setAnalyzingId(id)
     setFeedback(null)
     try {
-      const res = await axios.post(`${API_BASE}/results/${id}/analyze`, null, {
+      const res = await api.post(`/results/${id}/analyze`, null, {
         params: { force_reanalyze: true },
       })
       setFeedback({ type: 'success', text: `Lead analyzed: ${res.data?.item?.message || 'Done'}` })
       await fetchData()
       if (selectedResult?.id === id) {
-        const refreshed = await axios.get(`${API_BASE}/results/${id}`)
+        const refreshed = await api.get(`/results/${id}`)
         setSelectedResult(refreshed.data)
       }
     } catch (err) {
@@ -134,12 +134,12 @@ function App() {
     setFeedback(null)
     try {
       if (deleteConfirm.type === 'bulk') {
-        const res = await axios.post(`${API_BASE}/results/bulk-delete`, { ids: deleteConfirm.ids })
+        const res = await api.post(`/results/bulk-delete`, { ids: deleteConfirm.ids })
         setFeedback({ type: 'success', text: res.data?.message || 'Deleted successfully' })
         setSelectedIds(new Set())
       } else {
         const id = deleteConfirm.ids[0];
-        const res = await axios.delete(`${API_BASE}/results/${id}`)
+        const res = await api.delete(`/results/${id}`)
         setFeedback({ type: 'success', text: res.data?.message || 'Deleted successfully' })
         setSelectedIds((prev) => {
           const next = new Set(prev)
@@ -165,7 +165,7 @@ function App() {
     setAnalyzingBatch(true)
     setFeedback(null)
     try {
-      const res = await axios.post(`${API_BASE}/results/analyze/batch`, {
+      const res = await api.post(`/results/analyze/batch`, {
         result_ids: ids,
         force_reanalyze: true,
       })
@@ -218,7 +218,7 @@ function App() {
     setCommentsLoading(true)
     setCommentsError(null)
     try {
-      const res = await axios.get(`${API_BASE}/results/${resultId}/comments`)
+      const res = await api.get(`/results/${resultId}/comments`)
       setComments(Array.isArray(res.data) ? res.data : [])
       setCommentsLoadedForId(resultId)
       setCommentsExpanded(true)
@@ -278,20 +278,6 @@ function App() {
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-100 to-sky-50 px-4 py-8">
       <div className="mx-auto max-w-[1400px] space-y-6">
-        <header className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-          <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-            <div>
-              <h1 className="text-3xl font-bold text-slate-900">Facebook Scraper Dashboard</h1>
-              <p className="text-sm text-slate-600">Leads, selection, and Gemini analysis.</p>
-            </div>
-            <nav className="flex gap-2">
-              <Link to="/" className="rounded-md bg-slate-900 px-3 py-2 text-sm font-medium text-white">Leads</Link>
-              <Link to="/comments" className="rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">Comments</Link>
-              <Link to="/scraper" className="rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">Scraper</Link>
-            </nav>
-          </div>
-        </header>
-
         {feedback && (
           <div className={`rounded-xl border px-4 py-3 text-sm ${feedback.type === 'error' ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
             {feedback.text}
