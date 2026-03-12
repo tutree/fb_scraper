@@ -7,8 +7,12 @@ import uuid
 from ...core.database import SessionLocal
 from ...core.logging_config import get_recent_logs
 from ...services.scraper import ScraperService
+from ...services.facebook_cookie_manager import get_cookie_status, save_cookie_json_text
 from ...core.logging_config import get_logger
 from ...schemas.search import (
+    CookieStatusResponse,
+    CookieUpdateRequest,
+    CookieUpdateResponse,
     SearchRequest,
     SearchResponse,
     SearchTaskDetail,
@@ -169,6 +173,26 @@ async def get_search_logs(
 ) -> SearchLogsResponse:
     """Return recent application logs for scraper monitoring."""
     return SearchLogsResponse(lines=get_recent_logs(lines=lines))
+
+
+@router.get("/cookies/status", response_model=CookieStatusResponse)
+async def get_saved_cookie_status() -> CookieStatusResponse:
+    """Return current cookie-session metadata for the scraper UI."""
+    return CookieStatusResponse(**get_cookie_status())
+
+
+@router.post("/cookies", response_model=CookieUpdateResponse)
+async def update_saved_cookie(request: CookieUpdateRequest) -> CookieUpdateResponse:
+    """Validate and save pasted Facebook cookie JSON for scraper login reuse."""
+    result = save_cookie_json_text(request.cookie_json)
+    return CookieUpdateResponse(
+        message=f"Saved cookie session for account {result['account_uid']}",
+        account_uid=result["account_uid"],
+        cookie_file=result["cookie_file"],
+        cookie_count=result["cookie_count"],
+        updated_at=result["updated_at"],
+        active_account_uids=result["active_account_uids"],
+    )
 
 
 async def run_search_task(

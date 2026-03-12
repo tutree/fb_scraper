@@ -35,3 +35,25 @@ class SearchStopResponse(BaseModel):
 
 class SearchLogsResponse(BaseModel):
     lines: List[str]
+
+
+class CookieStatusResponse(BaseModel):
+    active_account_uids: List[str] = []
+    saved_cookie_uids: List[str] = []
+    latest_cookie_uid: Optional[str] = None
+    cookie_file: Optional[str] = None
+    updated_at: Optional[str] = None
+    cookie_count: int = 0
+
+
+class CookieUpdateRequest(BaseModel):
+    cookie_json: str
+
+
+class CookieUpdateResponse(BaseModel):
+    message: str
+    account_uid: str
+    cookie_file: str
+    cookie_count: int
+    updated_at: str
+    active_account_uids: List[str] = []
