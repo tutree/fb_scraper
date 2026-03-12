@@ -36,7 +36,7 @@ class Settings(BaseSettings):
 
     # Ollama
     OLLAMA_BASE_URL: str = "http://ollama:11434"
-    OLLAMA_MODEL: str = "phi3.5"
+    OLLAMA_MODEL: str = "gemma3:4b"
 
     # Default Keywords (fallback)
     DEFAULT_KEYWORDS: List[str] = [

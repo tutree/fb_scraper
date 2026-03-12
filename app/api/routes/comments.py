@@ -225,3 +225,25 @@ async def analyze_batch_comments(
         skipped=skipped,
         items=normalized_items,
     )
+
+from pydantic import BaseModel
+
+class BulkDeleteCommentRequest(BaseModel):
+    ids: List[str]
+
+@router.post("/bulk-delete")
+async def bulk_delete_comments(request: BulkDeleteCommentRequest, db: Session = Depends(get_db)):
+    """Bulk delete comments."""
+    deleted_count = db.query(PostComment).filter(PostComment.id.in_(request.ids)).delete(synchronize_session=False)
+    db.commit()
+    return {"message": f"{deleted_count} comments deleted successfully"}
+
+@router.delete("/{comment_id}")
+async def delete_comment(comment_id: str, db: Session = Depends(get_db)):
+    """Delete a comment."""
+    comment = db.query(PostComment).filter(PostComment.id == comment_id).first()
+    if not comment:
+        raise HTTPException(status_code=404, detail="Comment not found")
+    db.delete(comment)
+    db.commit()
+    return {"message": "Comment deleted successfully"}

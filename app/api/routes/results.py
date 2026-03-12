@@ -314,6 +314,19 @@ async def analyze_batch_results(
     )
 
 
+from pydantic import BaseModel
+
+class BulkDeleteRequest(BaseModel):
+    ids: List[str]
+
+@router.post("/bulk-delete")
+async def bulk_delete_results(request: BulkDeleteRequest, db: Session = Depends(get_db)):
+    """Bulk delete search results."""
+    # SQLite/PostgreSQL supports deleting with in_
+    deleted_count = db.query(SearchResult).filter(SearchResult.id.in_(request.ids)).delete(synchronize_session=False)
+    db.commit()
+    return {"message": f"{deleted_count} results deleted successfully"}
+
 @router.delete("/{result_id}")
 async def delete_result(result_id: str, db: Session = Depends(get_db)):
     """Delete a search result."""

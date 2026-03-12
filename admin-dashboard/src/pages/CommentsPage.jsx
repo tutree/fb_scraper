@@ -25,6 +25,7 @@ export default function CommentsPage() {
   const [selectedIds, setSelectedIds] = useState(new Set())
   const [analyzingId, setAnalyzingId] = useState(null)
   const [analyzingBatch, setAnalyzingBatch] = useState(false)
+  const [deleteConfirm, setDeleteConfirm] = useState({ isOpen: false, ids: [], type: '', isDeleting: false })
   const [feedback, setFeedback] = useState(null)
   const [selectedComment, setSelectedComment] = useState(null)
   const [showCommentDialog, setShowCommentDialog] = useState(false)
@@ -70,6 +71,48 @@ export default function CommentsPage() {
       setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to analyze comment') })
     } finally {
       setAnalyzingId(null)
+    }
+  }
+
+
+  const deleteSelected = async () => {
+    const ids = [...selectedIds]
+    if (ids.length === 0) return
+    setDeleteConfirm({ isOpen: true, ids, type: 'bulk', isDeleting: false })
+  }
+
+  const deleteSingle = async (id, e) => {
+    e.stopPropagation()
+    setDeleteConfirm({ isOpen: true, ids: [id], type: 'single', isDeleting: false })
+  }
+
+  const executeDelete = async () => {
+    setDeleteConfirm(prev => ({ ...prev, isDeleting: true }))
+    setFeedback(null)
+    try {
+      if (deleteConfirm.type === 'bulk') {
+        const res = await axios.post(`${API_BASE}/comments/bulk-delete`, { ids: deleteConfirm.ids })
+        setFeedback({ type: 'success', text: res.data?.message || 'Deleted successfully' })
+        setSelectedIds(new Set())
+      } else {
+        const id = deleteConfirm.ids[0];
+        const res = await axios.delete(`${API_BASE}/comments/${id}`)
+        setFeedback({ type: 'success', text: res.data?.message || 'Deleted successfully' })
+        setSelectedIds((prev) => {
+          const next = new Set(prev)
+          next.delete(id)
+          return next
+        })
+      }
+      
+      // OPTIMISTIC UPDATE: Refresh UI instantly
+      setComments(prev => prev.filter(c => !deleteConfirm.ids.includes(c.id)))
+
+      await fetchComments()
+    } catch (err) {
+      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to delete') })
+    } finally {
+      setDeleteConfirm({ isOpen: false, ids: [], type: '', isDeleting: false })
     }
   }
 
@@ -207,6 +250,15 @@ export default function CommentsPage() {
             >
               {analyzingBatch ? 'Analyzing...' : `Analyze Selected (${selectedIds.size})`}
             </button>
+
+            <button
+              type="button"
+              onClick={deleteSelected}
+              disabled={selectedIds.size === 0 || deleteConfirm.isDeleting}
+              className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white disabled:bg-slate-400"
+            >
+              {deleteConfirm.type === 'bulk' && deleteConfirm.isDeleting ? 'Deleting...' : `Delete Selected (${selectedIds.size})`}
+            </button>
             <button
               type="button"
               onClick={() => setSelectedIds(new Set())}
@@ -331,6 +383,41 @@ export default function CommentsPage() {
 
             <div className="sticky bottom-0 flex justify-end border-t border-slate-200 bg-white px-6 py-4">
               <button type="button" className="rounded-md border border-slate-300 px-4 py-2 text-sm" onClick={closeCommentDetail}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteConfirm.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 transition-opacity">
+          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
+            <h3 className="text-lg font-bold text-slate-900">Confirm Deletion</h3>
+            <p className="mt-2 text-sm text-slate-500">
+              Are you sure you want to delete {deleteConfirm.type === 'bulk' ? `these ${deleteConfirm.ids.length} selected items` : 'this item'}? This action cannot be undone.
+            </p>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                onClick={() => setDeleteConfirm({ isOpen: false, ids: [], type: '', isDeleting: false })}
+                disabled={deleteConfirm.isDeleting}
+                className="rounded-lg px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={executeDelete}
+                disabled={deleteConfirm.isDeleting}
+                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50 flex items-center gap-2"
+              >
+                {deleteConfirm.isDeleting ? (
+                  <>
+                    <svg className="animate-spin h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    Deleting...
+                  </>
+                ) : 'Delete'}
+              </button>
             </div>
           </div>
         </div>
