@@ -82,7 +82,7 @@ async def scroll_and_process_posts(
             logger.warning("Stop requested during scroll warmup delay.")
             return 0
 
-    await _screenshot(page, f"01_results_loaded_{keyword[:30].replace(' ', '_')}")
+    # await _screenshot(page, f"01_results_loaded_{keyword[:30].replace(' ', '_')}")
 
     current_url = page.url
     logger.info(f"Current page URL: {current_url}")
