@@ -236,10 +236,19 @@ EXTRACT_DIALOG_COMMENTS_JS = """
             ? profileLink.getAttribute('href').split('?')[0]
             : null;
 
-        const bodyEl = a.querySelector('[dir="auto"]');
-        const bodyText = bodyEl
-            ? (bodyEl.innerText || bodyEl.textContent || '').trim()
-            : (a.innerText || a.textContent || '').trim();
+        let bodyText = "";
+        const commentDiv = a.querySelector('div[dir="auto"][style*="text-align"]');
+        
+        if (commentDiv) {
+            bodyText = (commentDiv.innerText || commentDiv.textContent || '').trim();
+        } else {
+            const autoBlocks = Array.from(a.querySelectorAll('[dir="auto"]'));
+            if (autoBlocks.length > 1) {
+                bodyText = (autoBlocks[autoBlocks.length - 1].innerText || '').trim();
+            } else if (autoBlocks.length === 1 && autoBlocks[0].innerText.trim() !== name) {
+                bodyText = autoBlocks[0].innerText.trim();
+            }
+        }
 
         const ts = label.replace(/^Comment by [^,]+,?\s*/, '').trim();
 

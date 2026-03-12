@@ -143,10 +143,19 @@ def write_results(browser: Browser):
 
                 // comment body: prefer dir="auto" element (the actual text node FB uses),
                 // fall back to the full article innerText
-                const bodyEl = a.querySelector('[dir="auto"]');
-                const bodyText = bodyEl
-                    ? (bodyEl.innerText || bodyEl.textContent || '').trim()
-                    : (a.innerText || a.textContent || '').trim();
+                let bodyText = "";
+                const commentDiv = a.querySelector('div[dir="auto"][style*="text-align"]');
+                
+                if (commentDiv) {
+                    bodyText = (commentDiv.innerText || commentDiv.textContent || '').trim();
+                } else {
+                    const autoBlocks = Array.from(a.querySelectorAll('[dir="auto"]'));
+                    if (autoBlocks.length > 1) {
+                        bodyText = (autoBlocks[autoBlocks.length - 1].innerText || '').trim();
+                    } else if (autoBlocks.length === 1 && autoBlocks[0].innerText.trim() !== name) {
+                        bodyText = autoBlocks[0].innerText.trim();
+                    }
+                }
 
                 // timestamp from aria-label  e.g. "3 weeks ago"
                 const ts = a.getAttribute('aria-label').replace(/^Comment by [^,]+,?\\s*/, '').trim();

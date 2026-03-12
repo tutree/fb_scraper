@@ -1,5 +1,5 @@
 ======================================================================
-  SCRAPE EXTRACTION RESULTS  —  generated 2026-03-11 12:40:57
+  SCRAPE EXTRACTION RESULTS  —  generated 2026-03-12 15:41:40
   Card fixture   : tests/fixtures/cards/card1.html
   Dialog fixture : tests/fixtures/dialogs/dialog1.html
 ======================================================================
@@ -21,48 +21,49 @@
     commenter_name  : Karen Brown 3 weeks ago
     profile_url     : https://www.facebook.com/karen.brown.771
     timestamp       : 
-    comment_text    : Karen Brown
+    comment_text    : Absolutely! These facts should be mastered in 4th grade.
 
   Comment #2
     commenter_name  : Amy Cline 3 weeks ago
     profile_url     : https://www.facebook.com/amy.h.cline
     timestamp       : 
-    comment_text    : Amy Cline
+    comment_text    : YES!!!
 
   Comment #3
     commenter_name  : Laurie Gill Arnold 3 weeks ago
     profile_url     : https://www.facebook.com/laurie.g.arnold
     timestamp       : 
-    comment_text    : Laurie Gill Arnold
+    comment_text    : 100% true !
 
   Comment #4
     commenter_name  : Jeannie Devine 3 weeks ago
     profile_url     : https://www.facebook.com/jeannie.freeman.50
     timestamp       : 
-    comment_text    : Jeannie Devine
+    comment_text    : It’s the parents job as well to help at home and not just the tea
+                    chers. Even if you have to get a tutor.
 
   Comment #5
     commenter_name  : Brett Matteson 3 weeks ago
     profile_url     : https://www.facebook.com/brett.matteson.5
     timestamp       : 
-    comment_text    : Brett Matteson
+    comment_text    : Amen! Make this shareable
 
   Comment #6
     commenter_name  : Kaitlin Howard 3 weeks ago
     profile_url     : https://www.facebook.com/kaitlin.dant
     timestamp       : 
-    comment_text    : Kaitlin Howard
+    comment_text    : I JUST HAD THIS CONVERSATION WITH MY 5TH GRADERS!!!!
 
   Comment #7
     commenter_name  : Andrea Sperath 3 weeks ago
     profile_url     : https://www.facebook.com/asperath
     timestamp       : 
-    comment_text    : Andrea Sperath
+    comment_text    : So well said and so true!
 
   Comment #8
     commenter_name  : Holly Butcher 3 weeks ago
     profile_url     : https://www.facebook.com/holly.butcher.54
     timestamp       : 
-    comment_text    : Holly Butcher
+    comment_text    : My strange kid thinks it’s fun to practice her math facts
 
 ======================================================================
