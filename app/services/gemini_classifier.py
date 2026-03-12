@@ -43,7 +43,7 @@ class GeminiClassifier:
             response = self.model.generate_content(prompt)
             response_text = response.text.strip()
         else:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with httpx.AsyncClient(timeout=600.0) as client:
                 response = await client.post(
                     f"{self.ollama_base_url}/api/generate",
                     json={
