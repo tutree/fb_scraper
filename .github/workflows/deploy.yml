@@ -1,0 +1,105 @@
+name: CI/CD Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: true
+
+jobs:
+  backend-tests:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      - name: Install Playwright browser
+        run: python -m playwright install --with-deps chromium
+
+      - name: Run backend test suite
+        run: pytest tests/test_modules.py tests/test_selector_matching.py -v
+
+  frontend-build:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: admin-dashboard
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: admin-dashboard/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+  deploy:
+    name: Deploy To DigitalOcean
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs:
+      - backend-tests
+      - frontend-build
+
+    steps:
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DO_SSH_PRIVATE_KEY }}
+
+      - name: Add droplet host key
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DO_KNOWN_HOSTS }}" >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy application on server
+        env:
+          DO_HOST: ${{ secrets.DO_HOST }}
+          DO_USER: ${{ secrets.DO_USER }}
+          DO_PORT: ${{ secrets.DO_PORT }}
+          DO_DEPLOY_PATH: ${{ secrets.DO_DEPLOY_PATH }}
+          DO_COMPOSE_FILE: ${{ secrets.DO_COMPOSE_FILE }}
+          DO_API_HEALTH_URL: ${{ secrets.DO_API_HEALTH_URL }}
+          DO_HEALTH_TIMEOUT_SECONDS: ${{ secrets.DO_HEALTH_TIMEOUT_SECONDS }}
+        run: |
+          : "${DO_HOST:?Missing DO_HOST secret}"
+          : "${DO_USER:?Missing DO_USER secret}"
+          : "${DO_PORT:=22}"
+          : "${DO_DEPLOY_PATH:?Missing DO_DEPLOY_PATH secret}"
+
+          ssh -p "$DO_PORT" "$DO_USER@$DO_HOST" \
+            "DEPLOY_PATH='$DO_DEPLOY_PATH' \
+            DEPLOY_BRANCH='main' \
+            COMPOSE_FILE='${DO_COMPOSE_FILE:-docker-compose.yml}' \
+            API_HEALTH_URL='${DO_API_HEALTH_URL:-}' \
+            HEALTH_TIMEOUT_SECONDS='${DO_HEALTH_TIMEOUT_SECONDS:-180}' \
+            bash '$DO_DEPLOY_PATH/scripts/deploy_on_server.sh'"

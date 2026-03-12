@@ -35,11 +35,6 @@ venv.bak/
 .env.local
 .env.*.local
 
-# Configuration Files - SENSITIVE
-deploy_package/config/credentials.json
-deploy_package/config/keywords.json
-
-
 # Cookies - SENSITIVE (contains login sessions)
 !cookies/README.md
 

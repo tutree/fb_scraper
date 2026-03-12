@@ -17,7 +17,6 @@ admin-dashboard
 
 logs
 cookies
-deploy_package
 
 .env
 .env.*
