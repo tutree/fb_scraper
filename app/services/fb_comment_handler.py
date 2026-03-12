@@ -216,7 +216,7 @@ async def click_comments_and_extract_from_dialog(
         logger.info(f"  [Comments] Starting comment extraction for profile: {profile_path}")
         logger.info(f"  [Comments] visible_index={visible_index}, limit={limit if max_comments > 0 else 'ALL'}")
 
-        # await _screenshot(page, f"02_before_comment_click_{profile_path.split('/')[-1][:20]}")
+        await _screenshot(page, f"02_before_comment_click_{profile_path.split('/')[-1][:20]}")
 
         click_result = await page.evaluate(
             COMMENT_TRIGGER_FOR_PROFILE_JS,
@@ -255,7 +255,7 @@ async def click_comments_and_extract_from_dialog(
             return comments_data, post_url_from_dialog
 
         logger.info("  [Comments click] SUCCESS - waiting for dialog to open...")
-        # await _screenshot(page, f"03_after_click_{profile_path.split('/')[-1][:20]}")
+        await _screenshot(page, f"03_after_click_{profile_path.split('/')[-1][:20]}")
 
         await asyncio.sleep(10)
         dialog_opened = False
@@ -267,9 +267,9 @@ async def click_comments_and_extract_from_dialog(
             logger.warning("  [Comments] wait_for_selector('[role=dialog]') timed out after 10s")
 
         if dialog_opened:
-            pass  # await _screenshot(page, f"04_dialog_opened_{profile_path.split('/')[-1][:20]}")
+            await _screenshot(page, f"04_dialog_opened_{profile_path.split('/')[-1][:20]}")
         else:
-            pass  # await _screenshot(page, f"04_dialog_timeout_{profile_path.split('/')[-1][:20]}")
+            await _screenshot(page, f"04_dialog_timeout_{profile_path.split('/')[-1][:20]}")
 
         dialog_diag = await page.evaluate(DIALOG_DIAG_JS)
         logger.info(
