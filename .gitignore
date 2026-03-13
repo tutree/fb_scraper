@@ -36,6 +36,7 @@ venv.bak/
 .env.*.local
 
 # Cookies - SENSITIVE (contains login sessions)
+cookies/
 !cookies/README.md
 
 # Database
@@ -87,6 +88,5 @@ temp/
 # OS
 Thumbs.db
 .DS_Store
-config/credentials.json
-config/credentials.json
+config/
 node_modules/
