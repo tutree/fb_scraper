@@ -109,8 +109,14 @@ def load_accounts() -> List[Dict]:
             logger.error("Failed to parse credentials file '%s': %s. Falling back to env.", CREDENTIALS_PATH, exc)
     else:
         logger.warning(f"Credentials file not found at {CREDENTIALS_PATH}, using environment variables")
+    cookie_uid_order = _cookie_uid_order()
+    env_uid = str(settings.FACEBOOK_EMAIL or "").strip()
+    if not env_uid and cookie_uid_order:
+        env_uid = cookie_uid_order[0]
+        logger.info("Using freshest cookie uid for env fallback account: %s", env_uid)
+
     env_account = {
-        "uid": settings.FACEBOOK_EMAIL,
+        "uid": env_uid,
         "password": settings.FACEBOOK_PASSWORD,
         "totp_secret": None,
     }

@@ -23,9 +23,12 @@ from sqlalchemy.orm import Session
 from ..core.logging_config import get_logger
 from .fb_account_loader import load_accounts
 from .fb_feed_scanner import scroll_and_process_posts
-from .fb_login import login
 
 logger = get_logger(__name__)
+
+
+class NoActiveCookieError(RuntimeError):
+    """Raised when cookie-only mode has no valid logged-in session."""
 
 
 class FacebookScraper:
@@ -145,6 +148,10 @@ class FacebookScraper:
             )
             logger.info("Browser page created successfully")
 
+            if not bool(getattr(self._current_page, "_kiro_has_loaded_cookies", False)):
+                logger.error("Cookie-only mode: no saved cookie session available")
+                raise NoActiveCookieError("no active cookie")
+
             logger.info("Checking if already logged in...")
             try:
                 await self._current_page.goto(
@@ -165,21 +172,15 @@ class FacebookScraper:
                 elif auth_state["logged_out"]:
                     logger.info("Login required (logged-out markers detected)")
                 else:
-                    logger.info("Auth state uncertain; will attempt explicit login")
+                    logger.info("Auth state uncertain while in cookie-only mode")
             except Exception as e:
                 logger.warning(f"Error checking login status: {e}")
 
             if not is_logged_in:
-                logger.info("Not logged in, attempting login...")
-                login_success = await login(self._current_page, account)
-                if not login_success:
-                    logger.error("Login failed, aborting search")
-                    return 0
-                logger.info("Login successful")
-                logger.info("Saving session cookies for future use...")
-                await self.browser_manager.save_cookies(self._current_page)
-            else:
-                logger.info("Skipping login (already authenticated)")
+                logger.error("Cookie-only mode: loaded cookie is not active")
+                raise NoActiveCookieError("no active cookie")
+
+            logger.info("Cookie session verified (cookie-only mode)")
 
             logger.info("Skipping session warmup (using saved cookies)")
         else:
@@ -230,30 +231,8 @@ class FacebookScraper:
             # Guard: if search landed on a logged-out page, re-login and retry
             auth_after_search = await self._inspect_auth_state(page)
             if auth_after_search["logged_out"]:
-                logger.warning(
-                    "Search page appears logged out. Attempting login and retrying..."
-                )
-                account = getattr(self, "_current_account", {}) or {}
-                if not account.get("password"):
-                    logger.error(
-                        "Cannot auto-login for account %s: password missing.",
-                        account.get("uid", "unknown"),
-                    )
-                    return 0
-
-                login_success = await login(page, account)
-                if not login_success:
-                    logger.error("Login retry failed after logged-out search page.")
-                    return 0
-
-                await self.browser_manager.save_cookies(page)
-                logger.info("Login retry succeeded, re-opening search URL...")
-                await page.goto(search_url, wait_until="domcontentloaded", timeout=120000)
-                if await self._sleep_with_stop(
-                    random.uniform(3, 5), should_stop=should_stop
-                ):
-                    logger.warning("Stop requested while waiting after login retry.")
-                    return 0
+                logger.error("Cookie-only mode: session became logged out on search page")
+                raise NoActiveCookieError("no active cookie")
 
             logger.info("Waiting for post elements to appear...")
             try:
@@ -284,6 +263,8 @@ class FacebookScraper:
             )
             return posts_processed
 
+        except NoActiveCookieError:
+            raise
         except Exception as e:
             logger.error(f"Error searching for '{keyword}': {e}", exc_info=True)
             return 0

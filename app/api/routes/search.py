@@ -67,6 +67,10 @@ async def start_search(
     """Start a new search task."""
     global current_task_id, last_task_id
 
+    cookie_status = get_cookie_status()
+    if not cookie_status.get("cookie_file") or int(cookie_status.get("cookie_count") or 0) <= 0:
+        raise HTTPException(status_code=400, detail="no active cookie")
+
     with tasks_lock:
         if current_task_id:
             current = tasks.get(current_task_id)

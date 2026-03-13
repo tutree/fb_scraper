@@ -556,6 +556,7 @@ class BrowserManager:
         # Store context reference for saving cookies later
         page._kiro_context = context
         page._kiro_account_uid = account_uid
+        page._kiro_has_loaded_cookies = bool(storage_state)
 
         return page
     
