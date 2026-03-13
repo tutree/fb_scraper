@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from ..core.logging_config import get_logger
 from ..models.post_comment import PostComment
 from ..models.search_result import ResultStatus, SearchResult
+from ..utils.validators import clean_facebook_post_content
 from .fb_comment_handler import extract_comments
 
 logger = get_logger(__name__)
@@ -39,7 +40,7 @@ async def process_single_profile(
     logger.info(f"[{idx}/{total}] Checking {link_type} link: {name}")
     logger.info(f"  URL: {link_url}")
 
-    post_content = link.get("post_content")
+    post_content = clean_facebook_post_content(link.get("post_content"))
     post_url = link.get("post_url")
     post_date = link.get("post_date")
 

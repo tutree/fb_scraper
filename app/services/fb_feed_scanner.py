@@ -153,8 +153,21 @@ async def scroll_and_process_posts(
                         return elem.textContent.trim();
                     }
                 }
-                const text = article.textContent.trim();
-                return text.length > 500 ? text.substring(0, 500) + '...' : text;
+                const dirAutoAll = article.querySelectorAll('[dir="auto"]');
+                const fragments = [];
+                const seen = new Set();
+                for (const el of dirAutoAll) {
+                    const t = el.textContent.trim();
+                    if (t.length > 15 && !seen.has(t) && !/^(Facebook|Like|Comment|Share|Send|Follow|Suggested for you|Sponsored)$/i.test(t)) {
+                        seen.add(t);
+                        fragments.push(t);
+                    }
+                }
+                if (fragments.length > 0) {
+                    const joined = fragments.join(' ');
+                    return joined.length > 500 ? joined.substring(0, 500) + '...' : joined;
+                }
+                return null;
             }
 
             function isPostUrl(href) {
@@ -377,8 +390,33 @@ async def scroll_and_process_posts(
                     }
 
                     function cardText(el) {
-                        const t = (el.innerText || '').trim();
-                        return t.length > 500 ? t.slice(0, 500) + '...' : t;
+                        const selectors = [
+                            'div[data-ad-rendering-role="story_message"]',
+                            'div[data-ad-comet-preview="message"]',
+                            'div[dir="auto"][style*="text-align"]',
+                            'span[dir="auto"]'
+                        ];
+                        for (const sel of selectors) {
+                            const found = el.querySelector(sel);
+                            if (found && found.textContent.trim().length > 20) {
+                                return found.textContent.trim();
+                            }
+                        }
+                        const dirAutoAll = el.querySelectorAll('[dir="auto"]');
+                        const fragments = [];
+                        const seen = new Set();
+                        for (const node of dirAutoAll) {
+                            const t = node.textContent.trim();
+                            if (t.length > 15 && !seen.has(t) && !/^(Facebook|Like|Comment|Share|Send|Follow|Suggested for you|Sponsored)$/i.test(t)) {
+                                seen.add(t);
+                                fragments.push(t);
+                            }
+                        }
+                        if (fragments.length > 0) {
+                            const joined = fragments.join(' ');
+                            return joined.length > 500 ? joined.slice(0, 500) + '...' : joined;
+                        }
+                        return null;
                     }
 
                     function normalizeText(value) {

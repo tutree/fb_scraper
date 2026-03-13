@@ -6,6 +6,7 @@ import httpx
 
 from ..core.config import settings
 from ..core.logging_config import get_logger
+from ..utils.validators import clean_facebook_post_content
 
 logger = get_logger(__name__)
 
@@ -81,28 +82,26 @@ class GeminiClassifier:
         Returns:
             Dict with keys: type, confidence, reason
         """
-        if not post_content or not post_content.strip():
+        post_content = clean_facebook_post_content(post_content) or ""
+        if not post_content.strip():
             return {
                 "type": "UNKNOWN",
                 "confidence": 0.0,
                 "reason": "No post content available"
             }
         
-        prompt = f"""
-Analyze this Facebook post about math tutoring and classify the user.
+        prompt = f"""You are analyzing a Facebook post scraped from a search results page. The raw text may contain Facebook UI artifacts such as repeated words like "Facebook", navigation labels ("Like", "Comment", "Share"), reaction counts, or timestamps mixed into the post body. Your first task is to mentally extract only the actual user-written post content, ignoring all UI noise.
 
 User: {user_name if user_name else "Unknown"}
-Post: {post_content}
+Raw scraped text: {post_content}
 
-Classification Rules:
-- CUSTOMER: User is looking for a math tutor, needs help with math, asking for tutoring recommendations
+After extracting the real post content, classify the user:
+- CUSTOMER: User is looking for a tutor, needs help, asking for tutoring recommendations, seeking educational services
 - TUTOR: User is offering tutoring services, advertising their tutoring business, promoting their teaching
-- UNKNOWN: Post is unclear, irrelevant, or doesn't clearly indicate either category
+- UNKNOWN: Post is unclear, irrelevant, only contains UI noise with no real content, or doesn't clearly indicate either category
 
 Return ONLY valid JSON in this exact format (no markdown, no extra text):
-{{"type": "CUSTOMER", "confidence": 0.95, "reason": "User explicitly asks for math tutor"}}
-
-Analyze now:
+{{"type": "CUSTOMER", "confidence": 0.95, "reason": "User explicitly asks for a tutor"}}
 """
         
         try:
@@ -142,13 +141,17 @@ Analyze now:
         if not comment_text or not comment_text.strip():
             return {"type": "UNKNOWN", "confidence": 0.0, "reason": "No comment text"}
 
+        post_context = clean_facebook_post_content(post_context) or ""
+
         context_block = ""
         if search_keyword:
             context_block += f"Search keyword that found this post: {search_keyword}\n"
         if post_context:
             context_block += f"Post the comment appears on:\n{post_context[:600]}\n"
 
-        prompt = f"""You are analyzing Facebook comments to find people who are looking for a math tutor (CUSTOMER) or people offering tutoring services (TUTOR).
+        prompt = f"""You are analyzing Facebook comments to find people who are looking for a tutor (CUSTOMER) or people offering tutoring services (TUTOR).
+
+NOTE: The post context below was scraped from Facebook and may contain UI artifacts (repeated "Facebook" words, "Like", "Comment", "Share" buttons, reaction counts, timestamps). Ignore all such noise and focus on the actual user-written content.
 
 {context_block}
 Comment author: {author_name or "Unknown"}
