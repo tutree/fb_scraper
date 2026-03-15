@@ -154,6 +154,14 @@ function App() {
 
 
   const enrichSingle = async (id) => {
+    const row = results.find((r) => r.id === id) || selectedResult
+    if (row && (!row.name || !row.location)) {
+      const missing = []
+      if (!row.name) missing.push('name')
+      if (!row.location) missing.push('location')
+      setFeedback({ type: 'error', text: `Skipped "${row.name || 'Unknown'}": ${missing.join(' and ')} required for enrichment.` })
+      return
+    }
     setEnrichingId(id)
     setFeedback(null)
     try {
@@ -181,17 +189,38 @@ function App() {
   const enrichSelected = async () => {
     const ids = [...selectedIds]
     if (ids.length === 0) return
+
+    const eligible = []
+    const skippedNames = []
+    for (const id of ids) {
+      const row = results.find((r) => r.id === id)
+      if (row && (!row.name || !row.location)) {
+        skippedNames.push(row.name || 'Unknown')
+      } else {
+        eligible.push(id)
+      }
+    }
+
+    if (eligible.length === 0) {
+      setFeedback({ type: 'error', text: `All ${ids.length} selected leads skipped — name + location required. Missing for: ${skippedNames.join(', ')}` })
+      return
+    }
+
     setEnrichingBatch(true)
     setFeedback(null)
     try {
       const res = await api.post(`/results/enrich/batch`, {
-        result_ids: ids,
+        result_ids: eligible,
         force_re_enrich: false,
       })
       const { succeeded = 0, skipped = 0, failed = 0 } = res.data || {}
+      const parts = [`${succeeded} enriched`]
+      if (skipped > 0) parts.push(`${skipped} already enriched`)
+      if (failed > 0) parts.push(`${failed} failed`)
+      if (skippedNames.length > 0) parts.push(`${skippedNames.length} skipped (no location): ${skippedNames.join(', ')}`)
       setFeedback({
-        type: failed > 0 && succeeded === 0 ? 'error' : 'success',
-        text: `Enrichment complete: ${succeeded} enriched, ${skipped} skipped, ${failed} failed (no location).`,
+        type: (failed > 0 || skippedNames.length > 0) && succeeded === 0 ? 'error' : 'success',
+        text: `Enrichment: ${parts.join(' · ')}`,
       })
       setSelectedIds(new Set())
       await fetchData()
@@ -472,9 +501,6 @@ function App() {
             <button type="button" onClick={enrichSelected} disabled={selectedIds.size === 0 || enrichingBatch} className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white disabled:bg-slate-400">
               {enrichingBatch ? 'Enriching...' : `Enrich Selected (${selectedIds.size})`}
             </button>
-            <button type="button" onClick={deleteSelected} disabled={selectedIds.size === 0 || deleteConfirm.isDeleting} className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white disabled:bg-slate-400">
-              {deleteConfirm.type === 'bulk' && deleteConfirm.isDeleting ? 'Deleting...' : `Delete Selected (${selectedIds.size})`}
-            </button>
             <button type="button" onClick={() => setSelectedIds(new Set())} disabled={selectedIds.size === 0} className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-700 disabled:opacity-40">Clear Selection</button>
           </div>
         </section>
@@ -529,7 +555,7 @@ function App() {
                             <button type="button" onClick={() => analyzeSingle(result.id)} disabled={analyzingId === result.id || analyzingBatch} className="rounded-md bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-white disabled:bg-slate-400">
                               {analyzingId === result.id ? 'Analyzing...' : 'Analyze'}
                             </button>
-                            <button type="button" onClick={() => enrichSingle(result.id)} disabled={enrichingId === result.id || enrichingBatch} title={!result.location ? 'Location required for enrichment' : result.enriched_at ? 'Re-enrich contact' : 'Enrich contact'} className={`rounded-md px-2.5 py-1.5 text-xs font-medium text-white disabled:bg-slate-400 ${result.enriched_at ? 'bg-violet-400' : 'bg-violet-600'}`}>
+                            <button type="button" onClick={() => enrichSingle(result.id)} disabled={enrichingId === result.id || enrichingBatch} className={`rounded-md px-2.5 py-1.5 text-xs font-medium text-white disabled:bg-slate-400 ${result.enriched_at ? 'bg-violet-400' : 'bg-violet-600'}`}>
                               {enrichingId === result.id ? 'Enriching...' : result.enriched_at ? 'Re-Enrich' : 'Enrich'}
                             </button>
                         
@@ -760,8 +786,7 @@ function App() {
                     type="button"
                     className="rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white disabled:bg-slate-400"
                     onClick={() => enrichSingle(selectedResult.id)}
-                    disabled={enrichingId === selectedResult.id || enrichingBatch || !selectedResult.location}
-                    title={!selectedResult.location ? 'Location required for enrichment' : ''}
+                    disabled={enrichingId === selectedResult.id || enrichingBatch}
                   >
                     {enrichingId === selectedResult.id ? 'Enriching...' : selectedResult.enriched_at ? 'Re-Enrich Contact' : 'Enrich Contact'}
                   </button>

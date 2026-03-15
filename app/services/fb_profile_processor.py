@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from ..core.logging_config import get_logger
 from ..models.post_comment import PostComment
 from ..models.search_result import ResultStatus, SearchResult
-from ..utils.validators import clean_facebook_location, clean_facebook_post_content
+from ..utils.validators import clean_facebook_location, clean_facebook_name, clean_facebook_post_content
 from .fb_comment_handler import extract_comments
 
 logger = get_logger(__name__)
@@ -181,6 +181,8 @@ async def process_single_profile(
             }
             """
         )
+
+        final_name = clean_facebook_name(final_name) or final_name or "Unknown"
 
         if is_personal_profile:
             if location_text:

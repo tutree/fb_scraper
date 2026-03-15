@@ -70,17 +70,85 @@ def clean_facebook_post_content(text: Optional[str]) -> Optional[str]:
     return result
 
 
+def clean_facebook_name(raw: Optional[str]) -> Optional[str]:
+    """
+    Sanitize a scraped Facebook display name down to FirstName LastName.
+    - Strips numbers, emojis, special characters, URLs, email fragments
+    - Keeps only alphabetic words (including accented/unicode letters)
+    - Returns at most two name parts (first + last)
+    - Returns None if nothing usable remains
+    """
+    if not raw or not raw.strip():
+        return None
+    text = raw.strip()
+    text = text.replace("\xa0", " ")
+    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"\S+@\S+", "", text)
+    text = re.sub(r"[^\w\s'-]", " ", text, flags=re.UNICODE)
+    text = re.sub(r"[\d_]", " ", text)
+    words = text.split()
+    name_parts: list[str] = []
+    for w in words:
+        w = w.strip("'-")
+        if not w:
+            continue
+        if re.fullmatch(r"[\W_]+", w, flags=re.UNICODE):
+            continue
+        if len(w) == 1 and w.lower() not in "aijo":
+            continue
+        name_parts.append(w.capitalize())
+    if not name_parts:
+        return None
+    if len(name_parts) > 2:
+        name_parts = [name_parts[0], name_parts[-1]]
+    return " ".join(name_parts)
+
+
 def clean_facebook_location(raw: Optional[str]) -> Optional[str]:
     """
     Clean Facebook profile location text.
-    'Lives in Chicago, Illinois, From Tiffin, Ohio' → 'Chicago, Illinois, Tiffin, Ohio'
+    Handles multiple location entries separated by commas or newlines.
+    Prefers 'Lives in' over 'From' when they point to different places.
+
+    'Lives in Chicago, Illinois, From Tiffin, Ohio' → 'Chicago, Illinois'
+    'Lives in Chicago, Illinois, From Chicago, Illinois' → 'Chicago, Illinois'
     'From Winnsboro, Louisiana' → 'Winnsboro, Louisiana'
     """
     if not raw or not raw.strip():
         return None
     text = raw.strip()
-    text = re.sub(r"(?i)\b(lives\s+in|moved\s+to|from)\b", ",", text)
-    parts = [p.strip() for p in text.split(",") if p.strip()]
+
+    _PREFIX = re.compile(r"(?i)^\s*(lives\s+in|moved\s+to|from)\s+", re.MULTILINE)
+
+    chunks: list[str] = re.split(r"(?i)(?=lives\s+in|(?:,\s*)?from\s)", text)
+    lives_in: list[str] = []
+    from_loc: list[str] = []
+    other: list[str] = []
+
+    for chunk in chunks:
+        chunk = chunk.strip().strip(",").strip()
+        if not chunk:
+            continue
+        is_lives = bool(re.match(r"(?i)^lives\s+in\b", chunk))
+        is_from = bool(re.match(r"(?i)^from\b", chunk))
+        cleaned = _PREFIX.sub("", chunk).strip().strip(",").strip()
+        if not cleaned:
+            continue
+        if is_lives:
+            lives_in.append(cleaned)
+        elif is_from:
+            from_loc.append(cleaned)
+        else:
+            other.append(cleaned)
+
+    best = lives_in or from_loc or other
+    if not best:
+        text_fallback = re.sub(r"(?i)\b(lives\s+in|moved\s+to|from)\b", ",", text)
+        parts = [p.strip() for p in text_fallback.split(",") if p.strip()]
+        return ", ".join(parts) if parts else None
+
+    result = best[0]
+    parts = [p.strip() for p in result.split(",") if p.strip()]
     seen: list[str] = []
     for p in parts:
         if p.lower() not in [s.lower() for s in seen]:

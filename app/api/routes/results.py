@@ -25,7 +25,7 @@ from ...schemas.search_result import (
 from ...schemas.post_comment import PostCommentResponse
 from ...models.search_result import SearchResult, ResultStatus, UserType
 from ...models.post_comment import PostComment
-from ...utils.validators import clean_facebook_location
+from ...utils.validators import clean_facebook_location, clean_facebook_name
 
 router = APIRouter(prefix="/results", tags=["results"])
 
@@ -50,10 +50,15 @@ async def _analyze_search_result(
     classifier: GeminiClassifier,
     force_reanalyze: bool,
 ) -> AnalyzeResultItem:
+    if result.name:
+        cleaned_name = clean_facebook_name(result.name)
+        if cleaned_name and cleaned_name != result.name:
+            result.name = cleaned_name
+
     if result.location:
-        cleaned = clean_facebook_location(result.location)
-        if cleaned and cleaned != result.location:
-            result.location = cleaned
+        cleaned_loc = clean_facebook_location(result.location)
+        if cleaned_loc and cleaned_loc != result.location:
+            result.location = cleaned_loc
 
     if result.user_type is not None and not force_reanalyze:
         return _format_analyze_item(
