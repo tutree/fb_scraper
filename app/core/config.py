@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://ollama:11434"
     OLLAMA_MODEL: str = "gemma3:4b"
 
+    # EnformionGO Contact Enrichment
+    ENFORMION_AP_NAME: str = ""
+    ENFORMION_AP_PASSWORD: str = ""
+
     # Default Keywords (fallback)
     DEFAULT_KEYWORDS: List[str] = [
         "looking for math tutor",

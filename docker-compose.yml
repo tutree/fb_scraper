@@ -80,6 +80,8 @@ services:
       OLLAMA_MODEL: ${OLLAMA_MODEL:-gemma3:4b}
       API_V1_PREFIX: ${API_V1_PREFIX:-/api/v1}
       PROJECT_NAME: ${PROJECT_NAME:-Math Tutor Scraper API}
+      ENFORMION_AP_NAME: ${ENFORMION_AP_NAME:-}
+      ENFORMION_AP_PASSWORD: ${ENFORMION_AP_PASSWORD:-}
     depends_on:
       postgres:
         condition: service_healthy

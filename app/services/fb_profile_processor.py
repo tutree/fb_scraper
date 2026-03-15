@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from ..core.logging_config import get_logger
 from ..models.post_comment import PostComment
 from ..models.search_result import ResultStatus, SearchResult
-from ..utils.validators import clean_facebook_post_content
+from ..utils.validators import clean_facebook_location, clean_facebook_post_content
 from .fb_comment_handler import extract_comments
 
 logger = get_logger(__name__)
@@ -147,7 +147,7 @@ async def process_single_profile(
                 unique_locations.append(loc)
                 seen_locs.add(loc)
 
-        location_text = ", ".join(unique_locations) if unique_locations else None
+        location_text = clean_facebook_location(", ".join(unique_locations)) if unique_locations else None
 
         # -- Personal-profile check --
         is_personal_profile = await page.evaluate(

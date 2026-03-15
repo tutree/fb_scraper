@@ -579,13 +579,22 @@ export default function ScraperPage() {
 
             <div className="rounded-lg border border-slate-200 p-3">
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                <button
-                  type="button"
-                  onClick={() => setShowTechnicalLogs((prev) => !prev)}
-                  className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
-                >
-                  {showTechnicalLogs ? 'Hide technical logs' : 'Show technical logs'}
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowTechnicalLogs((prev) => !prev)}
+                    className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
+                  >
+                    {showTechnicalLogs ? 'Hide technical logs' : 'Show technical logs'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setScraperLogs([]); setFeedback(null); }}
+                    className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
+                  >
+                    Clear logs
+                  </button>
+                </div>
                 <div className="flex items-center gap-2 text-xs text-slate-600">
                   <span>Lines</span>
                   <select

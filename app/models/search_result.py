@@ -1,5 +1,5 @@
 from sqlalchemy import Column, String, DateTime, Text, Enum, Index, Float
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import uuid
@@ -34,11 +34,18 @@ class SearchResult(Base):
     status = Column(Enum(ResultStatus), default=ResultStatus.PENDING)
     profile_url = Column(String, nullable=True)
     
-    # Gemini AI classification fields
+    # AI classification fields
     user_type = Column(Enum(UserType, values_callable=lambda x: [e.value for e in x]), nullable=True)
     confidence_score = Column(Float, nullable=True)  # 0-1 confidence
-    analysis_message = Column(Text, nullable=True)  # Reason text from Gemini (no raw JSON)
+    analysis_message = Column(Text, nullable=True)  # Reason text from AI (no raw JSON)
     analyzed_at = Column(DateTime(timezone=True), nullable=True)
+
+    # EnformionGO contact enrichment fields
+    enriched_phones = Column(JSONB, nullable=True)     # [{"number","type","is_connected"}]
+    enriched_emails = Column(JSONB, nullable=True)     # ["email@example.com", ...]
+    enriched_addresses = Column(JSONB, nullable=True)  # [{"street","city","state","zip","unit"}]
+    enriched_age = Column(String, nullable=True)
+    enriched_at = Column(DateTime(timezone=True), nullable=True)
     
     scraped_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

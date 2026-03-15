@@ -20,6 +20,26 @@ def run_startup_migrations() -> None:
             "search_results.post_date",
             "ALTER TABLE search_results ADD COLUMN IF NOT EXISTS post_date VARCHAR NULL;",
         ),
+        (
+            "search_results.enriched_phones",
+            "ALTER TABLE search_results ADD COLUMN IF NOT EXISTS enriched_phones JSONB NULL;",
+        ),
+        (
+            "search_results.enriched_emails",
+            "ALTER TABLE search_results ADD COLUMN IF NOT EXISTS enriched_emails JSONB NULL;",
+        ),
+        (
+            "search_results.enriched_addresses",
+            "ALTER TABLE search_results ADD COLUMN IF NOT EXISTS enriched_addresses JSONB NULL;",
+        ),
+        (
+            "search_results.enriched_age",
+            "ALTER TABLE search_results ADD COLUMN IF NOT EXISTS enriched_age VARCHAR NULL;",
+        ),
+        (
+            "search_results.enriched_at",
+            "ALTER TABLE search_results ADD COLUMN IF NOT EXISTS enriched_at TIMESTAMP WITH TIME ZONE NULL;",
+        ),
     ]
 
     try:

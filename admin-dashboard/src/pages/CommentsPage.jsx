@@ -35,6 +35,12 @@ export default function CommentsPage() {
     fetchComments()
   }, [page, perPage, userTypeFilter, analyzedFilter])
 
+  useEffect(() => {
+    const isOpen = showCommentDialog || deleteConfirm.isOpen
+    document.body.style.overflow = isOpen ? 'hidden' : ''
+    return () => { document.body.style.overflow = '' }
+  }, [showCommentDialog, deleteConfirm.isOpen])
+
   const fetchComments = async () => {
     setLoading(true)
     setError(null)

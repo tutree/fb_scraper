@@ -8,6 +8,7 @@ from uuid import UUID
 from ...core.database import get_db
 from ...services.scraper import ScraperService
 from ...services.gemini_classifier import GeminiClassifier
+from ...services.enformion_service import EnformionService
 from ...schemas.search_result import (
     SearchResultResponse,
     SearchResultList,
@@ -16,10 +17,15 @@ from ...schemas.search_result import (
     AnalyzeBatchResponse,
     AnalyzeSingleResponse,
     AnalyzeResultItem,
+    EnrichResultItem,
+    EnrichSingleResponse,
+    EnrichBatchRequest,
+    EnrichBatchResponse,
 )
 from ...schemas.post_comment import PostCommentResponse
 from ...models.search_result import SearchResult, ResultStatus, UserType
 from ...models.post_comment import PostComment
+from ...utils.validators import clean_facebook_location
 
 router = APIRouter(prefix="/results", tags=["results"])
 
@@ -44,6 +50,11 @@ async def _analyze_search_result(
     classifier: GeminiClassifier,
     force_reanalyze: bool,
 ) -> AnalyzeResultItem:
+    if result.location:
+        cleaned = clean_facebook_location(result.location)
+        if cleaned and cleaned != result.location:
+            result.location = cleaned
+
     if result.user_type is not None and not force_reanalyze:
         return _format_analyze_item(
             result=result,
@@ -185,18 +196,35 @@ async def update_result(
     update: SearchResultUpdate,
     db: Session = Depends(get_db),
 ):
-    """Update a search result's status."""
-    scraper = ScraperService(db)
-    success = await scraper.update_result_status(result_id, update.status)
-
-    if not success:
-        raise HTTPException(status_code=404, detail="Result not found")
-
+    """Update a search result (any editable field)."""
     result = (
         db.query(SearchResult)
         .filter(SearchResult.id == result_id)
         .first()
     )
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+
+    data = update.model_dump(exclude_unset=True)
+    user_type_raw = data.pop("user_type", None)
+    status_raw = data.pop("status", None)
+    for key, value in data.items():
+        if hasattr(result, key):
+            setattr(result, key, value)
+    if user_type_raw is not None:
+        try:
+            result.user_type = UserType(user_type_raw) if user_type_raw else None
+        except ValueError:
+            result.user_type = None
+    if status_raw is not None:
+        try:
+            result.status = ResultStatus(status_raw)
+        except ValueError:
+            pass
+
+    result.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(result)
     return result
 
 
@@ -342,3 +370,151 @@ async def delete_result(result_id: str, db: Session = Depends(get_db)):
     db.commit()
 
     return {"message": "Result deleted successfully"}
+
+
+# ---------------------------------------------------------------------------
+# EnformionGO contact enrichment
+# ---------------------------------------------------------------------------
+
+def _format_enrich_item(
+    result: SearchResult,
+    success: bool,
+    message: str,
+) -> EnrichResultItem:
+    return EnrichResultItem(
+        id=result.id,
+        success=success,
+        message=message,
+        enriched_phones=result.enriched_phones,
+        enriched_emails=result.enriched_emails,
+        enriched_addresses=result.enriched_addresses,
+        enriched_age=result.enriched_age,
+        enriched_at=result.enriched_at,
+    )
+
+
+async def _enrich_single(
+    result: SearchResult,
+    service: EnformionService,
+    force: bool,
+) -> EnrichResultItem:
+    if result.enriched_at is not None and not force:
+        return _format_enrich_item(result, True, "Skipped: already enriched")
+
+    can, reason = EnformionService.can_enrich(result.name, result.location)
+    if not can:
+        return _format_enrich_item(result, False, reason)
+
+    try:
+        data = await service.enrich(result.name, result.location)
+    except Exception as exc:
+        return _format_enrich_item(result, False, f"EnformionGO API error: {exc}")
+
+    if not data.get("matched"):
+        return _format_enrich_item(result, False, "No match found in EnformionGO")
+
+    result.enriched_phones = data.get("phones")
+    result.enriched_emails = data.get("emails")
+    result.enriched_addresses = data.get("addresses")
+    result.enriched_age = data.get("age")
+    result.enriched_at = datetime.now(timezone.utc)
+
+    return _format_enrich_item(result, True, "Enriched successfully")
+
+
+@router.post("/{result_id}/enrich", response_model=EnrichSingleResponse)
+async def enrich_single_result(
+    result_id: UUID,
+    force: bool = Query(False, description="Re-enrich even if already enriched"),
+    db: Session = Depends(get_db),
+):
+    """
+    Enrich a single result with contact data from EnformionGO.
+    Requires both name and location; returns a warning if location is missing.
+    """
+    result = db.query(SearchResult).filter(SearchResult.id == result_id).first()
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+
+    try:
+        service = EnformionService()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    item = await _enrich_single(result, service, force)
+
+    if item.success and item.message != "Skipped: already enriched":
+        db.commit()
+        db.refresh(result)
+        item = _format_enrich_item(result, True, item.message)
+    elif not item.success:
+        db.rollback()
+
+    return EnrichSingleResponse(item=item)
+
+
+@router.post("/enrich/batch", response_model=EnrichBatchResponse)
+async def enrich_batch_results(
+    request: EnrichBatchRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Enrich multiple results in batch. Results without location are skipped
+    with a warning message explaining why enrichment was not possible.
+    """
+    if not request.result_ids:
+        raise HTTPException(status_code=400, detail="result_ids is required")
+
+    try:
+        service = EnformionService()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    result_map = {
+        r.id: r
+        for r in db.query(SearchResult)
+        .filter(SearchResult.id.in_(request.result_ids))
+        .all()
+    }
+
+    items: List[EnrichResultItem] = []
+
+    for rid in request.result_ids:
+        result = result_map.get(rid)
+        if not result:
+            items.append(
+                EnrichResultItem(id=rid, success=False, message="Result not found")
+            )
+            continue
+        item = await _enrich_single(result, service, request.force_re_enrich)
+        items.append(item)
+
+    if any(i.success and i.message != "Skipped: already enriched" for i in items):
+        db.commit()
+        for i in items:
+            r = result_map.get(i.id)
+            if r:
+                db.refresh(r)
+
+    final: List[EnrichResultItem] = []
+    for i in items:
+        r = result_map.get(i.id)
+        if r:
+            final.append(_format_enrich_item(r, i.success, i.message))
+        else:
+            final.append(i)
+
+    succeeded = sum(
+        1 for i in final
+        if i.success and i.message not in ("Skipped: already enriched",)
+    )
+    skipped = sum(1 for i in final if i.message == "Skipped: already enriched")
+    failed = sum(1 for i in final if not i.success)
+
+    return EnrichBatchResponse(
+        total=len(final),
+        succeeded=succeeded,
+        failed=failed,
+        skipped=skipped,
+        items=final,
+    )

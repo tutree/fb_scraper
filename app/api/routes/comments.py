@@ -8,6 +8,7 @@ from uuid import UUID
 from ...core.database import get_db
 from ...schemas.post_comment import (
     PostCommentResponse,
+    PostCommentUpdate,
     CommentListResponse,
     AnalyzeCommentBatchRequest,
     AnalyzeCommentBatchResponse,
@@ -107,6 +108,42 @@ async def list_comments(
         total=total,
         items=[PostCommentResponse.model_validate(c) for c in comments],
     )
+
+
+@router.get("/{comment_id}", response_model=PostCommentResponse)
+async def get_comment(comment_id: UUID, db: Session = Depends(get_db)):
+    """Get a single comment by ID."""
+    comment = db.query(PostComment).filter(PostComment.id == comment_id).first()
+    if not comment:
+        raise HTTPException(status_code=404, detail="Comment not found")
+    return PostCommentResponse.model_validate(comment)
+
+
+@router.patch("/{comment_id}", response_model=PostCommentResponse)
+async def update_comment(
+    comment_id: UUID,
+    update: PostCommentUpdate,
+    db: Session = Depends(get_db),
+):
+    """Update a comment (any editable field)."""
+    comment = db.query(PostComment).filter(PostComment.id == comment_id).first()
+    if not comment:
+        raise HTTPException(status_code=404, detail="Comment not found")
+
+    data = update.model_dump(exclude_unset=True)
+    user_type_raw = data.pop("user_type", None)
+    for key, value in data.items():
+        if hasattr(comment, key):
+            setattr(comment, key, value)
+    if user_type_raw is not None:
+        try:
+            comment.user_type = UserType(user_type_raw) if user_type_raw else None
+        except ValueError:
+            comment.user_type = None
+
+    db.commit()
+    db.refresh(comment)
+    return PostCommentResponse.model_validate(comment)
 
 
 @router.post("/{comment_id}/analyze", response_model=AnalyzeCommentSingleResponse)

@@ -70,6 +70,24 @@ def clean_facebook_post_content(text: Optional[str]) -> Optional[str]:
     return result
 
 
+def clean_facebook_location(raw: Optional[str]) -> Optional[str]:
+    """
+    Clean Facebook profile location text.
+    'Lives in Chicago, Illinois, From Tiffin, Ohio' → 'Chicago, Illinois, Tiffin, Ohio'
+    'From Winnsboro, Louisiana' → 'Winnsboro, Louisiana'
+    """
+    if not raw or not raw.strip():
+        return None
+    text = raw.strip()
+    text = re.sub(r"(?i)\b(lives\s+in|moved\s+to|from)\b", ",", text)
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    seen: list[str] = []
+    for p in parts:
+        if p.lower() not in [s.lower() for s in seen]:
+            seen.append(p)
+    return ", ".join(seen) if seen else None
+
+
 def sanitize_text(text: Optional[str]) -> Optional[str]:
     """Clean and sanitize scraped text content."""
     if not text:

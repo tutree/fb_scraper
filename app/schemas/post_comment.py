@@ -4,6 +4,17 @@ from uuid import UUID
 from typing import Optional, List
 
 
+class PostCommentUpdate(BaseModel):
+    """All fields optional for partial updates."""
+    author_name: Optional[str] = None
+    author_profile_url: Optional[str] = None
+    comment_text: Optional[str] = None
+    comment_timestamp: Optional[str] = None
+    user_type: Optional[str] = None  # customer, tutor, unknown
+    confidence_score: Optional[float] = None
+    analysis_message: Optional[str] = None
+
+
 class PostCommentResponse(BaseModel):
     id: UUID
     search_result_id: UUID
