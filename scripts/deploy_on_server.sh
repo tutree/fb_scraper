@@ -69,7 +69,13 @@ else
 fi
 
 log "Rebuilding and restarting Docker services"
-"${DOCKER_COMPOSE[@]}" -f "$COMPOSE_FILE" up -d --build --remove-orphans
+# --build: rebuild images (picks up new code after git pull)
+# --force-recreate: always recreate containers so the new image is actually used
+if [[ -n "${DEPLOY_NO_CACHE:-}" ]]; then
+    log "Full rebuild (no cache) for api..."
+    "${DOCKER_COMPOSE[@]}" -f "$COMPOSE_FILE" build --no-cache api
+fi
+"${DOCKER_COMPOSE[@]}" -f "$COMPOSE_FILE" up -d --build --force-recreate --remove-orphans
 
 log "Waiting for API health check at $API_HEALTH_URL"
 SECONDS_WAITED=0

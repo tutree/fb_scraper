@@ -94,6 +94,9 @@ jobs:
           : "${DO_PORT:=22}"
           : "${DO_DEPLOY_PATH:?Missing DO_DEPLOY_PATH secret}"
 
+          # Fix line endings (CRLF -> LF) so script runs on Linux
+          ssh -p "$DO_PORT" "$DO_USER@$DO_HOST" "sed -i 's/\\r\$//' '$DO_DEPLOY_PATH/scripts/deploy_on_server.sh' && chmod +x '$DO_DEPLOY_PATH/scripts/deploy_on_server.sh'"
+
           ssh -p "$DO_PORT" "$DO_USER@$DO_HOST" \
             "DEPLOY_PATH='$DO_DEPLOY_PATH' \
             DEPLOY_BRANCH='main' \

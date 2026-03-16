@@ -1,0 +1,6 @@
+# EditorConfig: keep shell scripts on LF (avoids CRLF on Windows)
+root = true
+
+[*.sh]
+end_of_line = lf
+charset = utf-8
