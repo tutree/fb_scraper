@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 from playwright.async_api import Page
 from sqlalchemy.orm import Session
 
+from ..core.config import settings
 from ..core.logging_config import get_logger
 from ..models.post_comment import PostComment
 from ..models.search_result import ResultStatus, SearchResult
@@ -43,6 +44,8 @@ async def process_single_profile(
     post_content = clean_facebook_post_content(link.get("post_content"))
     post_url = link.get("post_url")
     post_date = link.get("post_date")
+    if post_date is None or (isinstance(post_date, str) and not post_date.strip()):
+        logger.info("Post has no date from feed (url=%s) — date extraction may have failed on this card", (link_url or "")[:80])
 
     try:
         if link_type == "group":
@@ -204,6 +207,9 @@ async def process_single_profile(
                 db.add(search_result)
                 db.commit()
                 logger.info(f"  Saved to database (ID: {search_result.id})")
+                if settings.AUTO_ANALYZE_AFTER_SCRAPE:
+                    from .background_jobs import push_to_analyze_queue
+                    push_to_analyze_queue(search_result.id)
 
                 if comments_data:
                     try:
@@ -293,6 +299,9 @@ async def process_single_profile(
                     logger.info(
                         f"  Saved as INVALID (ID: {search_result.id}) to store {len(comments_data)} comments"
                     )
+                    if settings.AUTO_ANALYZE_AFTER_SCRAPE:
+                        from .background_jobs import push_to_analyze_queue
+                        push_to_analyze_queue(search_result.id)
                     for c in comments_data:
                         pc = PostComment(
                             search_result_id=search_result.id,

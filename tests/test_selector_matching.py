@@ -36,12 +36,14 @@ def browser():
 def _build_card_wrapper(card_html: str) -> str:
     """Wrap raw card HTML in feed+article structure, adding mock aria-labelledby
     target elements so the extraction pipeline can resolve them (on real Facebook
-    these live elsewhere in the page DOM)."""
+    these live elsewhere in the page DOM). Include both legacy and current FB IDs."""
     return (
         f'<div role="feed"><div role="article" aria-label="Test post">{card_html}</div></div>'
         '<div style="display:none">'
         '<span id="_r_6u_">March 10, 2026 at 8:15 AM</span>'
         '<span id="_r_78_">March 10, 2026 at 8:15 AM</span>'
+        '<span id="_R_2dlct6dmllqn8pl5bb6ismj5ilipam_">March 10, 2026 at 8:15 AM</span>'
+        '<span id="_R_16idll56dmllqn8pl5bb6ismj5ilipam_">March 10, 2026 at 8:15 AM</span>'
         '</div>'
     )
 
@@ -258,7 +260,7 @@ class TestCommentButtonSelectors:
     """Four strategies our clickCommentTrigger JS uses to find the comment button."""
 
     def test_strategy1_count_text_button(self, card_page):
-        """Strategy 1 - button whose text matches /^\\d+ comments?$/i"""
+        """Strategy 1 - button whose text matches number + 'comments' (e.g. '12 comments' or '1.5K comments')."""
         found = card_page.evaluate("""
             () => {
                 const nodes = document.querySelectorAll(
@@ -266,12 +268,12 @@ class TestCommentButtonSelectors:
                 );
                 for (const n of nodes) {
                     const t = (n.innerText || n.textContent || '').trim();
-                    if (/^\\d+[\\s,.]*comments?$/i.test(t)) return true;
+                    if (/^\\d+(?:\\.\\d+)?\\s*[KkMm]?[\\s,.]*comments?$/i.test(t)) return true;
                 }
                 return false;
             }
         """)
-        assert found, "Strategy 1: no button with text like '12 comments' found"
+        assert found, "Strategy 1: no button with text like '12 comments' or '1.5K comments' found"
 
     def test_strategy2_ad_rendering_role_marker(self, card_page):
         """Strategy 2 - [data-ad-rendering-role='comment_button'] + closest button"""

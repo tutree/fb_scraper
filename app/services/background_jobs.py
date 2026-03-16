@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Optional, List
 
 import redis
+from redis.asyncio import Redis as AsyncRedis
 from apscheduler.jobstores.redis import RedisJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -32,10 +33,12 @@ REDIS_KEY_STATUS = f"{REDIS_PREFIX}status"
 REDIS_KEY_LOCK = f"{REDIS_PREFIX}running_lock"
 REDIS_KEY_HISTORY = f"{REDIS_PREFIX}history"
 REDIS_KEY_CONFIG = f"{REDIS_PREFIX}config"
+REDIS_KEY_ANALYZE_QUEUE = f"{REDIS_PREFIX}analyze_queue"
 MAX_HISTORY = 50
 
 _scheduler: Optional[AsyncIOScheduler] = None
 _redis: Optional[redis.Redis] = None
+_analyze_worker_task: Optional[asyncio.Task] = None
 
 
 def _get_redis() -> redis.Redis:
@@ -92,6 +95,14 @@ def _release_lock():
         _get_redis().delete(REDIS_KEY_LOCK)
     except Exception:
         pass
+
+
+def push_to_analyze_queue(record_id: int) -> None:
+    """Push a new result id to the analyze queue so the background worker processes it."""
+    try:
+        _get_redis().rpush(REDIS_KEY_ANALYZE_QUEUE, str(record_id))
+    except Exception as exc:
+        logger.warning("Failed to push result id %s to analyze queue: %s", record_id, exc)
 
 
 def _is_locked() -> bool:
@@ -206,6 +217,44 @@ async def _auto_analyze_results(db, result_ids: list) -> int:
     return analyzed
 
 
+async def _run_analyze_queue_worker() -> None:
+    """Background worker: pop result ids from Redis and run analysis + enrichment."""
+    try:
+        client = AsyncRedis.from_url(settings.REDIS_URL, decode_responses=True)
+    except Exception as exc:
+        logger.warning("Analyze queue worker not started (Redis): %s", exc)
+        return
+    logger.info("Analyze queue worker started")
+    while True:
+        try:
+            # Block up to 5s; process one id at a time for immediate analysis
+            result = await client.blpop(REDIS_KEY_ANALYZE_QUEUE, timeout=5)
+            if not result:
+                continue
+            _, id_str = result
+            try:
+                rid = int(id_str)
+            except (ValueError, TypeError):
+                continue
+            db = SessionLocal()
+            try:
+                if settings.AUTO_ANALYZE_AFTER_SCRAPE:
+                    await _auto_analyze_results(db, [rid])
+                if settings.AUTO_ENRICH_AFTER_ANALYZE:
+                    await _auto_enrich_results(db, [rid])
+            finally:
+                db.close()
+        except asyncio.CancelledError:
+            logger.info("Analyze queue worker cancelled")
+            break
+        except Exception as exc:
+            logger.exception("Analyze queue worker error: %s", exc)
+    try:
+        await client.aclose()
+    except Exception:
+        pass
+
+
 async def _auto_enrich_results(db, result_ids: list) -> int:
     try:
         service = EnformionService()
@@ -304,24 +353,13 @@ async def run_scheduled_scrape():
         new_ids = list(ids_after - ids_before)
         entry["scraped"] = result.get("total_results", 0)
         entry["new_records"] = len(new_ids)
-        logger.info("Scrape done: %d results, %d new records", entry["scraped"], entry["new_records"])
-
-        if new_ids and settings.AUTO_ANALYZE_AFTER_SCRAPE:
-            _update_step(run_id, f"analyzing {len(new_ids)} results", started_at)
-            entry["analyzed"] = await _auto_analyze_results(db, new_ids)
-            logger.info("Auto-analyzed %d results", entry["analyzed"])
-
-        if new_ids and settings.AUTO_ENRICH_AFTER_ANALYZE:
-            _update_step(run_id, "enriching eligible results", started_at)
-            entry["enriched"] = await _auto_enrich_results(db, new_ids)
-            logger.info("Auto-enriched %d results", entry["enriched"])
+        logger.info("Scrape done: %d results, %d new records (analysis handled by queue worker)", entry["scraped"], entry["new_records"])
 
         entry["status"] = "completed"
         entry["finished_at"] = datetime.now(timezone.utc).isoformat()
 
         status_msg = (
-            f"scraped={entry['scraped']} new={entry['new_records']} "
-            f"analyzed={entry['analyzed']} enriched={entry['enriched']}"
+            f"scraped={entry['scraped']} new={entry['new_records']} (analyze/enrich via queue worker)"
         )
         _save_json(REDIS_KEY_STATUS, {
             "last_run_at": started_at,
@@ -349,6 +387,25 @@ async def run_scheduled_scrape():
         logger.info("=" * 60)
 
 
+def start_analyze_worker() -> None:
+    """Start the background task that consumes the analyze queue."""
+    global _analyze_worker_task
+    if _analyze_worker_task is not None and not _analyze_worker_task.done():
+        return
+    _analyze_worker_task = asyncio.create_task(_run_analyze_queue_worker())
+    logger.info("Analyze queue worker task started")
+
+
+def stop_analyze_worker() -> None:
+    """Cancel the analyze queue worker task (call from shutdown; no await)."""
+    global _analyze_worker_task
+    if _analyze_worker_task is None:
+        return
+    _analyze_worker_task.cancel()
+    _analyze_worker_task = None
+    logger.info("Analyze queue worker task stopped")
+
+
 def start_scheduler():
     scheduler = get_scheduler()
     if scheduler.running:
@@ -372,9 +429,12 @@ def start_scheduler():
         trigger_now()
 
     scheduler.start()
+    # Always start the analyze queue worker (handles results from manual and scheduled scrapes)
+    start_analyze_worker()
 
 
 def stop_scheduler():
+    stop_analyze_worker()
     scheduler = get_scheduler()
     if scheduler.running:
         scheduler.shutdown(wait=False)

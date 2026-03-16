@@ -1,0 +1,2 @@
+# Ensure shell scripts always use LF (fixes deploy_on_server.sh on Linux/CI)
+*.sh text eol=lf

@@ -1,11 +1,12 @@
 ======================================================================
-  SCRAPE EXTRACTION RESULTS  —  generated 2026-03-17 00:24:34
+  SCRAPE EXTRACTION RESULTS  —  generated 2026-03-17 01:22:54
   Card fixture   : tests/fixtures/cards/card1.html
   Dialog fixture : tests/fixtures/dialogs/dialog1.html
 ======================================================================
 
 ┌─ POST ROW (search_result table) ─────────────────────────────────────
-│  poster_name     : FC Barcelona   ·
+│  poster_name     : FC Barcelona
+is at UEFA Champions League.  ·
 Follow
 │  profile_url     : https://web.facebook.com/fcbarcelona
 │  post_url        : https://www.facebook.com/autumn.martinhumbaugh/posts/pfbid0z85C4C6vL3Ev2uPQwptqrNTvepfjGptwdecEzWVF1NtJDb7QmuECX6NwkhCiNJmpl
