@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     ENFORMION_AP_NAME: str = ""
     ENFORMION_AP_PASSWORD: str = ""
 
+    # Background automation
+    AUTO_SCRAPE_ENABLED: bool = True
+    AUTO_SCRAPE_INTERVAL_MINUTES: int = 30
+    AUTO_ANALYZE_AFTER_SCRAPE: bool = True
+    AUTO_ENRICH_AFTER_ANALYZE: bool = True
+
     # Default Keywords (fallback)
     DEFAULT_KEYWORDS: List[str] = [
         "looking for math tutor",

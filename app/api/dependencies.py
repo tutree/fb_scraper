@@ -15,6 +15,7 @@ oauth2_scheme = OAuth2PasswordBearer(
 def get_current_admin(
     db: Session = Depends(get_db), token: str = Depends(oauth2_scheme)
 ) -> AdminUser:
+    """Authenticate any logged-in user (admin or user role)."""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -36,5 +37,18 @@ def get_current_admin(
         raise credentials_exception
     return admin_user
 
+
+def require_admin(
+    current_user: AdminUser = Depends(get_current_admin),
+) -> AdminUser:
+    """Require the 'admin' role. Returns 403 for regular users."""
+    if (current_user.role or "user") != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+    return current_user
+
+
 # Re-export get_db as the primary dependency
-__all__ = ["get_db", "get_current_admin"]
+__all__ = ["get_db", "get_current_admin", "require_admin"]

@@ -17,6 +17,14 @@ def run_startup_migrations() -> None:
 
     statements = [
         (
+            "admin_users.role",
+            "ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS role VARCHAR NOT NULL DEFAULT 'user';",
+        ),
+        (
+            "admin_users.admin_role_for_admin",
+            "UPDATE admin_users SET role = 'admin' WHERE username = 'admin' AND role = 'user';",
+        ),
+        (
             "search_results.post_date",
             "ALTER TABLE search_results ADD COLUMN IF NOT EXISTS post_date VARCHAR NULL;",
         ),

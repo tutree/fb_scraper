@@ -3,7 +3,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { Link } from 'react-router-dom';
 
 export default function ProtectedRoute() {
-  const { isAuthenticated, logout } = useAuth();
+  const { isAuthenticated, isAdmin, role, logout } = useAuth();
   
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />;
@@ -18,10 +18,12 @@ export default function ProtectedRoute() {
             <nav className="hidden md:flex gap-4">
               <Link to="/" className="text-sm font-medium text-slate-700 hover:text-slate-900">Leads</Link>
               <Link to="/comments" className="text-sm font-medium text-slate-700 hover:text-slate-900">Comments</Link>
-              <Link to="/scraper" className="text-sm font-medium text-slate-700 hover:text-slate-900">Scraper</Link>
+              {isAdmin && <Link to="/scraper" className="text-sm font-medium text-slate-700 hover:text-slate-900">Scraper</Link>}
+              {isAdmin && <Link to="/jobs" className="text-sm font-medium text-slate-700 hover:text-slate-900">Jobs</Link>}
             </nav>
           </div>
           <div className="flex items-center gap-4">
+            <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${isAdmin ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-600'}`}>{role}</span>
             <Link to="/settings" className="text-sm font-medium text-slate-600 hover:text-slate-900">Settings</Link>
             <button 
               onClick={logout}

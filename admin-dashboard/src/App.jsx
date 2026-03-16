@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import api from './api'
+import { useAuth } from './contexts/AuthContext'
 
 
 
@@ -21,6 +22,7 @@ const getErrorMessage = (err, fallback) =>
   err?.response?.data?.detail ?? err?.message ?? fallback
 
 function App() {
+  const { isAdmin } = useAuth()
   const [results, setResults] = useState([])
   const [stats, setStats] = useState(null)
   const [loading, setLoading] = useState(true)

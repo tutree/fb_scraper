@@ -28,7 +28,7 @@ function Login() {
       });
       
       if (res.data && res.data.access_token) {
-        login(res.data.access_token);
+        login(res.data.access_token, res.data.role);
         navigate('/');
       } else {
         setError('Login failed');

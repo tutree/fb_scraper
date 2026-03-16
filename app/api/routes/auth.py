@@ -25,10 +25,20 @@ def login_access_token(
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     return Token(
         access_token=create_access_token(
-            user.username, expires_delta=access_token_expires
+            user.username,
+            role=user.role or "user",
+            expires_delta=access_token_expires,
         ),
         token_type="bearer",
+        role=user.role or "user",
     )
+
+@router.get("/me")
+def get_current_user_info(
+    current_admin: AdminUser = Depends(get_current_admin),
+):
+    return {"username": current_admin.username, "role": current_admin.role or "user"}
+
 
 @router.post("/update-password")
 def update_password(
