@@ -47,9 +47,10 @@ class Settings(BaseSettings):
     ENFORMION_AP_NAME: str = ""
     ENFORMION_AP_PASSWORD: str = ""
 
-    # Background automation
+    # Background automation (runs automatically on startup, uses config/keywords.json)
     AUTO_SCRAPE_ENABLED: bool = True
-    AUTO_SCRAPE_INTERVAL_MINUTES: int = 30
+    AUTO_SCRAPE_INTERVAL_MINUTES: int = 60
+    AUTO_SCRAPE_MAX_RESULTS: int = 20
     AUTO_ANALYZE_AFTER_SCRAPE: bool = True
     AUTO_ENRICH_AFTER_ANALYZE: bool = True
 

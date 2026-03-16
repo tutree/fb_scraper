@@ -88,5 +88,4 @@ temp/
 # OS
 Thumbs.db
 .DS_Store
-config/
 node_modules/

@@ -327,17 +327,28 @@ class BrowserManager:
         candidates: List[Path] = []
         for directory in self._cookie_dirs():
             if directory.exists():
-                candidates.append(directory / f"{account_uid}.json")
+                candidate = directory / f"{account_uid}.json"
+                candidates.append(candidate)
+                logger.debug("Cookie candidate: %s (exists=%s)", candidate.absolute(), candidate.exists())
+            else:
+                logger.debug("Cookie dir does not exist: %s", directory.absolute())
+
+        if not candidates:
+            logger.warning("No cookie directories found for account %s", account_uid)
 
         for file_path in candidates:
             if not file_path.exists():
+                logger.debug("Cookie file not found: %s", file_path.absolute())
                 continue
+            logger.info("Loading cookie file: %s (%d bytes)", file_path, file_path.stat().st_size)
             raw_data = self._read_json_file(file_path)
             if raw_data is None:
+                logger.warning("Cookie file unreadable/empty: %s", file_path)
                 continue
             storage_state = self._parse_storage_state(raw_data)
             if storage_state:
                 return storage_state, file_path
+            logger.warning("Cookie file parsed but produced no valid cookies: %s", file_path)
 
         return None, None
 

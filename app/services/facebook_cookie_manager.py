@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -7,6 +8,7 @@ from fastapi import HTTPException
 
 from .fb_account_loader import _cookie_uid_order, _extract_c_user_from_cookie_json, load_accounts
 
+logger = logging.getLogger(__name__)
 
 COOKIE_DIR = Path("cookies")
 
@@ -139,20 +141,36 @@ def parse_cookie_json_text(cookie_json: str) -> Dict[str, Any]:
 def save_cookie_json_text(cookie_json: str) -> Dict[str, Any]:
     parsed = parse_cookie_json_text(cookie_json)
     account_uid = parsed["account_uid"]
-    saved_cookies = parsed["saved_cookies"]
+    storage_state = parsed["storage_state"]
 
     COOKIE_DIR.mkdir(exist_ok=True)
     cookie_path = COOKIE_DIR / f"{account_uid}.json"
+
+    logger.info(
+        "Saving cookie session for account %s to %s (cookies=%d, origins=%d)",
+        account_uid,
+        cookie_path.absolute(),
+        len(storage_state.get("cookies", [])),
+        len(storage_state.get("origins", [])),
+    )
+
     with open(cookie_path, "w", encoding="utf-8") as f:
-        json.dump(saved_cookies, f, indent=2)
+        json.dump(storage_state, f, indent=2)
+
+    if cookie_path.exists():
+        logger.info("Cookie file written successfully: %s (%d bytes)", cookie_path, cookie_path.stat().st_size)
+    else:
+        logger.error("Cookie file NOT found after write: %s", cookie_path)
 
     updated_at = datetime.fromtimestamp(cookie_path.stat().st_mtime, tz=timezone.utc).isoformat()
     active_account_uids = [str(account.get("uid", "")).strip() for account in load_accounts() if str(account.get("uid", "")).strip()]
 
+    cookie_count = len(storage_state.get("cookies", []))
+
     return {
         "account_uid": account_uid,
         "cookie_file": str(cookie_path),
-        "cookie_count": len(saved_cookies),
+        "cookie_count": cookie_count,
         "updated_at": updated_at,
         "active_account_uids": active_account_uids,
     }
@@ -162,6 +180,15 @@ def get_cookie_status() -> Dict[str, Any]:
     active_account_uids = [str(account.get("uid", "")).strip() for account in load_accounts() if str(account.get("uid", "")).strip()]
     saved_cookie_uids = _cookie_uid_order()
     latest_cookie_uid = saved_cookie_uids[0] if saved_cookie_uids else None
+
+    logger.debug(
+        "Cookie status check: active_accounts=%s, saved_uids=%s, latest=%s, cookie_dir=%s (exists=%s)",
+        active_account_uids,
+        saved_cookie_uids,
+        latest_cookie_uid,
+        COOKIE_DIR.absolute(),
+        COOKIE_DIR.exists(),
+    )
 
     cookie_file = None
     updated_at = None

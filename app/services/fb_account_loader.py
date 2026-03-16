@@ -111,7 +111,16 @@ def load_accounts() -> List[Dict]:
         logger.warning(f"Credentials file not found at {CREDENTIALS_PATH}, using environment variables")
     cookie_uid_order = _cookie_uid_order()
     env_uid = str(settings.FACEBOOK_EMAIL or "").strip()
-    if not env_uid and cookie_uid_order:
+
+    if env_uid and cookie_uid_order and env_uid not in cookie_uid_order:
+        logger.warning(
+            "FACEBOOK_EMAIL=%s has no saved cookie session. "
+            "Switching to freshest cookie-backed account: %s",
+            env_uid,
+            cookie_uid_order[0],
+        )
+        env_uid = cookie_uid_order[0]
+    elif not env_uid and cookie_uid_order:
         env_uid = cookie_uid_order[0]
         logger.info("Using freshest cookie uid for env fallback account: %s", env_uid)
 

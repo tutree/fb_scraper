@@ -1,16 +1,18 @@
 ======================================================================
-  SCRAPE EXTRACTION RESULTS  —  generated 2026-03-12 15:41:40
+  SCRAPE EXTRACTION RESULTS  —  generated 2026-03-17 00:24:34
   Card fixture   : tests/fixtures/cards/card1.html
   Dialog fixture : tests/fixtures/dialogs/dialog1.html
 ======================================================================
 
 ┌─ POST ROW (search_result table) ─────────────────────────────────────
-│  poster_name     : Autumn Martin Humbaugh
-│  profile_url     : https://www.facebook.com/autumn.martinhumbaugh
+│  poster_name     : FC Barcelona   ·
+Follow
+│  profile_url     : https://web.facebook.com/fcbarcelona
 │  post_url        : https://www.facebook.com/autumn.martinhumbaugh/posts/pfbid0z85C4C6vL3Ev2uPQwptqrNTvepfjGptwdecEzWVF1NtJDb7QmuECX6NwkhCiNJmpl
-│  comment_count   : 13
-│  like_count      : 44
-│  share_count     : 13
+│  comment_count   : None
+│  like_count      : None
+│  share_count     : None
+│  post_date       : March 10, 2026 at 8:15 AM
 └─────────────────────────────────────────────────────────────────────
 
 ----------------------------------------------------------------------

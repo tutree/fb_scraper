@@ -69,7 +69,17 @@ async def start_search(
 
     cookie_status = get_cookie_status()
     if not cookie_status.get("cookie_file") or int(cookie_status.get("cookie_count") or 0) <= 0:
-        raise HTTPException(status_code=400, detail="no active cookie")
+        saved_uids = cookie_status.get("saved_cookie_uids", [])
+        active_uids = cookie_status.get("active_account_uids", [])
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"No active cookie session found. "
+                f"Active account(s): {active_uids or 'none'}. "
+                f"Saved cookie UID(s): {saved_uids or 'none'}. "
+                f"Use the 'Update Facebook Cookie' button to paste a valid cookie."
+            ),
+        )
 
     with tasks_lock:
         if current_task_id:

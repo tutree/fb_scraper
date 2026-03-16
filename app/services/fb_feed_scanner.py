@@ -12,7 +12,9 @@ from typing import Callable, Dict, List, Optional
 from playwright.async_api import Page
 from sqlalchemy.orm import Session
 
+from ..core.config import settings
 from ..core.logging_config import get_logger
+from .fb_account_loader import _cookie_uid_order
 from .fb_comment_handler import click_comments_and_extract_from_dialog
 from .fb_post_url import capture_post_url_via_share_button
 from .fb_profile_processor import process_single_profile
@@ -104,13 +106,23 @@ async def scroll_and_process_posts(
     )
     logger.info(f"Page body snippet: {page_diag.get('bodySnippet')!r}")
 
-    current_user_id = current_account.get("uid", "")
-    logger.info(f"Current user ID (to exclude): {current_user_id}")
+    exclude_uids = set()
+    account_uid = current_account.get("uid", "")
+    if account_uid:
+        exclude_uids.add(account_uid)
+    env_uid = str(settings.FACEBOOK_EMAIL or "").strip()
+    if env_uid:
+        exclude_uids.add(env_uid)
+    for uid in _cookie_uid_order():
+        exclude_uids.add(uid)
+    exclude_uids.discard("")
+    exclude_uids_list = list(exclude_uids)
+    logger.info(f"Account UIDs to exclude from results: {exclude_uids_list}")
 
     logger.info("Extracting author profile links via semantic DOM traversal...")
     all_links = await page.evaluate(
         """
-        (currentUserId) => {
+        (excludeUids) => {
             const results = [];
             const seen = new Set();
             const BASE = location.origin;
@@ -126,7 +138,9 @@ async def scroll_and_process_posts(
 
             function isProfileHref(absoluteHref) {
                 if (!absoluteHref || !absoluteHref.includes('facebook.com')) return false;
-                if (currentUserId && absoluteHref.includes(currentUserId)) return false;
+                for (const uid of excludeUids) {
+                    if (uid && absoluteHref.includes(uid)) return false;
+                }
                 try {
                     const u = new URL(absoluteHref);
                     const parts = u.pathname.replace(/^\\//, '').replace(/\\/$/, '').split('/');
@@ -176,7 +190,8 @@ async def scroll_and_process_posts(
                     href.includes('/posts/') ||
                     href.includes('/permalink/') ||
                     href.includes('story_fbid') ||
-                    href.includes('/photo/')
+                    href.includes('/photo/') ||
+                    href.includes('/share/')
                 );
             }
 
@@ -184,14 +199,44 @@ async def scroll_and_process_posts(
                 return (value || '').replace(/\\s+/g, ' ').trim();
             }
 
+            const MONTH_RE = '(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)';
+            const MONTH_DAY_RE = new RegExp('\\\\b' + MONTH_RE + '\\\\b[\\\\s,]*\\\\d', 'i');
+            const DAY_MONTH_RE = new RegExp('\\\\d[\\\\s,]*\\\\b' + MONTH_RE + '\\\\b', 'i');
             function isLikelyPostDate(value) {
                 const text = normalizeText(value);
-                if (!text) return false;
-                if (/^(?:\\d+\\s*(?:s|m|min|h|hr|d|w|mo|y)|just now|yesterday)$/i.test(text)) return true;
-                if (/\\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december|today|yesterday)\\b/i.test(text)) return true;
+                if (!text || text.length > 80) return false;
+                if (/^(?:\\d+\\s*(?:s|m|min|h|hr|d|w|mo|y)|just now|yesterday|today)$/i.test(text)) return true;
+                if (MONTH_DAY_RE.test(text)) return true;
+                if (DAY_MONTH_RE.test(text)) return true;
+                if (/\\b(?:today|yesterday)\\b/i.test(text)) return true;
                 if (/\\b\\d{1,2}:\\d{2}\\b/.test(text)) return true;
-                if (/\\b\\d+\\s*(?:mins?|minutes?|hrs?|hours?|days?|weeks?|months?|years?)\\b/i.test(text)) return true;
+                if (/\\b\\d+\\s*(?:mins?|minutes?|hrs?|hours?|days?|weeks?|months?|years?)\\s*(?:ago)?\\b/i.test(text)) return true;
+                if (/^\\d{1,2}\\/\\d{1,2}\\/\\d{2,4}$/.test(text)) return true;
+                if (/^\\w+ \\d{1,2}(?:,? \\d{4})?(?:\\s+at\\s+\\d{1,2}:\\d{2}\\s*(?:AM|PM)?)?$/i.test(text)) return true;
                 return false;
+            }
+
+            function readVisibleCharsFromObfuscatedSpans(container) {
+                const wrapper = container.querySelector('span[style*="display: flex"], span[style*="display:flex"]');
+                const parent = wrapper || container;
+                const charSpans = parent.querySelectorAll(':scope > span');
+                if (charSpans.length < 3) return null;
+                let text = '';
+                for (const span of charSpans) {
+                    if (span.children.length > 0) continue;
+                    const ch = span.textContent;
+                    if (!ch) continue;
+                    const rect = span.getBoundingClientRect();
+                    if (rect.width === 0 && rect.height === 0) continue;
+                    const cs = getComputedStyle(span);
+                    if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+                    if (parseFloat(cs.opacity) === 0) continue;
+                    if (cs.position === 'absolute' && cs.clip && cs.clip !== 'auto') continue;
+                    if (parseFloat(cs.fontSize) === 0) continue;
+                    if (cs.color === cs.backgroundColor && cs.color !== '') continue;
+                    text += ch;
+                }
+                return text.replace(/\\s+/g, ' ').trim() || null;
             }
 
             function readFromAriaLabelledBy(node) {
@@ -202,50 +247,110 @@ async def scroll_and_process_posts(
                     const target = document.getElementById(id);
                     if (!target) continue;
                     const text = normalizeText(target.innerText || target.textContent || '');
-                    if (isLikelyPostDate(text)) return text;
+                    if (text && text.length > 0) return text;
                 }
                 return null;
+            }
+
+            function extractDateFromElement(el) {
+                if (!el) return null;
+                const ariaLabel = normalizeText(el.getAttribute('aria-label') || '');
+                if (isLikelyPostDate(ariaLabel)) return ariaLabel;
+
+                for (const child of el.querySelectorAll('[aria-labelledby]')) {
+                    const labelText = readFromAriaLabelledBy(child);
+                    if (labelText && isLikelyPostDate(labelText)) return labelText;
+                }
+
+                const obfuscatedContainers = el.querySelectorAll('span[aria-labelledby]');
+                for (const oc of obfuscatedContainers) {
+                    const ariaText = readFromAriaLabelledBy(oc);
+                    if (ariaText && isLikelyPostDate(ariaText)) return ariaText;
+                    const visible = readVisibleCharsFromObfuscatedSpans(oc);
+                    if (visible && isLikelyPostDate(visible)) return visible;
+                }
+
+                const flexSpans = el.querySelectorAll('span[style*="display: flex"], span[style*="display:flex"]');
+                for (const fs of flexSpans) {
+                    const container = fs.parentElement || fs;
+                    const visible = readVisibleCharsFromObfuscatedSpans(container);
+                    if (visible && isLikelyPostDate(visible)) return visible;
+                }
+
+                const timeEl = el.querySelector('time[datetime]');
+                if (timeEl) {
+                    const dt = normalizeText(timeEl.getAttribute('datetime') || '');
+                    if (dt) return dt;
+                }
+                const abbrEl = el.querySelector('abbr[title], abbr[data-utime]');
+                if (abbrEl) {
+                    const title = normalizeText(abbrEl.getAttribute('title') || '');
+                    if (title) return title;
+                }
+                const visibleText = normalizeText(el.innerText || el.textContent || '');
+                if (isLikelyPostDate(visibleText)) return visibleText;
+                return null;
+            }
+
+            function isDateAnchor(href, rawHref) {
+                if (!href && !rawHref) return false;
+                if (isPostUrl(href) || isPostUrl(rawHref)) return true;
+                if ((rawHref || '').includes('#?') || (href || '').includes('#?')) return true;
+                return false;
             }
 
             function extractPostDate(article, postUrl) {
                 const candidates = [];
                 for (const link of article.querySelectorAll('a[href]')) {
                     const href = link.href || '';
-                    if (!href) continue;
+                    const rawHref = link.getAttribute('href') || '';
+                    if (!href && !rawHref) continue;
                     if (postUrl && href === postUrl) { candidates.push(link); continue; }
-                    if (isPostUrl(href) && !isProfileHref(href)) candidates.push(link);
-                }
-
-                function extractFromAnchor(anchor) {
-                    if (!anchor) return null;
-                    const directAria = normalizeText(anchor.getAttribute('aria-label') || '');
-                    if (isLikelyPostDate(directAria)) return directAria;
-                    const labelledByText = readFromAriaLabelledBy(anchor);
-                    if (labelledByText) return labelledByText;
-                    const labelledDesc = anchor.querySelector('[aria-labelledby]');
-                    const labelledDescText = readFromAriaLabelledBy(labelledDesc);
-                    if (labelledDescText) return labelledDescText;
-                    const timeEl = anchor.querySelector('time[datetime]');
-                    if (timeEl) {
-                        const dt = normalizeText(timeEl.getAttribute('datetime') || '');
-                        if (dt) return dt;
-                    }
-                    const abbrEl = anchor.querySelector('abbr[title], abbr[data-utime]');
-                    if (abbrEl) {
-                        const title = normalizeText(abbrEl.getAttribute('title') || '');
-                        if (title) return title;
-                        const abbrText = normalizeText(abbrEl.innerText || abbrEl.textContent || '');
-                        if (isLikelyPostDate(abbrText)) return abbrText;
-                    }
-                    const visibleText = normalizeText(anchor.innerText || anchor.textContent || '');
-                    if (isLikelyPostDate(visibleText)) return visibleText;
-                    return null;
+                    if (isDateAnchor(href, rawHref) && !isProfileHref(href)) candidates.push(link);
                 }
 
                 for (const anchor of candidates) {
-                    const value = extractFromAnchor(anchor);
+                    const value = extractDateFromElement(anchor);
                     if (value) return value;
                 }
+
+                const headerDiv = article.querySelector('div[data-ad-rendering-role="profile_name"]');
+                if (headerDiv) {
+                    let ancestor = headerDiv;
+                    for (let i = 0; i < 8 && ancestor && ancestor !== article; i++) {
+                        ancestor = ancestor.parentElement;
+                        if (!ancestor) break;
+                        for (const child of ancestor.children) {
+                            for (const a of child.querySelectorAll('a[href]')) {
+                                const rawH = a.getAttribute('href') || '';
+                                if (isDateAnchor(a.href || '', rawH) && !isProfileHref(a.href || '')) {
+                                    const val = extractDateFromElement(a);
+                                    if (val) return val;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                const allObfuscated = article.querySelectorAll('span[aria-labelledby]');
+                for (const oc of allObfuscated) {
+                    const closestLink = oc.closest('a[href]');
+                    if (closestLink && isProfileHref(closestLink.href || '')) continue;
+                    const ariaText = readFromAriaLabelledBy(oc);
+                    if (ariaText && isLikelyPostDate(ariaText)) return ariaText;
+                    const visible = readVisibleCharsFromObfuscatedSpans(oc);
+                    if (visible && isLikelyPostDate(visible)) return visible;
+                }
+
+                const allFlexSpans = article.querySelectorAll('span[style*="display: flex"], span[style*="display:flex"]');
+                for (const fs of allFlexSpans) {
+                    const closestLink = fs.closest('a[href]');
+                    if (closestLink && isProfileHref(closestLink.href || '')) continue;
+                    const container = fs.parentElement || fs;
+                    const visible = readVisibleCharsFromObfuscatedSpans(container);
+                    if (visible && isLikelyPostDate(visible)) return visible;
+                }
+
                 const fallbackTime = article.querySelector('time[datetime]');
                 if (fallbackTime) {
                     const dt = normalizeText(fallbackTime.getAttribute('datetime') || '');
@@ -255,8 +360,20 @@ async def scroll_and_process_posts(
                 if (fallbackAbbr) {
                     const title = normalizeText(fallbackAbbr.getAttribute('title') || '');
                     if (title) return title;
-                    const abbrText = normalizeText(fallbackAbbr.innerText || fallbackAbbr.textContent || '');
-                    if (isLikelyPostDate(abbrText)) return abbrText;
+                }
+
+                for (const a of article.querySelectorAll('a[href]')) {
+                    if (isProfileHref(a.href || '')) continue;
+                    const linkText = normalizeText(a.innerText || a.textContent || '');
+                    if (linkText && linkText.length < 40 && isLikelyPostDate(linkText)) return linkText;
+                    const ariaL = normalizeText(a.getAttribute('aria-label') || '');
+                    if (ariaL && ariaL.length < 40 && isLikelyPostDate(ariaL)) return ariaL;
+                }
+
+                for (const span of article.querySelectorAll('span')) {
+                    if (span.children.length > 3) continue;
+                    const st = normalizeText(span.innerText || span.textContent || '');
+                    if (st && st.length > 2 && st.length < 30 && isLikelyPostDate(st)) return st;
                 }
                 return null;
             }
@@ -344,10 +461,16 @@ async def scroll_and_process_posts(
             return results;
         }
         """,
-        current_user_id,
+        exclude_uids_list,
     )
 
     logger.info(f"Total extracted: {len(all_links)} profile links")
+    for link in all_links:
+        logger.info(
+            "  Extracted link: url=%s post_date=%r",
+            link.get("url", "")[:60],
+            link.get("post_date"),
+        )
 
     user_links = [l for l in all_links if _is_user_profile_url(l["url"])]
     logger.info(
@@ -375,7 +498,7 @@ async def scroll_and_process_posts(
 
             extra_links = await page.evaluate(
                 """
-                (currentUserId) => {
+                (excludeUids) => {
                     const out = [];
                     const seen = new Set();
                     const feed = document.querySelector('div[role="feed"]');
@@ -383,7 +506,9 @@ async def scroll_and_process_posts(
 
                     function isProfileHref(href) {
                         if (!href || !href.includes('facebook.com')) return false;
-                        if (currentUserId && href.includes(currentUserId)) return false;
+                        for (const uid of excludeUids) {
+                            if (uid && href.includes(uid)) return false;
+                        }
                         if (href.includes('/groups/') || href.includes('/events/') || href.includes('/pages/')) return false;
                         if (href.includes('/search/') || href.includes('/hashtag/')) return false;
                         return href.includes('profile.php') || /facebook\\.com\\/[A-Za-z0-9._-]{2,}(?:\\?|$)/.test(href);
@@ -423,14 +548,44 @@ async def scroll_and_process_posts(
                         return (value || '').replace(/\\s+/g, ' ').trim();
                     }
 
+                    const MONTH_RE2 = '(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)';
+                    const MONTH_DAY_RE2 = new RegExp('\\\\b' + MONTH_RE2 + '\\\\b[\\\\s,]*\\\\d', 'i');
+                    const DAY_MONTH_RE2 = new RegExp('\\\\d[\\\\s,]*\\\\b' + MONTH_RE2 + '\\\\b', 'i');
                     function isLikelyPostDate(value) {
                         const text = normalizeText(value);
-                        if (!text) return false;
-                        if (/^(?:\\d+\\s*(?:s|m|min|h|hr|d|w|mo|y)|just now|yesterday)$/i.test(text)) return true;
-                        if (/\\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december|today|yesterday)\\b/i.test(text)) return true;
+                        if (!text || text.length > 80) return false;
+                        if (/^(?:\\d+\\s*(?:s|m|min|h|hr|d|w|mo|y)|just now|yesterday|today)$/i.test(text)) return true;
+                        if (MONTH_DAY_RE2.test(text)) return true;
+                        if (DAY_MONTH_RE2.test(text)) return true;
+                        if (/\\b(?:today|yesterday)\\b/i.test(text)) return true;
                         if (/\\b\\d{1,2}:\\d{2}\\b/.test(text)) return true;
-                        if (/\\b\\d+\\s*(?:mins?|minutes?|hrs?|hours?|days?|weeks?|months?|years?)\\b/i.test(text)) return true;
+                        if (/\\b\\d+\\s*(?:mins?|minutes?|hrs?|hours?|days?|weeks?|months?|years?)\\s*(?:ago)?\\b/i.test(text)) return true;
+                        if (/^\\d{1,2}\\/\\d{1,2}\\/\\d{2,4}$/.test(text)) return true;
+                        if (/^\\w+ \\d{1,2}(?:,? \\d{4})?(?:\\s+at\\s+\\d{1,2}:\\d{2}\\s*(?:AM|PM)?)?$/i.test(text)) return true;
                         return false;
+                    }
+
+                    function readVisibleCharsFromObfuscatedSpans(container) {
+                        const wrapper = container.querySelector('span[style*="display: flex"], span[style*="display:flex"]');
+                        const parent = wrapper || container;
+                        const charSpans = parent.querySelectorAll(':scope > span');
+                        if (charSpans.length < 3) return null;
+                        let text = '';
+                        for (const span of charSpans) {
+                            if (span.children.length > 0) continue;
+                            const ch = span.textContent;
+                            if (!ch) continue;
+                            const rect = span.getBoundingClientRect();
+                            if (rect.width === 0 && rect.height === 0) continue;
+                            const cs = getComputedStyle(span);
+                            if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+                            if (parseFloat(cs.opacity) === 0) continue;
+                            if (cs.position === 'absolute' && cs.clip && cs.clip !== 'auto') continue;
+                            if (parseFloat(cs.fontSize) === 0) continue;
+                            if (cs.color === cs.backgroundColor && cs.color !== '') continue;
+                            text += ch;
+                        }
+                        return text.replace(/\\s+/g, ' ').trim() || null;
                     }
 
                     function readFromAriaLabelledBy(node) {
@@ -441,43 +596,134 @@ async def scroll_and_process_posts(
                             const target = document.getElementById(id);
                             if (!target) continue;
                             const text = normalizeText(target.innerText || target.textContent || '');
-                            if (isLikelyPostDate(text)) return text;
+                            if (text && text.length > 0) return text;
                         }
                         return null;
+                    }
+
+                    function extractDateFromElement(el) {
+                        if (!el) return null;
+                        const ariaLabel = normalizeText(el.getAttribute('aria-label') || '');
+                        if (isLikelyPostDate(ariaLabel)) return ariaLabel;
+
+                        for (const child of el.querySelectorAll('[aria-labelledby]')) {
+                            const labelText = readFromAriaLabelledBy(child);
+                            if (labelText && isLikelyPostDate(labelText)) return labelText;
+                        }
+
+                        const obfuscatedContainers = el.querySelectorAll('span[aria-labelledby]');
+                        for (const oc of obfuscatedContainers) {
+                            const ariaText = readFromAriaLabelledBy(oc);
+                            if (ariaText && isLikelyPostDate(ariaText)) return ariaText;
+                            const visible = readVisibleCharsFromObfuscatedSpans(oc);
+                            if (visible && isLikelyPostDate(visible)) return visible;
+                        }
+
+                        const flexSpans = el.querySelectorAll('span[style*="display: flex"], span[style*="display:flex"]');
+                        for (const fs of flexSpans) {
+                            const container = fs.parentElement || fs;
+                            const visible = readVisibleCharsFromObfuscatedSpans(container);
+                            if (visible && isLikelyPostDate(visible)) return visible;
+                        }
+
+                        const timeEl = el.querySelector('time[datetime]');
+                        if (timeEl) {
+                            const dt = normalizeText(timeEl.getAttribute('datetime') || '');
+                            if (dt) return dt;
+                        }
+                        const abbrEl = el.querySelector('abbr[title], abbr[data-utime]');
+                        if (abbrEl) {
+                            const title = normalizeText(abbrEl.getAttribute('title') || '');
+                            if (title) return title;
+                        }
+                        const visibleText = normalizeText(el.innerText || el.textContent || '');
+                        if (isLikelyPostDate(visibleText)) return visibleText;
+                        return null;
+                    }
+
+                    function isPostUrl2(href) {
+                        if (!href) return false;
+                        return (
+                            href.includes('/posts/') ||
+                            href.includes('/permalink/') ||
+                            href.includes('story_fbid') ||
+                            href.includes('/photo/') ||
+                            href.includes('/share/')
+                        );
+                    }
+
+                    function isDateAnchor2(href, rawHref) {
+                        if (!href && !rawHref) return false;
+                        if (isPostUrl2(href) || isPostUrl2(rawHref)) return true;
+                        if ((rawHref || '').includes('#?') || (href || '').includes('#?')) return true;
+                        return false;
+                    }
+
+                    function isProfileHref2(absoluteHref) {
+                        if (!absoluteHref || !absoluteHref.includes('facebook.com')) return false;
+                        try {
+                            const u = new URL(absoluteHref, location.origin);
+                            const parts = u.pathname.replace(/^\\//, '').replace(/\\/$/, '').split('/');
+                            const slug = parts[0];
+                            if (!slug) return false;
+                            if (slug === 'profile.php') return true;
+                            return /^[A-Za-z0-9._-]{2,}$/.test(slug) && parts.length === 1;
+                        } catch(e) { return false; }
                     }
 
                     function extractPostDate(card, postLinkEl) {
                         const candidateAnchors = [];
                         if (postLinkEl) candidateAnchors.push(postLinkEl);
-                        for (const a of card.querySelectorAll(
-                            'a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid"], a[href*="/photo/"]'
-                        )) {
+                        for (const a of card.querySelectorAll('a[href]')) {
                             if (postLinkEl && a === postLinkEl) continue;
-                            candidateAnchors.push(a);
+                            const href = a.href || '';
+                            const rawHref = a.getAttribute('href') || '';
+                            if (!href && !rawHref) continue;
+                            if (isDateAnchor2(href, rawHref) && !isProfileHref2(href)) {
+                                candidateAnchors.push(a);
+                            }
                         }
 
                         for (const anchor of candidateAnchors) {
-                            const directAria = normalizeText(anchor.getAttribute('aria-label') || '');
-                            if (isLikelyPostDate(directAria)) return directAria;
-                            const labelled = readFromAriaLabelledBy(anchor);
-                            if (labelled) return labelled;
-                            const nestedLabelled = anchor.querySelector('[aria-labelledby]');
-                            const nestedLabelledText = readFromAriaLabelledBy(nestedLabelled);
-                            if (nestedLabelledText) return nestedLabelledText;
-                            const timeEl = anchor.querySelector('time[datetime]');
-                            if (timeEl) {
-                                const dt = normalizeText(timeEl.getAttribute('datetime') || '');
-                                if (dt) return dt;
+                            const value = extractDateFromElement(anchor);
+                            if (value) return value;
+                        }
+
+                        const headerDiv = card.querySelector('div[data-ad-rendering-role="profile_name"]');
+                        if (headerDiv) {
+                            let ancestor = headerDiv;
+                            for (let i = 0; i < 8 && ancestor && ancestor !== card; i++) {
+                                ancestor = ancestor.parentElement;
+                                if (!ancestor) break;
+                                for (const child of ancestor.children) {
+                                    for (const a of child.querySelectorAll('a[href]')) {
+                                        const rawH = a.getAttribute('href') || '';
+                                        if (isDateAnchor2(a.href || '', rawH) && !isProfileHref2(a.href || '')) {
+                                            const val = extractDateFromElement(a);
+                                            if (val) return val;
+                                        }
+                                    }
+                                }
                             }
-                            const abbrEl = anchor.querySelector('abbr[title], abbr[data-utime]');
-                            if (abbrEl) {
-                                const title = normalizeText(abbrEl.getAttribute('title') || '');
-                                if (title) return title;
-                                const abbrText = normalizeText(abbrEl.innerText || abbrEl.textContent || '');
-                                if (isLikelyPostDate(abbrText)) return abbrText;
-                            }
-                            const visible = normalizeText(anchor.innerText || anchor.textContent || '');
-                            if (isLikelyPostDate(visible)) return visible;
+                        }
+
+                        const allObfuscated = card.querySelectorAll('span[aria-labelledby]');
+                        for (const oc of allObfuscated) {
+                            const closestLink = oc.closest('a[href]');
+                            if (closestLink && isProfileHref2(closestLink.href || '')) continue;
+                            const ariaText = readFromAriaLabelledBy(oc);
+                            if (ariaText && isLikelyPostDate(ariaText)) return ariaText;
+                            const visible = readVisibleCharsFromObfuscatedSpans(oc);
+                            if (visible && isLikelyPostDate(visible)) return visible;
+                        }
+
+                        const allFlexSpans = card.querySelectorAll('span[style*="display: flex"], span[style*="display:flex"]');
+                        for (const fs of allFlexSpans) {
+                            const closestLink = fs.closest('a[href]');
+                            if (closestLink && isProfileHref2(closestLink.href || '')) continue;
+                            const container = fs.parentElement || fs;
+                            const visible = readVisibleCharsFromObfuscatedSpans(container);
+                            if (visible && isLikelyPostDate(visible)) return visible;
                         }
 
                         const fallbackTime = card.querySelector('time[datetime]');
@@ -489,8 +735,20 @@ async def scroll_and_process_posts(
                         if (fallbackAbbr) {
                             const title = normalizeText(fallbackAbbr.getAttribute('title') || '');
                             if (title) return title;
-                            const abbrText = normalizeText(fallbackAbbr.innerText || fallbackAbbr.textContent || '');
-                            if (isLikelyPostDate(abbrText)) return abbrText;
+                        }
+
+                        for (const a of card.querySelectorAll('a[href]')) {
+                            if (isProfileHref2(a.href || '')) continue;
+                            const linkText = normalizeText(a.innerText || a.textContent || '');
+                            if (linkText && linkText.length < 40 && isLikelyPostDate(linkText)) return linkText;
+                            const ariaL = normalizeText(a.getAttribute('aria-label') || '');
+                            if (ariaL && ariaL.length < 40 && isLikelyPostDate(ariaL)) return ariaL;
+                        }
+
+                        for (const span of card.querySelectorAll('span')) {
+                            if (span.children.length > 3) continue;
+                            const st = normalizeText(span.innerText || span.textContent || '');
+                            if (st && st.length > 2 && st.length < 30 && isLikelyPostDate(st)) return st;
                         }
                         return null;
                     }
@@ -501,7 +759,7 @@ async def scroll_and_process_posts(
                             'a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid"], a[href*="/photo/"]'
                         );
                         const postUrl = postLink ? postLink.href : null;
-                        const postDate = extractPostDate(child, postLink);
+                        const postDate = extractPostDate(child, postUrl);
                         const profileLink = Array.from(child.querySelectorAll('a[href]'))
                             .find((a) => isProfileHref(a.href));
                         if (!profileLink) return;
@@ -521,7 +779,7 @@ async def scroll_and_process_posts(
                     return out;
                 }
                 """,
-                current_user_id,
+                exclude_uids_list,
             )
 
             added = 0
@@ -551,7 +809,23 @@ async def scroll_and_process_posts(
                 break
 
     users_saved = 0
-    filtered_links: List[Dict] = user_links
+    seen_profile_ids: set = set()
+    deduped_links: List[Dict] = []
+    for link in user_links:
+        url = link.get("url", "")
+        profile_id = _re.search(r"profile\.php\?id=(\d+)", url)
+        pid = profile_id.group(1) if profile_id else url.split("?")[0].rstrip("/")
+        if pid in seen_profile_ids:
+            logger.info(f"Skipping duplicate profile: {pid}")
+            continue
+        seen_profile_ids.add(pid)
+        deduped_links.append(link)
+
+    if len(deduped_links) < len(user_links):
+        logger.info(
+            f"Deduplication: {len(user_links)} → {len(deduped_links)} unique profiles"
+        )
+    filtered_links: List[Dict] = deduped_links
     logger.info(f"Processing {len(filtered_links)} links sequentially")
 
     for i, link in enumerate(filtered_links):

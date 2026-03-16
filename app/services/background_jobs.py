@@ -271,7 +271,7 @@ async def run_scheduled_scrape():
 
     _update_step(run_id, "starting", started_at)
     logger.info("=" * 60)
-    logger.info("SCHEDULED AUTO-SCRAPE [%s] STARTING", run_id)
+    logger.info("SCHEDULED AUTO-SCRAPE [%s] STARTING (keywords=config/keywords.json, limit=%d)", run_id, settings.AUTO_SCRAPE_MAX_RESULTS)
     logger.info("=" * 60)
 
     db = SessionLocal()
@@ -294,9 +294,10 @@ async def run_scheduled_scrape():
         ids_before = set(r.id for r in db.query(SearchResult.id).all())
 
         scraper = ScraperService(db)
+        # keywords=None → load from config/keywords.json
         result = await scraper.run_search(
             keywords=None,
-            max_results=settings.MAX_RESULTS_PER_KEYWORD,
+            max_results=settings.AUTO_SCRAPE_MAX_RESULTS,
         )
 
         ids_after = set(r.id for r in db.query(SearchResult.id).all())
@@ -367,6 +368,8 @@ def start_scheduler():
             "Auto-scrape scheduler started (Redis-backed): every %d minutes",
             settings.AUTO_SCRAPE_INTERVAL_MINUTES,
         )
+        # Run first scrape immediately; next runs follow the interval
+        trigger_now()
 
     scheduler.start()
 
