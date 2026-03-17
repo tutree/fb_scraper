@@ -236,10 +236,6 @@ async def process_single_profile(
                             logger.info(f"  Updated existing record after conflict (ID: {search_result.id})")
                         else:
                             raise
-                if settings.AUTO_ANALYZE_AFTER_SCRAPE:
-                    from .background_jobs import push_to_analyze_queue
-                    push_to_analyze_queue(search_result.id)
-
                 if comments_data:
                     try:
                         for c in comments_data:
@@ -328,9 +324,6 @@ async def process_single_profile(
                     logger.info(
                         f"  Saved as INVALID (ID: {search_result.id}) to store {len(comments_data)} comments"
                     )
-                    if settings.AUTO_ANALYZE_AFTER_SCRAPE:
-                        from .background_jobs import push_to_analyze_queue
-                        push_to_analyze_queue(search_result.id)
                     for c in comments_data:
                         pc = PostComment(
                             search_result_id=search_result.id,

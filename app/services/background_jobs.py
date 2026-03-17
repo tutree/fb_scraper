@@ -28,17 +28,25 @@ from ..utils.validators import clean_facebook_location, clean_facebook_name
 logger = get_logger(__name__)
 
 JOB_ID = "auto_scrape_job"
+JOB_ID_ANALYZE_ENRICH = "auto_analyze_enrich_job"
+JOB_ID_ENRICH = "auto_enrich_job"
 REDIS_PREFIX = "autojob:"
 REDIS_KEY_STATUS = f"{REDIS_PREFIX}status"
 REDIS_KEY_LOCK = f"{REDIS_PREFIX}running_lock"
 REDIS_KEY_HISTORY = f"{REDIS_PREFIX}history"
 REDIS_KEY_CONFIG = f"{REDIS_PREFIX}config"
 REDIS_KEY_ANALYZE_QUEUE = f"{REDIS_PREFIX}analyze_queue"
+REDIS_KEY_ANALYZE_ENRICH_LOCK = f"{REDIS_PREFIX}analyze_enrich_lock"
+REDIS_KEY_ENRICH_QUEUE = f"{REDIS_PREFIX}enrich_queue"
+REDIS_KEY_ENRICH_LOCK = f"{REDIS_PREFIX}enrich_lock"
 MAX_HISTORY = 50
+ANALYZE_ENRICH_INTERVAL_MINUTES = 15
+ENRICH_INTERVAL_MINUTES = 15
 
 _scheduler: Optional[AsyncIOScheduler] = None
 _redis: Optional[redis.Redis] = None
 _analyze_worker_task: Optional[asyncio.Task] = None
+_enrich_worker_task: Optional[asyncio.Task] = None
 
 
 def _get_redis() -> redis.Redis:
@@ -97,12 +105,20 @@ def _release_lock():
         pass
 
 
-def push_to_analyze_queue(record_id: int) -> None:
+def push_to_analyze_queue(record_id) -> None:
     """Push a new result id to the analyze queue so the background worker processes it."""
     try:
         _get_redis().rpush(REDIS_KEY_ANALYZE_QUEUE, str(record_id))
     except Exception as exc:
         logger.warning("Failed to push result id %s to analyze queue: %s", record_id, exc)
+
+
+def push_to_enrich_queue(record_id) -> None:
+    """Push a result id to the enrich queue so the enrich worker processes it."""
+    try:
+        _get_redis().rpush(REDIS_KEY_ENRICH_QUEUE, str(record_id))
+    except Exception as exc:
+        logger.warning("Failed to push result id %s to enrich queue: %s", record_id, exc)
 
 
 def _is_locked() -> bool:
@@ -144,10 +160,80 @@ def get_scheduler() -> AsyncIOScheduler:
     return _scheduler
 
 
+def get_analyze_queue() -> dict:
+    """Return current analyze queue size and up to 50 pending ids (for UI). Does not remove from queue."""
+    try:
+        r = _get_redis()
+        pending_count = r.llen(REDIS_KEY_ANALYZE_QUEUE)
+        pending_ids = r.lrange(REDIS_KEY_ANALYZE_QUEUE, 0, 49) or []
+        return {"pending_count": pending_count, "pending_ids": [str(x) for x in pending_ids]}
+    except Exception as exc:
+        logger.debug("Could not read analyze queue: %s", exc)
+        return {"pending_count": 0, "pending_ids": []}
+
+
+def get_enrich_queue() -> dict:
+    """Return enrich queue size and up to 50 pending items with id, fullname, location (for UI). Does not remove from queue."""
+    try:
+        r = _get_redis()
+        pending_count = r.llen(REDIS_KEY_ENRICH_QUEUE)
+        raw_ids = r.lrange(REDIS_KEY_ENRICH_QUEUE, 0, 49) or []
+        pending_ids = [str(x) for x in raw_ids]
+        if not pending_ids:
+            return {"pending_count": pending_count, "pending_items": []}
+        db = SessionLocal()
+        try:
+            uuids = []
+            for i in pending_ids:
+                try:
+                    uuids.append(uuid.UUID(i))
+                except (ValueError, TypeError, AttributeError):
+                    pass
+            rows = db.query(SearchResult.id, SearchResult.name, SearchResult.location).filter(
+                SearchResult.id.in_(uuids)
+            ).all() if uuids else []
+            id_to_row = {str(row.id): {"fullname": row.name or "—", "location": row.location or "—"} for row in rows}
+            pending_items = [
+                {"id": i, "fullname": id_to_row.get(i, {}).get("fullname", "—"), "location": id_to_row.get(i, {}).get("location", "—")}
+                for i in pending_ids
+            ]
+            return {"pending_count": pending_count, "pending_items": pending_items}
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.debug("Could not read enrich queue: %s", exc)
+        return {"pending_count": 0, "pending_items": []}
+
+
+def get_enrich_not_enrichable_count() -> int:
+    """Count records that are analyzed, not enriched, but not enrichable (e.g. missing name/location or single name)."""
+    try:
+        db = SessionLocal()
+        try:
+            rows = db.query(SearchResult.id, SearchResult.name, SearchResult.location).filter(
+                SearchResult.analyzed_at.isnot(None),
+                SearchResult.enriched_at.is_(None),
+            ).all()
+            count = 0
+            for row in rows:
+                can, _ = EnformionService.can_enrich(row.name, row.location)
+                if not can:
+                    count += 1
+            return count
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.debug("Could not count not-enrichable: %s", exc)
+        return 0
+
+
 def get_status() -> dict:
     scheduler = get_scheduler()
     job = scheduler.get_job(JOB_ID)
     persisted = _load_json(REDIS_KEY_STATUS)
+    analyze_queue = get_analyze_queue()
+    enrich_queue = get_enrich_queue()
+    enrich_not_enrichable = get_enrich_not_enrichable_count()
     return {
         "scheduler_running": scheduler.running,
         "auto_scrape_enabled": job is not None,
@@ -159,10 +245,16 @@ def get_status() -> dict:
         "last_run_status": persisted.get("last_run_status"),
         "is_running": _is_locked(),
         "current_step": persisted.get("current_step"),
+        "analyze_queue_pending": analyze_queue["pending_count"],
+        "analyze_queue_ids": analyze_queue["pending_ids"],
+        "enrich_queue_pending": enrich_queue["pending_count"],
+        "enrich_queue_items": enrich_queue["pending_items"],
+        "enrich_not_enrichable_count": enrich_not_enrichable,
     }
 
 
 async def _auto_analyze_results(db, result_ids: list) -> int:
+    """Run AI classification only. Does not modify post_date (set only by scraping)."""
     try:
         classifier = GeminiClassifier()
     except ValueError as exc:
@@ -217,8 +309,44 @@ async def _auto_analyze_results(db, result_ids: list) -> int:
     return analyzed
 
 
+async def _run_enrich_queue_worker() -> None:
+    """Background worker: pop result ids from Redis and run enrichment only."""
+    try:
+        client = AsyncRedis.from_url(settings.REDIS_URL, decode_responses=True)
+    except Exception as exc:
+        logger.warning("Enrich queue worker not started (Redis): %s", exc)
+        return
+    logger.info("Enrich queue worker started")
+    while True:
+        try:
+            result = await client.blpop(REDIS_KEY_ENRICH_QUEUE, timeout=5)
+            if not result:
+                continue
+            _, id_str = result
+            try:
+                rid = uuid.UUID(id_str)
+            except (ValueError, TypeError, AttributeError):
+                logger.warning("Enrich queue: invalid id %r, skipping", id_str)
+                continue
+            db = SessionLocal()
+            try:
+                if settings.AUTO_ENRICH_AFTER_ANALYZE:
+                    await _auto_enrich_results(db, [rid])
+            finally:
+                db.close()
+        except asyncio.CancelledError:
+            logger.info("Enrich queue worker cancelled")
+            break
+        except Exception as exc:
+            logger.exception("Enrich queue worker error: %s", exc)
+    try:
+        await client.aclose()
+    except Exception:
+        pass
+
+
 async def _run_analyze_queue_worker() -> None:
-    """Background worker: pop result ids from Redis and run analysis + enrichment."""
+    """Background worker: pop result ids from Redis and run analysis only."""
     try:
         client = AsyncRedis.from_url(settings.REDIS_URL, decode_responses=True)
     except Exception as exc:
@@ -233,15 +361,14 @@ async def _run_analyze_queue_worker() -> None:
                 continue
             _, id_str = result
             try:
-                rid = int(id_str)
-            except (ValueError, TypeError):
+                rid = uuid.UUID(id_str)
+            except (ValueError, TypeError, AttributeError):
+                logger.warning("Analyze queue: invalid id %r, skipping", id_str)
                 continue
             db = SessionLocal()
             try:
                 if settings.AUTO_ANALYZE_AFTER_SCRAPE:
                     await _auto_analyze_results(db, [rid])
-                if settings.AUTO_ENRICH_AFTER_ANALYZE:
-                    await _auto_enrich_results(db, [rid])
             finally:
                 db.close()
         except asyncio.CancelledError:
@@ -256,6 +383,7 @@ async def _run_analyze_queue_worker() -> None:
 
 
 async def _auto_enrich_results(db, result_ids: list) -> int:
+    """Enrich from EnformionGO only. Does not modify post_date (set only by scraping)."""
     try:
         service = EnformionService()
     except ValueError as exc:
@@ -406,6 +534,25 @@ def stop_analyze_worker() -> None:
     logger.info("Analyze queue worker task stopped")
 
 
+def start_enrich_worker() -> None:
+    """Start the background task that consumes the enrich queue."""
+    global _enrich_worker_task
+    if _enrich_worker_task is not None and not _enrich_worker_task.done():
+        return
+    _enrich_worker_task = asyncio.create_task(_run_enrich_queue_worker())
+    logger.info("Enrich queue worker task started")
+
+
+def stop_enrich_worker() -> None:
+    """Cancel the enrich queue worker task (call from shutdown; no await)."""
+    global _enrich_worker_task
+    if _enrich_worker_task is None:
+        return
+    _enrich_worker_task.cancel()
+    _enrich_worker_task = None
+    logger.info("Enrich queue worker task stopped")
+
+
 def start_scheduler():
     scheduler = get_scheduler()
     if scheduler.running:
@@ -413,8 +560,13 @@ def start_scheduler():
 
     _load_config()
 
-    # Clear any stale lock from a previous process/container so the first scrape can run
+    # Clear any stale lock from a previous process/container so the first scrape and analyze/enrich can run
     _release_lock()
+    try:
+        _get_redis().delete(REDIS_KEY_ANALYZE_ENRICH_LOCK)
+        _get_redis().delete(REDIS_KEY_ENRICH_LOCK)
+    except Exception:
+        pass
 
     if settings.AUTO_SCRAPE_ENABLED:
         scheduler.add_job(
@@ -431,13 +583,42 @@ def start_scheduler():
         # Run first scrape immediately; next runs follow the interval
         trigger_now()
 
+    # Periodic feeder: push un-analyzed DB entries to analyze queue
+    scheduler.add_job(
+        run_scheduled_analyze_enrich,
+        trigger=IntervalTrigger(minutes=ANALYZE_ENRICH_INTERVAL_MINUTES),
+        id=JOB_ID_ANALYZE_ENRICH,
+        replace_existing=True,
+        max_instances=1,
+    )
+    logger.info(
+        "Auto analyze feeder scheduled: every %d minutes",
+        ANALYZE_ENRICH_INTERVAL_MINUTES,
+    )
+
+    # Periodic feeder: push analyzed-but-not-enriched DB entries to enrich queue (independent job)
+    scheduler.add_job(
+        run_scheduled_enrich,
+        trigger=IntervalTrigger(minutes=ENRICH_INTERVAL_MINUTES),
+        id=JOB_ID_ENRICH,
+        replace_existing=True,
+        max_instances=1,
+    )
+    logger.info(
+        "Auto enrich feeder scheduled: every %d minutes",
+        ENRICH_INTERVAL_MINUTES,
+    )
+
     scheduler.start()
-    # Always start the analyze queue worker (handles results from manual and scheduled scrapes)
+    trigger_analyze_enrich_now()
+    asyncio.ensure_future(run_scheduled_enrich())  # Run enrich feeder once on startup
     start_analyze_worker()
+    start_enrich_worker()
 
 
 def stop_scheduler():
     stop_analyze_worker()
+    stop_enrich_worker()
     scheduler = get_scheduler()
     if scheduler.running:
         scheduler.shutdown(wait=False)
@@ -484,3 +665,73 @@ def update_config(auto_analyze: Optional[bool] = None, auto_enrich: Optional[boo
 
 def trigger_now():
     asyncio.ensure_future(run_scheduled_scrape())
+
+
+def trigger_analyze_enrich_now():
+    """Run analyze/enrich job once on startup to process backlog immediately."""
+    asyncio.ensure_future(run_scheduled_analyze_enrich())
+
+
+async def run_scheduled_analyze_enrich():
+    """Periodically fetch un-analyzed entries from DB and push their ids to the analyze queue. Analyze worker processes the queue."""
+    try:
+        if not _get_redis().set(REDIS_KEY_ANALYZE_ENRICH_LOCK, "1", nx=True, ex=1800):
+            logger.debug("Scheduled analyze feeder skipped — previous run still active")
+            return
+    except Exception:
+        pass
+
+    try:
+        db = SessionLocal()
+        try:
+            if not settings.AUTO_ANALYZE_AFTER_SCRAPE:
+                return
+            unanalyzed = db.query(SearchResult.id).filter(SearchResult.analyzed_at.is_(None)).all()
+            to_push = [r.id for r in unanalyzed]
+            if not to_push:
+                logger.info("Scheduled analyze feeder: no un-analyzed entries in DB")
+                return
+            for rid in to_push:
+                push_to_analyze_queue(rid)
+            logger.info("Scheduled analyze feeder: pushed %d ids to analyze queue", len(to_push))
+        finally:
+            db.close()
+    finally:
+        try:
+            _get_redis().delete(REDIS_KEY_ANALYZE_ENRICH_LOCK)
+        except Exception:
+            pass
+
+
+async def run_scheduled_enrich():
+    """Periodically fetch analyzed-but-not-enriched entries from DB and push their ids to the enrich queue. Enrich worker processes the queue."""
+    try:
+        if not _get_redis().set(REDIS_KEY_ENRICH_LOCK, "1", nx=True, ex=1800):
+            logger.debug("Scheduled enrich feeder skipped — previous run still active")
+            return
+    except Exception:
+        pass
+
+    try:
+        db = SessionLocal()
+        try:
+            if not settings.AUTO_ENRICH_AFTER_ANALYZE:
+                return
+            not_enriched = db.query(SearchResult.id).filter(
+                SearchResult.analyzed_at.isnot(None),
+                SearchResult.enriched_at.is_(None),
+            ).all()
+            to_push = [r.id for r in not_enriched]
+            if not to_push:
+                logger.info("Scheduled enrich feeder: no un-enriched entries in DB")
+                return
+            for rid in to_push:
+                push_to_enrich_queue(rid)
+            logger.info("Scheduled enrich feeder: pushed %d ids to enrich queue", len(to_push))
+        finally:
+            db.close()
+    finally:
+        try:
+            _get_redis().delete(REDIS_KEY_ENRICH_LOCK)
+        except Exception:
+            pass

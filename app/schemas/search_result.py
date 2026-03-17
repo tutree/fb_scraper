@@ -58,6 +58,19 @@ class SearchResultList(BaseModel):
     items: List[SearchResultResponse]
 
 
+class RecentProcessedItem(BaseModel):
+    """Minimal fields for Jobs page 'Last processed' tables."""
+    id: UUID
+    name: str
+    search_keyword: str
+    post_url: Optional[str] = None
+    location: Optional[str] = None
+    user_type: Optional[str] = None
+    scraped_at: Optional[datetime] = None
+    analyzed_at: Optional[datetime] = None
+    enriched_at: Optional[datetime] = None
+
+
 # --- Analysis schemas ---
 
 class AnalyzeResultItem(BaseModel):

@@ -15,6 +15,12 @@ from ...services.background_jobs import (
 router = APIRouter(prefix="/automation", tags=["automation"])
 
 
+class EnrichQueueItem(BaseModel):
+    id: str
+    fullname: str
+    location: str
+
+
 class AutomationStatus(BaseModel):
     scheduler_running: bool
     auto_scrape_enabled: bool
@@ -26,6 +32,11 @@ class AutomationStatus(BaseModel):
     last_run_status: Optional[str] = None
     is_running: bool = False
     current_step: Optional[str] = None
+    analyze_queue_pending: int = 0
+    analyze_queue_ids: List[str] = []
+    enrich_queue_pending: int = 0
+    enrich_queue_items: List[EnrichQueueItem] = []
+    enrich_not_enrichable_count: int = 0
 
 
 class JobHistoryEntry(BaseModel):

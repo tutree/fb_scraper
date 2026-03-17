@@ -14,10 +14,10 @@ logger = get_logger(__name__)
 
 ENFORMION_URL = "https://devapi.enformion.com/contact/enrich"
 
+# Headers must match working curl: Content-Type, Accept, galaxy-* only (no User-Agent)
 _HTTP_HEADERS_BASE = {
     "Content-Type": "application/json",
     "Accept": "application/json",
-    "User-Agent": "EnformionClient/1.0",
 }
 
 
@@ -50,29 +50,27 @@ class EnformionService:
 
     @staticmethod
     def can_enrich(name: Optional[str], location: Optional[str]) -> Tuple[bool, str]:
+        """Only call Enformion when we have first name + last name + location."""
         if not name or not name.strip():
             return False, "Cannot enrich: name is required"
+        name_parts = name.strip().split()
+        if len(name_parts) < 2:
+            return False, "Cannot enrich: first name and last name required (at least two name parts)"
         if not location or not location.strip():
             return False, "Cannot enrich: location is required alongside name for a reliable match"
         return True, "OK"
 
     def _build_request(self, name: str, location: str) -> Dict:
-        first, middle, last = self.split_name(name)
+        """Build payload exactly like working curl: FirstName, LastName, Address only."""
+        first, _, last = self.split_name(name)
         cleaned_location = clean_facebook_location(location) or location.strip()
         return {
             "FirstName": first,
-            "MiddleName": middle,
             "LastName": last,
-            "Dob": "",
-            "Age": None,
-            "Phone": "",
-            "Email": "",
             "Address": {
-                "AddressLine1": "",
-                "AddressLine2": cleaned_location,
+                "addressLine1": "",
+                "addressLine2": cleaned_location,
             },
-            "Page": 1,
-            "ResultsPerPage": 10,
         }
 
     async def enrich(self, name: str, location: str) -> Dict:
@@ -101,17 +99,24 @@ class EnformionService:
             http2=False,
             follow_redirects=True,
         ) as client:
+            # Serialize payload exactly like curl: compact JSON, no extra keys
+            body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
             resp = await client.post(
                 ENFORMION_URL,
-                content=json.dumps(payload),
+                content=body,
                 headers=headers,
             )
             if resp.status_code >= 400:
+                body_preview = (resp.text or "")[:500]
                 logger.error(
                     "EnformionGO API error %d: %s",
                     resp.status_code,
-                    resp.text,
+                    body_preview,
                 )
+                if resp.status_code == 444:
+                    logger.error(
+                        "HTTP 444 often means invalid request or auth. Check ENFORMION_AP_NAME / ENFORMION_AP_PASSWORD and request format (Address.addressLine1/addressLine2)."
+                    )
                 resp.raise_for_status()
             data = resp.json()
 

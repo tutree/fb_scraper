@@ -12,6 +12,7 @@ from ...services.enformion_service import EnformionService
 from ...schemas.search_result import (
     SearchResultResponse,
     SearchResultList,
+    RecentProcessedItem,
     SearchResultUpdate,
     AnalyzeBatchRequest,
     AnalyzeBatchResponse,
@@ -170,6 +171,49 @@ async def get_results(
         total=total,
         items=[SearchResultResponse.model_validate(r) for r in results],
     )
+
+
+@router.get("/recent", response_model=List[RecentProcessedItem])
+async def get_recent_processed(
+    process_type: str = Query("scraped", description="scraped | analyzed | enriched"),
+    limit: int = Query(10, ge=1, le=50),
+    db: Session = Depends(get_db),
+):
+    """Last processed entries for Jobs page: scraped, analyzed, or enriched."""
+    process_type = (process_type or "scraped").strip().lower()
+    if process_type == "scraped":
+        query = db.query(SearchResult).order_by(SearchResult.scraped_at.desc().nullslast()).limit(limit)
+    elif process_type == "analyzed":
+        query = (
+            db.query(SearchResult)
+            .filter(SearchResult.analyzed_at.isnot(None))
+            .order_by(SearchResult.analyzed_at.desc())
+            .limit(limit)
+        )
+    elif process_type == "enriched":
+        query = (
+            db.query(SearchResult)
+            .filter(SearchResult.enriched_at.isnot(None))
+            .order_by(SearchResult.enriched_at.desc())
+            .limit(limit)
+        )
+    else:
+        query = db.query(SearchResult).order_by(SearchResult.scraped_at.desc().nullslast()).limit(limit)
+    results = query.all()
+    return [
+        RecentProcessedItem(
+            id=r.id,
+            name=r.name or "",
+            search_keyword=r.search_keyword or "",
+            post_url=r.post_url,
+            location=r.location,
+            user_type=r.user_type.value if r.user_type else None,
+            scraped_at=r.scraped_at,
+            analyzed_at=r.analyzed_at,
+            enriched_at=r.enriched_at,
+        )
+        for r in results
+    ]
 
 
 @router.get("/{result_id}/comments", response_model=List[PostCommentResponse])
