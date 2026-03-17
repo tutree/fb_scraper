@@ -8,6 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    xvfb \
     ca-certificates \
     libasound2 \
     libatk-bridge2.0-0 \
@@ -36,6 +37,8 @@ COPY requirements.txt ./
 RUN pip install -r requirements.txt && playwright install chromium
 
 COPY . .
+COPY entrypoint.sh /entrypoint.sh
+RUN sed -i 's/\r$//' /entrypoint.sh 2>/dev/null || true && chmod +x /entrypoint.sh
 
 RUN useradd --create-home --shell /bin/bash appuser && \
     mkdir -p /app/logs /app/cookies /app/config /ms-playwright && \
@@ -48,4 +51,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
 
+ENTRYPOINT ["/bin/sh", "/entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,5 +1,6 @@
 from playwright.async_api import async_playwright, Browser, Page
 from typing import Optional, Dict, Any, List, Tuple
+import os
 import random
 import json
 from pathlib import Path
@@ -209,19 +210,19 @@ STEALTH_SCRIPT = """
 class BrowserManager:
     def __init__(self, proxy_manager: Optional[ProxyManager] = None, headless: bool = True):
         self.proxy_manager = proxy_manager
-        self.headless = headless
         self.browser: Optional[Browser] = None
         self.playwright = None
+
+        # HEADLESS env: set to "false" in deployment to run headed (with Xvfb) so hover/tooltips match local
+        _headless_env = os.environ.get("HEADLESS", "").strip().lower()
+        self.headless = (
+            headless
+            if _headless_env == ""
+            else _headless_env not in ("0", "false", "no")
+        )
         
-        # Randomized viewports for fingerprint diversity
-        self.viewports = [
-            {"width": 1920, "height": 1080},
-            {"width": 1366, "height": 768},
-            {"width": 1536, "height": 864},
-            {"width": 1440, "height": 900},
-            {"width": 1600, "height": 900},
-            {"width": 1280, "height": 720},
-        ]
+        # Fixed desktop viewport so Facebook serves consistent desktop structure (no mobile/tablet layout)
+        self.viewport = {"width": 1920, "height": 1080}
         
         # Randomized user agents
         self.user_agents = [
@@ -438,8 +439,8 @@ class BrowserManager:
         logger.info("Creating new browser page...")
         browser = await self.get_browser()
         
-        # Randomize viewport and user agent
-        viewport = random.choice(self.viewports)
+        # Fixed desktop viewport; random user agent only
+        viewport = self.viewport
         user_agent = random.choice(self.user_agents)
         logger.info(f"Using viewport: {viewport['width']}x{viewport['height']}")
         logger.debug(f"Using user agent: {user_agent[:50]}...")
@@ -498,8 +499,8 @@ class BrowserManager:
         logger.info(f"Creating browser page for account: {account_uid}")
         browser = await self.get_browser()
 
-        # Randomize viewport and user agent
-        viewport = random.choice(self.viewports)
+        # Fixed desktop viewport; random user agent only
+        viewport = self.viewport
         user_agent = random.choice(self.user_agents)
         logger.info(f"Using viewport: {viewport['width']}x{viewport['height']}")
 

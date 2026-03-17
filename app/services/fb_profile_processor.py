@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 
 from playwright.async_api import Page
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from ..core.config import settings
 from ..core.logging_config import get_logger
@@ -194,19 +195,47 @@ async def process_single_profile(
                 logger.info("  Personal profile detected (no public location)")
 
             try:
-                search_result = SearchResult(
-                    name=final_name,
-                    location=location_text,
-                    post_content=post_content,
-                    post_url=post_url,
-                    post_date=post_date,
-                    profile_url=profile_url,
-                    search_keyword=keyword,
-                    status=ResultStatus.PENDING,
-                )
-                db.add(search_result)
-                db.commit()
-                logger.info(f"  Saved to database (ID: {search_result.id})")
+                existing = db.query(SearchResult).filter(SearchResult.post_url == post_url).first() if post_url else None
+                if existing:
+                    existing.name = final_name
+                    existing.location = location_text
+                    existing.post_content = post_content
+                    existing.post_date = post_date or existing.post_date
+                    existing.profile_url = profile_url
+                    existing.search_keyword = keyword
+                    db.commit()
+                    search_result = existing
+                    logger.info(f"  Updated existing record (ID: {search_result.id})")
+                else:
+                    search_result = SearchResult(
+                        name=final_name,
+                        location=location_text,
+                        post_content=post_content,
+                        post_url=post_url,
+                        post_date=post_date,
+                        profile_url=profile_url,
+                        search_keyword=keyword,
+                        status=ResultStatus.PENDING,
+                    )
+                    db.add(search_result)
+                    try:
+                        db.commit()
+                        logger.info(f"  Saved to database (ID: {search_result.id})")
+                    except IntegrityError:
+                        db.rollback()
+                        existing = db.query(SearchResult).filter(SearchResult.post_url == post_url).first()
+                        if existing:
+                            existing.name = final_name
+                            existing.location = location_text
+                            existing.post_content = post_content
+                            existing.post_date = post_date or existing.post_date
+                            existing.profile_url = profile_url
+                            existing.search_keyword = keyword
+                            db.commit()
+                            search_result = existing
+                            logger.info(f"  Updated existing record after conflict (ID: {search_result.id})")
+                        else:
+                            raise
                 if settings.AUTO_ANALYZE_AFTER_SCRAPE:
                     from .background_jobs import push_to_analyze_queue
                     push_to_analyze_queue(search_result.id)

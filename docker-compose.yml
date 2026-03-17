@@ -71,6 +71,7 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-scraper}:${POSTGRES_PASSWORD:-scraper123}@postgres:5432/${POSTGRES_DB:-math_tutor_db}
       REDIS_URL: redis://redis:6379
+      HEADLESS: ${HEADLESS:-true}
       FACEBOOK_EMAIL: ${FACEBOOK_EMAIL:-}
       FACEBOOK_PASSWORD: ${FACEBOOK_PASSWORD:-}
       PROXY_LIST: ${PROXY_LIST:-}
