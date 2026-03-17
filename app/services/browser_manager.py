@@ -1,6 +1,5 @@
 from playwright.async_api import async_playwright, Browser, Page
 from typing import Optional, Dict, Any, List, Tuple
-import os
 import random
 import json
 from pathlib import Path
@@ -213,14 +212,9 @@ class BrowserManager:
         self.browser: Optional[Browser] = None
         self.playwright = None
 
-        # HEADLESS env: set to "false" in deployment to run headed (with Xvfb) so hover/tooltips match local
-        _headless_env = os.environ.get("HEADLESS", "").strip().lower()
-        self.headless = (
-            headless
-            if _headless_env == ""
-            else _headless_env not in ("0", "false", "no")
-        )
-        
+        # Hardcoded headed mode so hover tooltips (date extraction) work same as local; use Xvfb in Docker
+        self.headless = False
+
         # Fixed desktop viewport so Facebook serves consistent desktop structure (no mobile/tablet layout)
         self.viewport = {"width": 1920, "height": 1080}
         
