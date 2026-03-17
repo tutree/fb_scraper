@@ -413,6 +413,9 @@ def start_scheduler():
 
     _load_config()
 
+    # Clear any stale lock from a previous process/container so the first scrape can run
+    _release_lock()
+
     if settings.AUTO_SCRAPE_ENABLED:
         scheduler.add_job(
             run_scheduled_scrape,

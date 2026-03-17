@@ -36,6 +36,9 @@ cd "$DEPLOY_PATH"
 [[ -d .git ]] || fail "DEPLOY_PATH must point to a git checkout: $DEPLOY_PATH"
 [[ -f "$COMPOSE_FILE" ]] || fail "Compose file not found: $COMPOSE_FILE"
 
+# Revert only the deploy script so the working tree is clean (CI may have run sed on it for CRLF->LF)
+git checkout -- scripts/deploy_on_server.sh 2>/dev/null || true
+
 if [[ -f .env ]]; then
     set -a
     . ./.env
