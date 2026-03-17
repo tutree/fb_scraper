@@ -23,6 +23,14 @@ logger = get_logger(__name__)
 
 _SCREENSHOTS_DIR = Path(os.environ.get("LOGS_DIR", "logs")) / "screenshots"
 
+# Tooltip date format: "Tuesday, March 17, 2026 at 12:09 AM" (hover on obfuscated date)
+_TOOLTIP_DATE_RE = _re.compile(
+    r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s*,\s*"
+    r"(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+"
+    r"\d{1,2}\s*,\s*\d{4}(?:\s+at\s+\d{1,2}:\d{2}\s*(?:AM|PM))?",
+    _re.IGNORECASE,
+)
+
 
 async def _screenshot(page, label: str) -> None:
     """Save a PNG to logs/screenshots/<label>_HHMMSS.png, silently skip on error."""
@@ -55,6 +63,60 @@ def _link_key(link: Dict) -> str:
     base = str(link.get("post_url") or link.get("url") or "")
     content = str(link.get("post_content") or "")[:80]
     return f"{base}|{content}"
+
+
+async def _extract_dates_via_tooltip_hover(
+    page: Page,
+    article_count: int,
+    should_stop: Optional[Callable[[], bool]] = None,
+) -> Dict[int, str]:
+    """
+    For each article index 0..article_count-1, hover the obfuscated date element,
+    wait for div[role="tooltip"], read its text and extract date with month-name regex.
+    Returns dict: article_index -> date string (e.g. "Tuesday, March 17, 2026 at 12:09 AM").
+    """
+    date_by_index: Dict[int, str] = {}
+    articles_loc = page.locator("div[role='main'] div[role='article']")
+    try:
+        n = await articles_loc.count()
+    except Exception:
+        n = 0
+    if n == 0:
+        return date_by_index
+
+    for i in range(min(article_count, n)):
+        if should_stop and should_stop():
+            break
+        try:
+            article = articles_loc.nth(i)
+            # Date link: FB uses href with #? for the obfuscated date; tooltip shows on hover
+            date_links = article.locator("a[href*='#?']")
+            if await date_links.count() == 0:
+                continue
+            await date_links.first.hover()
+            await asyncio.sleep(0.3)
+            tooltip = page.locator("div[role='tooltip']")
+            try:
+                await tooltip.first.wait_for(state="visible", timeout=2000)
+            except Exception:
+                await page.mouse.move(0, 0)
+                await asyncio.sleep(0.1)
+                continue
+            raw = await tooltip.first.text_content()
+            await page.mouse.move(0, 0)
+            await asyncio.sleep(0.15)
+            if raw:
+                m = _TOOLTIP_DATE_RE.search(raw)
+                if m:
+                    date_by_index[i] = m.group(0).strip()
+        except Exception as e:
+            logger.debug("Tooltip date extraction for article %s: %s", i, e)
+        try:
+            await page.mouse.move(0, 0)
+        except Exception:
+            pass
+
+    return date_by_index
 
 
 async def scroll_and_process_posts(
@@ -464,6 +526,20 @@ async def scroll_and_process_posts(
         exclude_uids_list,
     )
 
+    # Hover obfuscated date elements to read tooltip and fill post_date
+    try:
+        article_count = await page.locator("div[role='main'] div[role='article']").count()
+        if article_count > 0:
+            date_by_index = await _extract_dates_via_tooltip_hover(
+                page, article_count, should_stop=should_stop
+            )
+            for link in all_links:
+                idx = link.get("visible_index")
+                if idx is not None and idx in date_by_index:
+                    link["post_date"] = date_by_index[idx]
+    except Exception as e:
+        logger.debug("Tooltip date extraction (initial): %s", e)
+
     logger.info(f"Total extracted: {len(all_links)} profile links")
     for link in all_links:
         logger.info(
@@ -781,6 +857,20 @@ async def scroll_and_process_posts(
                 """,
                 exclude_uids_list,
             )
+
+            # Hover tooltip date extraction for progressive-scan results
+            try:
+                article_count = await page.locator("div[role='main'] div[role='article']").count()
+                if article_count > 0:
+                    date_by_index = await _extract_dates_via_tooltip_hover(
+                        page, article_count, should_stop=should_stop
+                    )
+                    for link in extra_links:
+                        idx = link.get("visible_index")
+                        if idx is not None and idx in date_by_index:
+                            link["post_date"] = date_by_index[idx]
+            except Exception as e:
+                logger.debug("Tooltip date extraction (progressive): %s", e)
 
             added = 0
             for link in extra_links:
