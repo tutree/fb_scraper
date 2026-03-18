@@ -145,13 +145,18 @@ def _save_config():
 
 
 def _load_config():
-    cfg = _load_json(REDIS_KEY_CONFIG)
-    if cfg:
-        settings.AUTO_SCRAPE_ENABLED = cfg.get("auto_scrape_enabled", settings.AUTO_SCRAPE_ENABLED)
-        settings.AUTO_ANALYZE_AFTER_SCRAPE = cfg.get("auto_analyze", settings.AUTO_ANALYZE_AFTER_SCRAPE)
-        settings.AUTO_ENRICH_AFTER_ANALYZE = cfg.get("auto_enrich", settings.AUTO_ENRICH_AFTER_ANALYZE)
-    # Always apply the code default for interval — don't let a stale Redis value override it
+    # Wipe any stale config in Redis — code defaults (config.py) are the source of truth
+    try:
+        _get_redis().delete(REDIS_KEY_CONFIG)
+    except Exception:
+        pass
+    # Persist current code defaults so the UI and get_status() reflect them
     _save_config()
+    logger.info(
+        "Config loaded from code defaults: interval=%d min, enabled=%s",
+        settings.AUTO_SCRAPE_INTERVAL_MINUTES,
+        settings.AUTO_SCRAPE_ENABLED,
+    )
 
 
 def get_scheduler() -> AsyncIOScheduler:
@@ -717,6 +722,11 @@ def start_scheduler():
         pass
 
     if settings.AUTO_SCRAPE_ENABLED:
+        # Remove any persisted job first so stale triggers don't survive
+        try:
+            scheduler.remove_job(JOB_ID)
+        except Exception:
+            pass
         scheduler.add_job(
             run_scheduled_scrape,
             trigger=IntervalTrigger(minutes=settings.AUTO_SCRAPE_INTERVAL_MINUTES),
@@ -725,10 +735,9 @@ def start_scheduler():
             max_instances=1,
         )
         logger.info(
-            "Auto-scrape scheduler started (Redis-backed): every %d minutes",
+            "Auto-scrape scheduler started: every %d minutes",
             settings.AUTO_SCRAPE_INTERVAL_MINUTES,
         )
-        # Run first scrape immediately; next runs follow the interval
         trigger_now()
 
     # Periodic feeder: push un-analyzed DB entries to analyze queue

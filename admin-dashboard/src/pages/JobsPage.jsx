@@ -301,7 +301,7 @@ export default function JobsPage() {
           </div>
           <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
             <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Interval</p>
-            <p className="mt-1 text-lg font-bold text-slate-900">{status?.interval_minutes} min</p>
+            <p className="mt-1 text-lg font-bold text-slate-900">{status?.interval_minutes >= 60 ? `${(status.interval_minutes / 60).toFixed(0)}h` : `${status?.interval_minutes} min`}</p>
           </div>
           <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
             <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Next Run</p>
@@ -388,13 +388,10 @@ export default function JobsPage() {
           </label>
           <label className="flex items-center gap-2 text-sm text-slate-700">
             Interval:
-            <select value={status?.interval_minutes || 30} disabled={updating} onChange={(e) => update({ interval_minutes: Number(e.target.value) })} className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm">
-              <option value={5}>5 min</option>
-              <option value={10}>10 min</option>
-              <option value={15}>15 min</option>
-              <option value={30}>30 min</option>
+            <select value={status?.interval_minutes || 180} disabled={updating} onChange={(e) => update({ interval_minutes: Number(e.target.value) })} className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm">
               <option value={60}>1 hour</option>
               <option value={120}>2 hours</option>
+              <option value={180}>3 hours</option>
               <option value={360}>6 hours</option>
               <option value={720}>12 hours</option>
               <option value={1440}>24 hours</option>
