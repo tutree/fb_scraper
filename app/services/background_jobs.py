@@ -857,12 +857,17 @@ def start_scheduler():
 
     _load_config()
 
-    # Clear any stale lock from a previous process/container so the first scrape and analyze/enrich can run
+    # Clear stale locks and queues from previous process/container
     _release_lock()
     try:
-        _get_redis().delete(REDIS_KEY_ANALYZE_ENRICH_LOCK)
-        _get_redis().delete(REDIS_KEY_ENRICH_LOCK)
-        _get_redis().delete(REDIS_KEY_COMMENT_ANALYZE_LOCK)
+        r = _get_redis()
+        r.delete(REDIS_KEY_ANALYZE_ENRICH_LOCK)
+        r.delete(REDIS_KEY_ENRICH_LOCK)
+        r.delete(REDIS_KEY_COMMENT_ANALYZE_LOCK)
+        stale_enrich = r.llen(REDIS_KEY_ENRICH_QUEUE) or 0
+        r.delete(REDIS_KEY_ENRICH_QUEUE)
+        if stale_enrich:
+            logger.info("Cleared stale enrich queue on startup: %d items", stale_enrich)
     except Exception:
         pass
 
