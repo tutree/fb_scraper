@@ -195,47 +195,37 @@ async def process_single_profile(
                 logger.info("  Personal profile detected (no public location)")
 
             try:
-                existing = db.query(SearchResult).filter(SearchResult.post_url == post_url).first() if post_url else None
-                if existing:
-                    existing.name = final_name
-                    existing.location = location_text
-                    existing.post_content = post_content
-                    existing.post_date = post_date or existing.post_date
-                    existing.profile_url = profile_url
-                    existing.search_keyword = keyword
+                if post_url:
+                    existing = db.query(SearchResult).filter(SearchResult.post_url == post_url).first()
+                    if existing:
+                        logger.info(f"  Duplicate post_url — skipping (existing ID: {existing.id})")
+                        search_result = existing
+                        await page.close()
+                        return True
+
+                search_result = SearchResult(
+                    name=final_name,
+                    location=location_text,
+                    post_content=post_content,
+                    post_url=post_url,
+                    post_date=post_date,
+                    profile_url=profile_url,
+                    search_keyword=keyword,
+                    status=ResultStatus.PENDING,
+                )
+                db.add(search_result)
+                try:
                     db.commit()
-                    search_result = existing
-                    logger.info(f"  Updated existing record (ID: {search_result.id})")
-                else:
-                    search_result = SearchResult(
-                        name=final_name,
-                        location=location_text,
-                        post_content=post_content,
-                        post_url=post_url,
-                        post_date=post_date,
-                        profile_url=profile_url,
-                        search_keyword=keyword,
-                        status=ResultStatus.PENDING,
-                    )
-                    db.add(search_result)
-                    try:
-                        db.commit()
-                        logger.info(f"  Saved to database (ID: {search_result.id})")
-                    except IntegrityError:
-                        db.rollback()
+                    logger.info(f"  Saved to database (ID: {search_result.id})")
+                except IntegrityError:
+                    db.rollback()
+                    if post_url:
                         existing = db.query(SearchResult).filter(SearchResult.post_url == post_url).first()
                         if existing:
-                            existing.name = final_name
-                            existing.location = location_text
-                            existing.post_content = post_content
-                            existing.post_date = post_date or existing.post_date
-                            existing.profile_url = profile_url
-                            existing.search_keyword = keyword
-                            db.commit()
-                            search_result = existing
-                            logger.info(f"  Updated existing record after conflict (ID: {search_result.id})")
-                        else:
-                            raise
+                            logger.info(f"  Duplicate post_url (race condition) — skipping (ID: {existing.id})")
+                            await page.close()
+                            return True
+                    raise
                 if comments_data:
                     try:
                         for c in comments_data:
@@ -307,6 +297,12 @@ async def process_single_profile(
                 return False
         else:
             logger.info("  Not a personal profile (group/page) — skipping")
+            if post_url:
+                existing = db.query(SearchResult).filter(SearchResult.post_url == post_url).first()
+                if existing:
+                    logger.info(f"  Duplicate post_url for non-personal — skipping (ID: {existing.id})")
+                    await page.close()
+                    return False
             if comments_data:
                 try:
                     search_result = SearchResult(

@@ -516,24 +516,56 @@ async def _enrich_rate_limit_wait():
 
 
 async def _auto_enrich_results(db, result_ids: list) -> int:
-    """Enrich from EnformionGO only. Re-raises 429 so the worker can pause and re-queue."""
+    """Enrich from EnformionGO only. Re-raises 429 so the worker can pause and re-queue.
+    Phase 1: bulk-copy enrichment data from same-name records already enriched.
+    Phase 2: call API only for names that have no donor."""
     try:
         service = EnformionService()
     except ValueError as exc:
         logger.warning("Auto-enrich skipped — EnformionGO not configured: %s", exc)
         return 0
 
-    enriched = 0
-    for rid in result_ids:
-        result = db.query(SearchResult).filter(SearchResult.id == rid).first()
-        if not result or result.enriched_at is not None:
-            continue
-        if not result.enrichable:
-            logger.debug("Skipping %s — not flagged as enrichable", rid)
-            continue
+    results = db.query(SearchResult).filter(SearchResult.id.in_(result_ids)).all()
+    pending = [r for r in results if r.enriched_at is None and r.enrichable]
+    if not pending:
+        return 0
 
+    # Phase 1: one query to build a name→donor map from all already-enriched records
+    enriched_donors = (
+        db.query(SearchResult)
+        .filter(SearchResult.enriched_at.isnot(None))
+        .all()
+    )
+    donor_map: dict = {}
+    for d in enriched_donors:
+        if d.name and d.name.strip():
+            key = d.name.strip().lower()
+            if key not in donor_map:
+                donor_map[key] = d
+
+    copied = 0
+    need_api = []
+    for result in pending:
+        name_key = (result.name or "").strip().lower()
+        donor = donor_map.get(name_key) if name_key else None
+        if donor:
+            result.enriched_phones = donor.enriched_phones
+            result.enriched_emails = donor.enriched_emails
+            result.enriched_addresses = donor.enriched_addresses
+            result.enriched_age = donor.enriched_age
+            result.enriched_at = datetime.now(timezone.utc)
+            copied += 1
+        else:
+            need_api.append(result)
+
+    if copied > 0:
+        db.commit()
+        logger.info("Enrich phase 1: copied enrichment data for %d records from same-name donors", copied)
+
+    # Phase 2: API calls only for truly new names
+    api_enriched = 0
+    for result in need_api:
         await _enrich_rate_limit_wait()
-
         try:
             data = await service.enrich(result.name, result.location)
             result.enriched_at = datetime.now(timezone.utc)
@@ -542,22 +574,23 @@ async def _auto_enrich_results(db, result_ids: list) -> int:
                 result.enriched_emails = data.get("emails")
                 result.enriched_addresses = data.get("addresses")
                 result.enriched_age = data.get("age")
-                enriched += 1
-                logger.info("Enriched %s — match found", rid)
+                api_enriched += 1
+                logger.info("Enriched %s — match found", result.id)
+                donor_map[(result.name or "").strip().lower()] = result
             else:
-                logger.info("Enriched %s — no match from API, marked as attempted", rid)
+                logger.info("Enriched %s — no match from API, marked as attempted", result.id)
+                donor_map[(result.name or "").strip().lower()] = result
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 429:
-                logger.warning("Auto-enrich 429 for %s — stopping batch and bubbling up", rid)
-                if enriched > 0:
-                    db.commit()
+                logger.warning("Auto-enrich 429 for %s — stopping batch and bubbling up", result.id)
+                db.commit()
                 raise
-            logger.warning("Auto-enrich HTTP error for %s: %s", rid, exc)
+            logger.warning("Auto-enrich HTTP error for %s: %s", result.id, exc)
         except Exception as exc:
-            logger.warning("Auto-enrich failed for %s: %s", rid, exc)
+            logger.warning("Auto-enrich failed for %s: %s", result.id, exc)
 
     db.commit()
-    return enriched
+    return copied + api_enriched
 
 
 async def _auto_analyze_comments(db, batch_size: int = 50) -> int:
