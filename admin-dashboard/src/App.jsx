@@ -66,6 +66,7 @@ function App() {
     sortBy: 'scraped_at',
     sortOrder: 'desc',
     keyword: '',
+    q: '',
   })
   const [currentPage, setCurrentPage] = useState(1)
   const [itemsPerPage, setItemsPerPage] = useState(20)
@@ -123,6 +124,7 @@ function App() {
       if (filters.sortBy) params.append('sort_by', filters.sortBy)
       if (filters.sortOrder) params.append('sort_order', filters.sortOrder)
       if (filters.keyword) params.append('keyword', filters.keyword)
+      if (filters.q) params.append('q', filters.q)
       params.append('skip', (currentPage - 1) * itemsPerPage)
       params.append('limit', itemsPerPage)
 
@@ -524,7 +526,7 @@ function App() {
               <option value="desc">Order: Desc</option>
               <option value="asc">Order: Asc</option>
             </select>
-            <input type="text" placeholder="Search keyword..." value={filters.keyword} onChange={(e) => { setFilters({ ...filters, keyword: e.target.value }); setCurrentPage(1) }} className="rounded-lg border border-slate-300 px-3 py-2 text-sm md:col-span-2" />
+            <input type="text" placeholder="Search name, location..." value={filters.q} onChange={(e) => { setFilters({ ...filters, q: e.target.value }); setCurrentPage(1) }} className="rounded-lg border border-slate-300 px-3 py-2 text-sm md:col-span-2" />
           </div>
           <div className="mt-3 flex flex-wrap gap-2">
             <button type="button" onClick={analyzeSelected} disabled={selectedIds.size === 0 || analyzingBatch} className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:bg-slate-400">

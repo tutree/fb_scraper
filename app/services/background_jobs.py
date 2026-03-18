@@ -27,7 +27,7 @@ from ..services.gemini_classifier import GeminiClassifier
 from ..services.enformion_service import EnformionService
 from ..services.scraper import ScraperService
 from ..services.facebook_cookie_manager import get_cookie_status
-from ..utils.validators import clean_facebook_location, clean_facebook_name, parse_facebook_date
+from ..utils.validators import clean_facebook_location, clean_facebook_name, parse_facebook_date, is_enrichable
 
 logger = get_logger(__name__)
 
@@ -47,7 +47,7 @@ REDIS_KEY_ENRICH_LOCK = f"{REDIS_PREFIX}enrich_lock"
 REDIS_KEY_COMMENT_ANALYZE_LOCK = f"{REDIS_PREFIX}comment_analyze_lock"
 MAX_HISTORY = 50
 ANALYZE_ENRICH_INTERVAL_MINUTES = 15
-ENRICH_INTERVAL_MINUTES = 15
+ENRICH_INTERVAL_MINUTES = 30
 ENRICH_MAX_PER_MINUTE = 90
 COMMENT_ANALYZE_INTERVAL_MINUTES = 60
 
@@ -220,20 +220,15 @@ def get_enrich_queue() -> dict:
 
 
 def get_enrich_not_enrichable_count() -> int:
-    """Count records that are analyzed, not enriched, but not enrichable (e.g. missing name/location or single name)."""
+    """Count records that are analyzed, not enriched, and flagged as not enrichable."""
     try:
         db = SessionLocal()
         try:
-            rows = db.query(SearchResult.id, SearchResult.name, SearchResult.location).filter(
+            return db.query(SearchResult.id).filter(
                 SearchResult.analyzed_at.isnot(None),
                 SearchResult.enriched_at.is_(None),
-            ).all()
-            count = 0
-            for row in rows:
-                can, _ = EnformionService.can_enrich(row.name, row.location)
-                if not can:
-                    count += 1
-            return count
+                SearchResult.enrichable == False,  # noqa: E712
+            ).count()
         finally:
             db.close()
     except Exception as exc:
@@ -248,6 +243,14 @@ def get_status() -> dict:
     analyze_queue = get_analyze_queue()
     enrich_queue = get_enrich_queue()
     enrich_not_enrichable = get_enrich_not_enrichable_count()
+
+    analyze_job = scheduler.get_job(JOB_ID_ANALYZE_ENRICH)
+    enrich_job = scheduler.get_job(JOB_ID_ENRICH)
+    comment_job = scheduler.get_job(JOB_ID_COMMENT_ANALYZE)
+
+    analyze_worker_alive = _analyze_worker_task is not None and not _analyze_worker_task.done()
+    enrich_worker_alive = _enrich_worker_task is not None and not _enrich_worker_task.done()
+
     return {
         "scheduler_running": scheduler.running,
         "auto_scrape_enabled": job is not None,
@@ -264,6 +267,28 @@ def get_status() -> dict:
         "enrich_queue_pending": enrich_queue["pending_count"],
         "enrich_queue_items": enrich_queue["pending_items"],
         "enrich_not_enrichable_count": enrich_not_enrichable,
+        "jobs": {
+            "scraper": {
+                "running": _is_locked(),
+                "interval_minutes": settings.AUTO_SCRAPE_INTERVAL_MINUTES,
+                "next_run": str(job.next_run_time) if job and job.next_run_time else None,
+            },
+            "analyzer": {
+                "running": analyze_worker_alive,
+                "interval_minutes": ANALYZE_ENRICH_INTERVAL_MINUTES,
+                "next_run": str(analyze_job.next_run_time) if analyze_job and analyze_job.next_run_time else None,
+            },
+            "enrichment": {
+                "running": enrich_worker_alive,
+                "interval_minutes": ENRICH_INTERVAL_MINUTES,
+                "next_run": str(enrich_job.next_run_time) if enrich_job and enrich_job.next_run_time else None,
+            },
+            "comment_analyzer": {
+                "running": bool(comment_job),
+                "interval_minutes": COMMENT_ANALYZE_INTERVAL_MINUTES,
+                "next_run": str(comment_job.next_run_time) if comment_job and comment_job.next_run_time else None,
+            },
+        },
     }
 
 
@@ -295,6 +320,7 @@ async def _auto_analyze_results(db, result_ids: list) -> int:
             result.confidence_score = 0.0
             result.analysis_message = "No post content available"
             result.analyzed_at = datetime.now(timezone.utc)
+            result.enrichable = is_enrichable(result.name, result.location)
             analyzed += 1
             continue
 
@@ -314,6 +340,7 @@ async def _auto_analyze_results(db, result_ids: list) -> int:
             result.confidence_score = max(0.0, min(1.0, float(analysis.get("confidence", 0.0))))
             result.analysis_message = str(analysis.get("reason") or "")
             result.analyzed_at = datetime.now(timezone.utc)
+            result.enrichable = is_enrichable(result.name, result.location)
 
             if result.post_date and not result.post_date_timestamp:
                 parsed_ts = parse_facebook_date(result.post_date)
@@ -337,87 +364,129 @@ async def _auto_analyze_results(db, result_ids: list) -> int:
 
 
 async def _run_enrich_queue_worker() -> None:
-    """Background worker: pop result ids from Redis and run enrichment only."""
-    try:
-        client = AsyncRedis.from_url(settings.REDIS_URL, decode_responses=True)
-    except Exception as exc:
-        logger.warning("Enrich queue worker not started (Redis): %s", exc)
-        return
-    logger.info("Enrich queue worker started")
+    """Background worker: pop result ids from Redis and run enrichment only.
+    Never exits on its own — catches all errors and keeps the loop alive."""
+    consecutive_429 = 0
     while True:
+        client = None
         try:
-            result = await client.blpop(REDIS_KEY_ENRICH_QUEUE, timeout=5)
-            if not result:
-                continue
-            _, id_str = result
-            try:
-                rid = uuid.UUID(id_str)
-            except (ValueError, TypeError, AttributeError):
-                logger.warning("Enrich queue: invalid id %r, skipping", id_str)
-                continue
-            db = SessionLocal()
-            try:
-                if settings.AUTO_ENRICH_AFTER_ANALYZE:
-                    await _auto_enrich_results(db, [rid])
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 429:
-                    logger.warning("Enrich worker got 429 after retries — re-queuing %s and pausing 60s", rid)
-                    await client.rpush(REDIS_KEY_ENRICH_QUEUE, str(rid))
-                    await asyncio.sleep(60)
-                else:
-                    logger.warning("Enrich worker HTTP error for %s: %s", rid, exc)
-            finally:
-                db.close()
+            client = AsyncRedis.from_url(settings.REDIS_URL, decode_responses=True)
+            logger.info("Enrich queue worker connected to Redis")
+
+            while True:
+                try:
+                    result = await client.blpop(REDIS_KEY_ENRICH_QUEUE, timeout=5)
+                    if not result:
+                        continue
+                    _, id_str = result
+                    try:
+                        rid = uuid.UUID(id_str)
+                    except (ValueError, TypeError, AttributeError):
+                        logger.warning("Enrich queue: invalid id %r, skipping", id_str)
+                        continue
+
+                    if not settings.AUTO_ENRICH_AFTER_ANALYZE:
+                        continue
+
+                    db = SessionLocal()
+                    try:
+                        await _auto_enrich_results(db, [rid])
+                        consecutive_429 = 0
+                    except httpx.HTTPStatusError as exc:
+                        if exc.response.status_code == 429:
+                            consecutive_429 += 1
+                            cooldown = min(300 * consecutive_429, 1800)
+                            logger.warning(
+                                "Enrich worker 429 (streak=%d) — re-queuing %s, pausing %ds (%dm)",
+                                consecutive_429, rid, cooldown, cooldown // 60,
+                            )
+                            try:
+                                await client.rpush(REDIS_KEY_ENRICH_QUEUE, str(rid))
+                            except Exception:
+                                pass
+                            _enrich_timestamps.clear()
+                            await asyncio.sleep(cooldown)
+                        else:
+                            logger.warning("Enrich worker HTTP error for %s: %s", rid, exc)
+                    except Exception as exc:
+                        logger.warning("Enrich worker item error for %s: %s", rid, exc)
+                    finally:
+                        db.close()
+                except asyncio.CancelledError:
+                    logger.info("Enrich queue worker cancelled")
+                    return
+                except Exception as exc:
+                    logger.exception("Enrich queue worker loop error: %s", exc)
+                    await asyncio.sleep(5)
+
         except asyncio.CancelledError:
             logger.info("Enrich queue worker cancelled")
-            break
+            return
         except Exception as exc:
-            logger.exception("Enrich queue worker error: %s", exc)
-    try:
-        await client.aclose()
-    except Exception:
-        pass
+            logger.error("Enrich queue worker Redis connection error: %s — reconnecting in 10s", exc)
+            await asyncio.sleep(10)
+        finally:
+            if client:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
 
 
 async def _run_analyze_queue_worker() -> None:
-    """Background worker: pop result ids from Redis and run analysis only."""
-    try:
-        client = AsyncRedis.from_url(settings.REDIS_URL, decode_responses=True)
-    except Exception as exc:
-        logger.warning("Analyze queue worker not started (Redis): %s", exc)
-        return
-    logger.info("Analyze queue worker started")
+    """Background worker: pop result ids from Redis and run analysis only.
+    Never exits on its own — catches all errors and keeps the loop alive."""
     while True:
+        client = None
         try:
-            # Block up to 5s; process one id at a time for immediate analysis
-            result = await client.blpop(REDIS_KEY_ANALYZE_QUEUE, timeout=5)
-            if not result:
-                continue
-            _, id_str = result
-            try:
-                rid = uuid.UUID(id_str)
-            except (ValueError, TypeError, AttributeError):
-                logger.warning("Analyze queue: invalid id %r, skipping", id_str)
-                continue
-            db = SessionLocal()
-            try:
-                if settings.AUTO_ANALYZE_AFTER_SCRAPE:
-                    await _auto_analyze_results(db, [rid])
-            finally:
-                db.close()
+            client = AsyncRedis.from_url(settings.REDIS_URL, decode_responses=True)
+            logger.info("Analyze queue worker connected to Redis")
+
+            while True:
+                try:
+                    result = await client.blpop(REDIS_KEY_ANALYZE_QUEUE, timeout=5)
+                    if not result:
+                        continue
+                    _, id_str = result
+                    try:
+                        rid = uuid.UUID(id_str)
+                    except (ValueError, TypeError, AttributeError):
+                        logger.warning("Analyze queue: invalid id %r, skipping", id_str)
+                        continue
+
+                    if not settings.AUTO_ANALYZE_AFTER_SCRAPE:
+                        continue
+
+                    db = SessionLocal()
+                    try:
+                        await _auto_analyze_results(db, [rid])
+                    except Exception as exc:
+                        logger.warning("Analyze worker item error for %s: %s", rid, exc)
+                    finally:
+                        db.close()
+                except asyncio.CancelledError:
+                    logger.info("Analyze queue worker cancelled")
+                    return
+                except Exception as exc:
+                    logger.exception("Analyze queue worker loop error: %s", exc)
+                    await asyncio.sleep(5)
+
         except asyncio.CancelledError:
             logger.info("Analyze queue worker cancelled")
-            break
+            return
         except Exception as exc:
-            logger.exception("Analyze queue worker error: %s", exc)
-    try:
-        await client.aclose()
-    except Exception:
-        pass
+            logger.error("Analyze queue worker Redis connection error: %s — reconnecting in 10s", exc)
+            await asyncio.sleep(10)
+        finally:
+            if client:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
 
 
 _enrich_timestamps: deque = deque()
-_MIN_REQUEST_GAP = 0.7  # at least 2s between requests (~30/min max)
+_MIN_REQUEST_GAP = 0.7  # ~85/min max, well under 120/min API limit
 
 
 async def _enrich_rate_limit_wait():
@@ -447,7 +516,7 @@ async def _enrich_rate_limit_wait():
 
 
 async def _auto_enrich_results(db, result_ids: list) -> int:
-    """Enrich from EnformionGO only. Does not modify post_date (set only by scraping)."""
+    """Enrich from EnformionGO only. Re-raises 429 so the worker can pause and re-queue."""
     try:
         service = EnformionService()
     except ValueError as exc:
@@ -459,26 +528,35 @@ async def _auto_enrich_results(db, result_ids: list) -> int:
         result = db.query(SearchResult).filter(SearchResult.id == rid).first()
         if not result or result.enriched_at is not None:
             continue
-        can, _ = EnformionService.can_enrich(result.name, result.location)
-        if not can:
+        if not result.enrichable:
+            logger.debug("Skipping %s — not flagged as enrichable", rid)
             continue
 
         await _enrich_rate_limit_wait()
 
         try:
             data = await service.enrich(result.name, result.location)
+            result.enriched_at = datetime.now(timezone.utc)
             if data.get("matched"):
                 result.enriched_phones = data.get("phones")
                 result.enriched_emails = data.get("emails")
                 result.enriched_addresses = data.get("addresses")
                 result.enriched_age = data.get("age")
-                result.enriched_at = datetime.now(timezone.utc)
                 enriched += 1
+                logger.info("Enriched %s — match found", rid)
+            else:
+                logger.info("Enriched %s — no match from API, marked as attempted", rid)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429:
+                logger.warning("Auto-enrich 429 for %s — stopping batch and bubbling up", rid)
+                if enriched > 0:
+                    db.commit()
+                raise
+            logger.warning("Auto-enrich HTTP error for %s: %s", rid, exc)
         except Exception as exc:
             logger.warning("Auto-enrich failed for %s: %s", rid, exc)
 
-    if enriched > 0:
-        db.commit()
+    db.commit()
     return enriched
 
 
@@ -690,10 +768,16 @@ async def run_scheduled_scrape():
 
 
 def start_analyze_worker() -> None:
-    """Start the background task that consumes the analyze queue."""
+    """Start the background task that consumes the analyze queue.
+    Safe to call multiple times — restarts if previous task died."""
     global _analyze_worker_task
     if _analyze_worker_task is not None and not _analyze_worker_task.done():
+        logger.debug("Analyze queue worker already running")
         return
+    if _analyze_worker_task is not None and _analyze_worker_task.done():
+        exc = _analyze_worker_task.exception() if not _analyze_worker_task.cancelled() else None
+        if exc:
+            logger.warning("Previous analyze worker died with: %s — restarting", exc)
     _analyze_worker_task = asyncio.create_task(_run_analyze_queue_worker())
     logger.info("Analyze queue worker task started")
 
@@ -709,10 +793,16 @@ def stop_analyze_worker() -> None:
 
 
 def start_enrich_worker() -> None:
-    """Start the background task that consumes the enrich queue."""
+    """Start the background task that consumes the enrich queue.
+    Safe to call multiple times — restarts if previous task died."""
     global _enrich_worker_task
     if _enrich_worker_task is not None and not _enrich_worker_task.done():
+        logger.debug("Enrich queue worker already running")
         return
+    if _enrich_worker_task is not None and _enrich_worker_task.done():
+        exc = _enrich_worker_task.exception() if not _enrich_worker_task.cancelled() else None
+        if exc:
+            logger.warning("Previous enrich worker died with: %s — restarting", exc)
     _enrich_worker_task = asyncio.create_task(_run_enrich_queue_worker())
     logger.info("Enrich queue worker task started")
 
@@ -803,10 +893,10 @@ def start_scheduler():
 
     scheduler.start()
     trigger_analyze_enrich_now()
-    asyncio.ensure_future(_safe_run(run_scheduled_enrich(), "enrich-startup"))
     asyncio.ensure_future(_safe_run(run_scheduled_comment_analyze(), "comment-analyze-startup"))
     start_analyze_worker()
     start_enrich_worker()
+    logger.info("Enrich feeder deferred — first run in %d minutes (scheduled)", ENRICH_INTERVAL_MINUTES)
 
 
 def stop_scheduler():
@@ -910,7 +1000,7 @@ async def run_scheduled_analyze_enrich():
 
 
 async def run_scheduled_enrich():
-    """Periodically fetch analyzed-but-not-enriched entries from DB and push their ids to the enrich queue. Enrich worker processes the queue."""
+    """Periodically fetch enrichable-but-not-enriched entries from DB and push to queue."""
     try:
         if not _get_redis().set(REDIS_KEY_ENRICH_LOCK, "1", nx=True, ex=1800):
             logger.debug("Scheduled enrich feeder skipped — previous run still active")
@@ -923,17 +1013,35 @@ async def run_scheduled_enrich():
         try:
             if not settings.AUTO_ENRICH_AFTER_ANALYZE:
                 return
-            not_enriched = db.query(SearchResult.id).filter(
+
+            unchecked = db.query(SearchResult).filter(
                 SearchResult.analyzed_at.isnot(None),
+                SearchResult.enrichable.is_(None),
+            ).all()
+            if unchecked:
+                for r in unchecked:
+                    r.enrichable = is_enrichable(r.name, r.location)
+                db.commit()
+                logger.info("Enrich feeder: evaluated %d records with NULL enrichable flag", len(unchecked))
+
+            enrichable_ids = db.query(SearchResult.id).filter(
+                SearchResult.analyzed_at.isnot(None),
+                SearchResult.enrichable == True,  # noqa: E712
                 SearchResult.enriched_at.is_(None),
             ).all()
-            to_push = [r.id for r in not_enriched]
-            if not to_push:
-                logger.info("Scheduled enrich feeder: no un-enriched entries in DB")
+            if not enrichable_ids:
+                logger.info("Scheduled enrich feeder: no enrichable un-enriched entries in DB")
                 return
-            for rid in to_push:
-                push_to_enrich_queue(rid)
-            logger.info("Scheduled enrich feeder: pushed %d ids to enrich queue", len(to_push))
+
+            for row in enrichable_ids:
+                push_to_enrich_queue(row.id)
+
+            logger.info(
+                "Scheduled enrich feeder: pushed %d enrichable items to queue",
+                len(enrichable_ids),
+            )
+
+            start_enrich_worker()
         finally:
             db.close()
     finally:

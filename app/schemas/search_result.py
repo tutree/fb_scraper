@@ -48,6 +48,7 @@ class SearchResultResponse(SearchResultBase):
     enriched_emails: Optional[List[str]] = None
     enriched_addresses: Optional[List[Any]] = None
     enriched_age: Optional[str] = None
+    enrichable: Optional[bool] = None
     enriched_at: Optional[datetime] = None
     scraped_at: datetime
     updated_at: Optional[datetime] = None

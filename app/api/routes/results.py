@@ -26,7 +26,7 @@ from ...schemas.search_result import (
 from ...schemas.post_comment import PostCommentResponse
 from ...models.search_result import SearchResult, ResultStatus, UserType
 from ...models.post_comment import PostComment
-from ...utils.validators import clean_facebook_location, clean_facebook_name, parse_facebook_date
+from ...utils.validators import clean_facebook_location, clean_facebook_name, parse_facebook_date, is_enrichable
 
 router = APIRouter(prefix="/results", tags=["results"])
 
@@ -73,6 +73,7 @@ async def _analyze_search_result(
         result.confidence_score = 0.0
         result.analysis_message = "No post content available"
         result.analyzed_at = datetime.now(timezone.utc)
+        result.enrichable = is_enrichable(result.name, result.location)
         return _format_analyze_item(
             result=result,
             success=True,
@@ -100,6 +101,7 @@ async def _analyze_search_result(
         )
         result.analysis_message = str(analysis.get("reason") or "")
         result.analyzed_at = datetime.now(timezone.utc)
+        result.enrichable = is_enrichable(result.name, result.location)
 
         if result.post_date:
             parsed_ts = parse_facebook_date(result.post_date)
@@ -125,6 +127,7 @@ async def get_results(
     limit: int = Query(100, ge=1, le=1000),
     status: Optional[ResultStatus] = None,
     keyword: Optional[str] = None,
+    q: Optional[str] = Query(None, description="Search across name, location, and post content"),
     user_type: Optional[str] = None,
     analyzed: Optional[bool] = Query(
         None,
@@ -147,6 +150,13 @@ async def get_results(
         query = query.filter(SearchResult.status == status)
     if keyword:
         query = query.filter(SearchResult.search_keyword.ilike(f"%{keyword}%"))
+    if q:
+        search_term = f"%{q.strip()}%"
+        query = query.filter(
+            SearchResult.name.ilike(search_term)
+            | SearchResult.location.ilike(search_term)
+            | SearchResult.post_content.ilike(search_term)
+        )
     if user_type:
         query = query.filter(cast(SearchResult.user_type, String) == user_type)
     if analyzed is True:

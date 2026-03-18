@@ -30,6 +30,19 @@ class EnrichQueueItem(BaseModel):
     location: str
 
 
+class JobInfo(BaseModel):
+    running: bool = False
+    interval_minutes: int = 0
+    next_run: Optional[str] = None
+
+
+class JobsInfo(BaseModel):
+    scraper: JobInfo = JobInfo()
+    analyzer: JobInfo = JobInfo()
+    enrichment: JobInfo = JobInfo()
+    comment_analyzer: JobInfo = JobInfo()
+
+
 class AutomationStatus(BaseModel):
     scheduler_running: bool
     auto_scrape_enabled: bool
@@ -46,6 +59,7 @@ class AutomationStatus(BaseModel):
     enrich_queue_pending: int = 0
     enrich_queue_items: List[EnrichQueueItem] = []
     enrich_not_enrichable_count: int = 0
+    jobs: JobsInfo = JobsInfo()
 
 
 class JobHistoryEntry(BaseModel):
@@ -236,15 +250,24 @@ async def job_stats(db: Session = Depends(get_db)):
         .filter(SearchResult.enriched_at.isnot(None))
         .scalar() or 0
     )
-    analyzed_not_enriched = (
-        db.query(SearchResult.id, SearchResult.name, SearchResult.location)
-        .filter(SearchResult.analyzed_at.isnot(None), SearchResult.enriched_at.is_(None))
-        .all()
+    enrich_pending = (
+        db.query(sa_func.count(SearchResult.id))
+        .filter(
+            SearchResult.analyzed_at.isnot(None),
+            SearchResult.enriched_at.is_(None),
+            SearchResult.enrichable == True,  # noqa: E712
+        )
+        .scalar() or 0
     )
-    enrich_not_enrichable = sum(
-        1 for r in analyzed_not_enriched if not EnformionService.can_enrich(r.name, r.location)[0]
+    enrich_not_enrichable = (
+        db.query(sa_func.count(SearchResult.id))
+        .filter(
+            SearchResult.analyzed_at.isnot(None),
+            SearchResult.enriched_at.is_(None),
+            SearchResult.enrichable == False,  # noqa: E712
+        )
+        .scalar() or 0
     )
-    enrich_pending = len(analyzed_not_enriched) - enrich_not_enrichable
     enrich_hourly = _hourly_counts(db, SearchResult, SearchResult.enriched_at)
 
     return JobStats(

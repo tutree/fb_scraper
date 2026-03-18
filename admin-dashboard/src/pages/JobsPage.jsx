@@ -19,6 +19,33 @@ const getErrorMessage = (err, fallback) =>
 
 const formatDate = (iso) => (iso ? new Date(iso).toLocaleString() : '—')
 
+const formatCountdown = (iso) => {
+  if (!iso) return null
+  const diff = (new Date(iso).getTime() - Date.now()) / 1000
+  if (diff <= 0) return 'any moment'
+  if (diff < 60) return `${Math.round(diff)}s`
+  if (diff < 3600) return `${Math.round(diff / 60)}m`
+  return `${Math.floor(diff / 3600)}h ${Math.round((diff % 3600) / 60)}m`
+}
+
+function JobStatusBadge({ jobInfo }) {
+  if (!jobInfo) return null
+  const countdown = formatCountdown(jobInfo.next_run)
+  return (
+    <div className="flex items-center gap-2">
+      <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${jobInfo.running ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
+        <span className={`h-1.5 w-1.5 rounded-full ${jobInfo.running ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'}`} />
+        {jobInfo.running ? 'Running' : 'Idle'}
+      </span>
+      {countdown && (
+        <span className="text-[10px] text-slate-400" title={`Next run: ${jobInfo.next_run}`}>
+          next in {countdown}
+        </span>
+      )}
+    </div>
+  )
+}
+
 const formatHour = (iso) => {
   if (!iso) return ''
   const d = new Date(iso)
@@ -189,6 +216,7 @@ export default function JobsPage() {
                 <h3 className="text-sm font-bold text-indigo-900">Scraper</h3>
                 <span className="rounded-full bg-indigo-100 px-2.5 py-0.5 text-xs font-semibold text-indigo-700">{jobStats.scraper_total} total</span>
               </div>
+              <JobStatusBadge jobInfo={status?.jobs?.scraper} />
               <div className="mt-2 flex gap-2">
                 <StatPill label="today" value={jobStats.scraper_today} color="bg-indigo-100 text-indigo-800" />
               </div>
@@ -204,6 +232,7 @@ export default function JobsPage() {
                 <h3 className="text-sm font-bold text-emerald-900">Post Analyzer</h3>
                 <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-semibold text-emerald-700">{jobStats.post_analyze_done} done</span>
               </div>
+              <JobStatusBadge jobInfo={status?.jobs?.analyzer} />
               <div className="mt-2 flex flex-wrap gap-2">
                 <StatPill label="pending" value={jobStats.post_analyze_pending} color="bg-amber-100 text-amber-800" />
                 <StatPill label="customers" value={jobStats.post_analyze_customer} color="bg-sky-100 text-sky-800" />
@@ -234,6 +263,7 @@ export default function JobsPage() {
                 </div>
                 <span className="rounded-full bg-violet-100 px-2.5 py-0.5 text-xs font-semibold text-violet-700">{jobStats.comment_analyze_done} done</span>
               </div>
+              <JobStatusBadge jobInfo={status?.jobs?.comment_analyzer} />
               <div className="mt-2 flex flex-wrap gap-2">
                 <StatPill label="pending" value={jobStats.comment_analyze_pending} color="bg-amber-100 text-amber-800" />
                 <StatPill label="customers" value={jobStats.comment_analyze_customer} color="bg-sky-100 text-sky-800" />
@@ -258,6 +288,7 @@ export default function JobsPage() {
                 <h3 className="text-sm font-bold text-amber-900">Enrichment</h3>
                 <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-semibold text-amber-700">{jobStats.enrich_done} done</span>
               </div>
+              <JobStatusBadge jobInfo={status?.jobs?.enrichment} />
               <div className="mt-2 flex flex-wrap gap-2">
                 <StatPill label="pending" value={jobStats.enrich_pending} color="bg-amber-100 text-amber-800" />
                 <StatPill label="not enrichable" value={jobStats.enrich_not_enrichable} color="bg-rose-100 text-rose-700" />
@@ -343,7 +374,7 @@ export default function JobsPage() {
               <span className="ml-2 text-sm font-normal text-amber-600">· {status.enrich_not_enrichable_count} not enrichable</span>
             )}
           </p>
-          <p className="mt-0.5 text-xs text-slate-500">Independent job fetches analyzed-but-not-enriched from DB; worker enriches via EnformionGO. “Not enrichable” = discovered but missing name/location or single name.</p>
+          <p className="mt-0.5 text-xs text-slate-500">Only items with full name + US location are enrichable. Not enrichable = missing full name or non-US location.</p>
           {Array.isArray(status?.enrich_queue_items) && status.enrich_queue_items.length > 0 && (
             <div className="mt-3 max-h-48 overflow-y-auto rounded border border-slate-200 bg-white">
               <table className="min-w-full text-left text-xs">

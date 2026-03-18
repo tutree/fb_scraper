@@ -13,8 +13,8 @@ from ..utils.validators import clean_facebook_location
 
 logger = get_logger(__name__)
 
-MAX_RETRIES = 3
-RETRY_BACKOFF_SECONDS = [30, 60, 120]
+MAX_RETRIES = 1
+RETRY_BACKOFF_SECONDS = [5]
 
 ENFORMION_URL = "https://devapi.enformion.com/contact/enrich"
 

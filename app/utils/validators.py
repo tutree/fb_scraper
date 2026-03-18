@@ -360,3 +360,54 @@ def parse_facebook_date(raw: Optional[str], now: Optional[datetime] = None) -> O
 
     _logger.debug("Could not parse Facebook date: %r", raw)
     return None
+
+
+_US_STATES = {
+    "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
+    "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
+    "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana",
+    "maine", "maryland", "massachusetts", "michigan", "minnesota",
+    "mississippi", "missouri", "montana", "nebraska", "nevada",
+    "new hampshire", "new jersey", "new mexico", "new york",
+    "north carolina", "north dakota", "ohio", "oklahoma", "oregon",
+    "pennsylvania", "rhode island", "south carolina", "south dakota",
+    "tennessee", "texas", "utah", "vermont", "virginia", "washington",
+    "west virginia", "wisconsin", "wyoming", "district of columbia",
+}
+
+_US_STATE_ABBREVS = {
+    "al", "ak", "az", "ar", "ca", "co", "ct", "de", "fl", "ga",
+    "hi", "id", "il", "in", "ia", "ks", "ky", "la", "me", "md",
+    "ma", "mi", "mn", "ms", "mo", "mt", "ne", "nv", "nh", "nj",
+    "nm", "ny", "nc", "nd", "oh", "ok", "or", "pa", "ri", "sc",
+    "sd", "tn", "tx", "ut", "vt", "va", "wa", "wv", "wi", "wy", "dc",
+}
+
+_US_KEYWORDS = {"united states", "usa", "u.s.a.", "u.s."}
+
+
+def is_us_location(location: Optional[str]) -> bool:
+    """Check if a Facebook location string refers to a US location."""
+    if not location or not location.strip():
+        return False
+    loc = location.strip().lower()
+
+    for kw in _US_KEYWORDS:
+        if kw in loc:
+            return True
+
+    parts = [p.strip() for p in re.split(r"[,·\-/]", loc) if p.strip()]
+    for part in parts:
+        if part in _US_STATES or part in _US_STATE_ABBREVS:
+            return True
+
+    return False
+
+
+def is_enrichable(name: Optional[str], location: Optional[str]) -> bool:
+    """Check if a result has a full name (2+ parts) and a US location."""
+    if not name or not name.strip():
+        return False
+    if len(name.strip().split()) < 2:
+        return False
+    return is_us_location(location)

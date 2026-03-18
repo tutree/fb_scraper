@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, Text, Enum, Index, Float
+from sqlalchemy import Boolean, Column, String, DateTime, Text, Enum, Index, Float
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -40,6 +40,9 @@ class SearchResult(Base):
     confidence_score = Column(Float, nullable=True)  # 0-1 confidence
     analysis_message = Column(Text, nullable=True)  # Reason text from AI (no raw JSON)
     analyzed_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Enrichment eligibility: True = has full name + US location, False = not enrichable, None = not yet checked
+    enrichable = Column(Boolean, nullable=True, default=None)
 
     # EnformionGO contact enrichment fields
     enriched_phones = Column(JSONB, nullable=True)     # [{"number","type","is_connected"}]
