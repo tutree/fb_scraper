@@ -2,6 +2,7 @@
 EnformionGO Contact Enrichment API integration.
 Docs: https://enformiongo.readme.io/reference/contact-enrichment
 """
+import asyncio
 import json
 import httpx
 from typing import Dict, Optional, Tuple
@@ -11,6 +12,9 @@ from ..core.logging_config import get_logger
 from ..utils.validators import clean_facebook_location
 
 logger = get_logger(__name__)
+
+MAX_RETRIES = 3
+RETRY_BACKOFF_SECONDS = [30, 60, 120]
 
 ENFORMION_URL = "https://devapi.enformion.com/contact/enrich"
 
@@ -93,32 +97,53 @@ class EnformionService:
             payload,
         )
 
-        async with httpx.AsyncClient(
-            timeout=30.0,
-            http1=True,
-            http2=False,
-            follow_redirects=True,
-        ) as client:
-            # Serialize payload exactly like curl: compact JSON, no extra keys
-            body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-            resp = await client.post(
-                ENFORMION_URL,
-                content=body,
-                headers=headers,
-            )
+        body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+
+        data = None
+        for attempt in range(MAX_RETRIES + 1):
+            async with httpx.AsyncClient(
+                timeout=30.0,
+                http1=True,
+                http2=False,
+                follow_redirects=True,
+            ) as client:
+                resp = await client.post(
+                    ENFORMION_URL,
+                    content=body,
+                    headers=headers,
+                )
+
+            if resp.status_code == 429:
+                if attempt < MAX_RETRIES:
+                    wait = RETRY_BACKOFF_SECONDS[min(attempt, len(RETRY_BACKOFF_SECONDS) - 1)]
+                    retry_after = resp.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            wait = max(wait, int(retry_after))
+                        except (ValueError, TypeError):
+                            pass
+                    logger.warning(
+                        "EnformionGO 429 rate-limited (attempt %d/%d). Sleeping %ds before retry...",
+                        attempt + 1, MAX_RETRIES + 1, wait,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                else:
+                    logger.error("EnformionGO 429 after %d retries — giving up for this request", MAX_RETRIES + 1)
+                    resp.raise_for_status()
+
             if resp.status_code >= 400:
                 body_preview = (resp.text or "")[:500]
-                logger.error(
-                    "EnformionGO API error %d: %s",
-                    resp.status_code,
-                    body_preview,
-                )
+                logger.error("EnformionGO API error %d: %s", resp.status_code, body_preview)
                 if resp.status_code == 444:
                     logger.error(
-                        "HTTP 444 often means invalid request or auth. Check ENFORMION_AP_NAME / ENFORMION_AP_PASSWORD and request format (Address.addressLine1/addressLine2)."
+                        "HTTP 444 often means geo-block or auth error. "
+                        "Check ENFORMION_AP_NAME / ENFORMION_AP_PASSWORD."
                     )
                 resp.raise_for_status()
+
             data = resp.json()
+            break
 
         person = data.get("person")
         if not person:

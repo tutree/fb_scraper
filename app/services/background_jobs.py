@@ -11,6 +11,7 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 
+import httpx
 import redis
 from redis.asyncio import Redis as AsyncRedis
 from apscheduler.jobstores.redis import RedisJobStore
@@ -47,7 +48,7 @@ REDIS_KEY_COMMENT_ANALYZE_LOCK = f"{REDIS_PREFIX}comment_analyze_lock"
 MAX_HISTORY = 50
 ANALYZE_ENRICH_INTERVAL_MINUTES = 15
 ENRICH_INTERVAL_MINUTES = 15
-ENRICH_MAX_PER_MINUTE = 115
+ENRICH_MAX_PER_MINUTE = 90
 COMMENT_ANALYZE_INTERVAL_MINUTES = 60
 
 _scheduler: Optional[AsyncIOScheduler] = None
@@ -358,6 +359,13 @@ async def _run_enrich_queue_worker() -> None:
             try:
                 if settings.AUTO_ENRICH_AFTER_ANALYZE:
                     await _auto_enrich_results(db, [rid])
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 429:
+                    logger.warning("Enrich worker got 429 after retries — re-queuing %s and pausing 60s", rid)
+                    await client.rpush(REDIS_KEY_ENRICH_QUEUE, str(rid))
+                    await asyncio.sleep(60)
+                else:
+                    logger.warning("Enrich worker HTTP error for %s: %s", rid, exc)
             finally:
                 db.close()
         except asyncio.CancelledError:
@@ -409,18 +417,32 @@ async def _run_analyze_queue_worker() -> None:
 
 
 _enrich_timestamps: deque = deque()
+_MIN_REQUEST_GAP = 0.7  # at least 2s between requests (~30/min max)
 
 
 async def _enrich_rate_limit_wait():
     """Sleep if needed to stay under ENRICH_MAX_PER_MINUTE requests per rolling 60s window."""
     now = time.monotonic()
+
+    # Enforce minimum gap between consecutive requests
+    if _enrich_timestamps:
+        elapsed_since_last = now - _enrich_timestamps[-1]
+        if elapsed_since_last < _MIN_REQUEST_GAP:
+            await asyncio.sleep(_MIN_REQUEST_GAP - elapsed_since_last)
+            now = time.monotonic()
+
     # Discard timestamps older than 60s
     while _enrich_timestamps and _enrich_timestamps[0] <= now - 60:
         _enrich_timestamps.popleft()
+
     if len(_enrich_timestamps) >= ENRICH_MAX_PER_MINUTE:
-        wait = 60 - (now - _enrich_timestamps[0]) + 0.1
+        wait = 60 - (now - _enrich_timestamps[0]) + 1.0
         logger.info("Enrich rate limit: %d requests in last 60s, sleeping %.1fs", len(_enrich_timestamps), wait)
         await asyncio.sleep(wait)
+        now = time.monotonic()
+        while _enrich_timestamps and _enrich_timestamps[0] <= now - 60:
+            _enrich_timestamps.popleft()
+
     _enrich_timestamps.append(time.monotonic())
 
 
