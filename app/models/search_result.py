@@ -29,6 +29,7 @@ class SearchResult(Base):
     post_content = Column(Text, nullable=True)
     post_url = Column(String, nullable=True)  # Removed unique constraint
     post_date = Column(String, nullable=True)
+    post_date_timestamp = Column(DateTime(timezone=True), nullable=True)
     search_keyword = Column(String, nullable=False)
     source = Column(String, default="facebook")
     status = Column(Enum(ResultStatus), default=ResultStatus.PENDING)

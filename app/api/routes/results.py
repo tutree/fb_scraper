@@ -26,7 +26,7 @@ from ...schemas.search_result import (
 from ...schemas.post_comment import PostCommentResponse
 from ...models.search_result import SearchResult, ResultStatus, UserType
 from ...models.post_comment import PostComment
-from ...utils.validators import clean_facebook_location, clean_facebook_name
+from ...utils.validators import clean_facebook_location, clean_facebook_name, parse_facebook_date
 
 router = APIRouter(prefix="/results", tags=["results"])
 
@@ -101,6 +101,11 @@ async def _analyze_search_result(
         result.analysis_message = str(analysis.get("reason") or "")
         result.analyzed_at = datetime.now(timezone.utc)
 
+        if result.post_date:
+            parsed_ts = parse_facebook_date(result.post_date)
+            if parsed_ts:
+                result.post_date_timestamp = parsed_ts
+
         return _format_analyze_item(
             result=result,
             success=True,
@@ -152,6 +157,7 @@ async def get_results(
     sort_map = {
         "scraped_at": SearchResult.scraped_at,
         "post_date": SearchResult.post_date,
+        "post_date_timestamp": SearchResult.post_date_timestamp,
         "confidence_score": SearchResult.confidence_score,
         "analyzed_at": SearchResult.analyzed_at,
         "name": SearchResult.name,

@@ -224,12 +224,28 @@ EXTRACT_DIALOG_COMMENTS_JS = """
     const articles = Array.from(
         dialog.querySelectorAll('div[role="article"][aria-label^="Comment by"]')
     );
+    const timeRx = /\s+((just now)|(a|an|\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago|(yesterday|today)(\s+at\s+.+)?|\d+[hmdwy])$/i;
     const out = [];
     for (let idx = 0; idx < articles.length && out.length < limit; idx++) {
         const a = articles[idx];
         const label = a.getAttribute('aria-label') || '';
-        const m = label.match(/^Comment by ([^,]+)/);
-        const name = m ? m[1].trim() : 'Unknown';
+        let name = 'Unknown';
+        let ts = '';
+
+        const commaMatch = label.match(/^Comment by (.+?),\s*(.+)$/);
+        if (commaMatch) {
+            name = commaMatch[1].trim();
+            ts = commaMatch[2].trim();
+        } else {
+            const rest = label.replace(/^Comment by\s+/, '');
+            const tMatch = rest.match(timeRx);
+            if (tMatch) {
+                name = rest.slice(0, tMatch.index).trim() || 'Unknown';
+                ts = tMatch[0].trim();
+            } else {
+                name = rest.trim() || 'Unknown';
+            }
+        }
 
         const profileLink = a.querySelector('a[href*="facebook.com"]');
         const profileUrl = profileLink
@@ -249,8 +265,6 @@ EXTRACT_DIALOG_COMMENTS_JS = """
                 bodyText = autoBlocks[0].innerText.trim();
             }
         }
-
-        const ts = label.replace(/^Comment by [^,]+,?\s*/, '').trim();
 
         out.push({
             author_name: name,

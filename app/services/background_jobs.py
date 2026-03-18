@@ -5,8 +5,10 @@ state survive container restarts.
 """
 import asyncio
 import json
+import time
 import uuid
-from datetime import datetime, timezone
+from collections import deque
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 
 import redis
@@ -19,17 +21,19 @@ from ..core.config import settings
 from ..core.database import SessionLocal
 from ..core.logging_config import get_logger
 from ..models.search_result import SearchResult, UserType
+from ..models.post_comment import PostComment
 from ..services.gemini_classifier import GeminiClassifier
 from ..services.enformion_service import EnformionService
 from ..services.scraper import ScraperService
 from ..services.facebook_cookie_manager import get_cookie_status
-from ..utils.validators import clean_facebook_location, clean_facebook_name
+from ..utils.validators import clean_facebook_location, clean_facebook_name, parse_facebook_date
 
 logger = get_logger(__name__)
 
 JOB_ID = "auto_scrape_job"
 JOB_ID_ANALYZE_ENRICH = "auto_analyze_enrich_job"
 JOB_ID_ENRICH = "auto_enrich_job"
+JOB_ID_COMMENT_ANALYZE = "auto_comment_analyze_job"
 REDIS_PREFIX = "autojob:"
 REDIS_KEY_STATUS = f"{REDIS_PREFIX}status"
 REDIS_KEY_LOCK = f"{REDIS_PREFIX}running_lock"
@@ -39,9 +43,12 @@ REDIS_KEY_ANALYZE_QUEUE = f"{REDIS_PREFIX}analyze_queue"
 REDIS_KEY_ANALYZE_ENRICH_LOCK = f"{REDIS_PREFIX}analyze_enrich_lock"
 REDIS_KEY_ENRICH_QUEUE = f"{REDIS_PREFIX}enrich_queue"
 REDIS_KEY_ENRICH_LOCK = f"{REDIS_PREFIX}enrich_lock"
+REDIS_KEY_COMMENT_ANALYZE_LOCK = f"{REDIS_PREFIX}comment_analyze_lock"
 MAX_HISTORY = 50
 ANALYZE_ENRICH_INTERVAL_MINUTES = 15
 ENRICH_INTERVAL_MINUTES = 15
+ENRICH_MAX_PER_MINUTE = 115
+COMMENT_ANALYZE_INTERVAL_MINUTES = 60
 
 _scheduler: Optional[AsyncIOScheduler] = None
 _redis: Optional[redis.Redis] = None
@@ -254,7 +261,7 @@ def get_status() -> dict:
 
 
 async def _auto_analyze_results(db, result_ids: list) -> int:
-    """Run AI classification only. Does not modify post_date (set only by scraping)."""
+    """Run AI classification and parse post_date into post_date_timestamp."""
     try:
         classifier = GeminiClassifier()
     except ValueError as exc:
@@ -300,7 +307,20 @@ async def _auto_analyze_results(db, result_ids: list) -> int:
             result.confidence_score = max(0.0, min(1.0, float(analysis.get("confidence", 0.0))))
             result.analysis_message = str(analysis.get("reason") or "")
             result.analyzed_at = datetime.now(timezone.utc)
+
+            if result.post_date and not result.post_date_timestamp:
+                parsed_ts = parse_facebook_date(result.post_date)
+                if parsed_ts:
+                    result.post_date_timestamp = parsed_ts
+                    logger.debug("Post %s: parsed '%s' → %s", rid, result.post_date, parsed_ts)
+
             analyzed += 1
+
+            if result.user_type == UserType.CUSTOMER:
+                deleted = db.query(PostComment).filter(PostComment.search_result_id == result.id).delete()
+                if deleted:
+                    logger.info("Deleted %d tutor comments from CUSTOMER post %s", deleted, rid)
+
         except Exception as exc:
             logger.warning("Auto-analyze failed for %s: %s", rid, exc)
 
@@ -382,6 +402,22 @@ async def _run_analyze_queue_worker() -> None:
         pass
 
 
+_enrich_timestamps: deque = deque()
+
+
+async def _enrich_rate_limit_wait():
+    """Sleep if needed to stay under ENRICH_MAX_PER_MINUTE requests per rolling 60s window."""
+    now = time.monotonic()
+    # Discard timestamps older than 60s
+    while _enrich_timestamps and _enrich_timestamps[0] <= now - 60:
+        _enrich_timestamps.popleft()
+    if len(_enrich_timestamps) >= ENRICH_MAX_PER_MINUTE:
+        wait = 60 - (now - _enrich_timestamps[0]) + 0.1
+        logger.info("Enrich rate limit: %d requests in last 60s, sleeping %.1fs", len(_enrich_timestamps), wait)
+        await asyncio.sleep(wait)
+    _enrich_timestamps.append(time.monotonic())
+
+
 async def _auto_enrich_results(db, result_ids: list) -> int:
     """Enrich from EnformionGO only. Does not modify post_date (set only by scraping)."""
     try:
@@ -399,6 +435,8 @@ async def _auto_enrich_results(db, result_ids: list) -> int:
         if not can:
             continue
 
+        await _enrich_rate_limit_wait()
+
         try:
             data = await service.enrich(result.name, result.location)
             if data.get("matched"):
@@ -414,6 +452,114 @@ async def _auto_enrich_results(db, result_ids: list) -> int:
     if enriched > 0:
         db.commit()
     return enriched
+
+
+async def _auto_analyze_comments(db, batch_size: int = 50) -> int:
+    """Classify un-analyzed comments. Skips comments on CUSTOMER posts (those get deleted)."""
+    try:
+        classifier = GeminiClassifier()
+    except ValueError as exc:
+        logger.warning("Comment auto-analyze skipped — classifier not available: %s", exc)
+        return 0
+
+    comments = (
+        db.query(PostComment)
+        .filter(PostComment.analyzed_at.is_(None))
+        .limit(batch_size)
+        .all()
+    )
+    if not comments:
+        return 0
+
+    logger.info("Comment auto-analyze batch: processing %d comments", len(comments))
+
+    result_ids = list({c.search_result_id for c in comments})
+    parents = {
+        r.id: r
+        for r in db.query(SearchResult).filter(SearchResult.id.in_(result_ids)).all()
+    }
+
+    analyzed = 0
+    for i, comment in enumerate(comments):
+        parent = parents.get(comment.search_result_id)
+        post_context = (parent.post_content or "") if parent else ""
+        search_keyword = (parent.search_keyword or "") if parent else ""
+
+        if not comment.comment_text or not comment.comment_text.strip():
+            comment.user_type = UserType.UNKNOWN
+            comment.confidence_score = 0.0
+            comment.analysis_message = "No comment text"
+            comment.analyzed_at = datetime.now(timezone.utc)
+            analyzed += 1
+            db.commit()
+            continue
+
+        try:
+            result = await classifier.classify_comment_user(
+                comment_text=comment.comment_text,
+                author_name=comment.author_name or "",
+                post_context=post_context,
+                search_keyword=search_keyword,
+            )
+            type_mapping = {
+                "CUSTOMER": UserType.CUSTOMER,
+                "TUTOR": UserType.TUTOR,
+                "UNKNOWN": UserType.UNKNOWN,
+            }
+            comment.user_type = type_mapping.get(
+                str(result.get("type", "UNKNOWN")).upper(), UserType.UNKNOWN
+            )
+            comment.confidence_score = max(0.0, min(1.0, float(result.get("confidence", 0.0))))
+            comment.analysis_message = str(result.get("reason") or "")
+            comment.analyzed_at = datetime.now(timezone.utc)
+            analyzed += 1
+            db.commit()
+            if analyzed % 10 == 0:
+                logger.info("Comment auto-analyze: %d/%d done in this batch", analyzed, len(comments))
+        except Exception as exc:
+            logger.warning("Comment auto-analyze failed for comment %s: %s", comment.id, exc)
+            db.rollback()
+
+    return analyzed
+
+
+async def run_scheduled_comment_analyze():
+    """Periodically analyze un-analyzed comments from DB."""
+    logger.info("Comment analyzer job triggered")
+    try:
+        if not _get_redis().set(REDIS_KEY_COMMENT_ANALYZE_LOCK, "1", nx=True, ex=3600):
+            logger.warning("Scheduled comment analyze skipped — previous run still active (lock exists)")
+            return
+    except Exception as exc:
+        logger.warning("Comment analyze lock check failed: %s — proceeding anyway", exc)
+
+    logger.info("Comment analyzer job started (lock acquired)")
+    try:
+        db = SessionLocal()
+        try:
+            pending = db.query(PostComment).filter(PostComment.analyzed_at.is_(None)).count()
+            logger.info("Comment analyzer: %d un-analyzed comments in DB", pending)
+            if pending == 0:
+                return
+
+            total = 0
+            while True:
+                batch = await _auto_analyze_comments(db, batch_size=50)
+                if batch == 0:
+                    break
+                total += batch
+                logger.info("Comment analyze progress: %d/%d analyzed", total, pending)
+            logger.info("Scheduled comment analyze complete: %d comments analyzed", total)
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.exception("Comment analyzer job failed: %s", exc)
+    finally:
+        try:
+            _get_redis().delete(REDIS_KEY_COMMENT_ANALYZE_LOCK)
+        except Exception:
+            pass
+        logger.info("Comment analyzer job finished (lock released)")
 
 
 def _update_step(run_id: str, step: str, started_at: str):
@@ -565,6 +711,7 @@ def start_scheduler():
     try:
         _get_redis().delete(REDIS_KEY_ANALYZE_ENRICH_LOCK)
         _get_redis().delete(REDIS_KEY_ENRICH_LOCK)
+        _get_redis().delete(REDIS_KEY_COMMENT_ANALYZE_LOCK)
     except Exception:
         pass
 
@@ -609,9 +756,23 @@ def start_scheduler():
         ENRICH_INTERVAL_MINUTES,
     )
 
+    # Periodic job: analyze un-analyzed comments every hour
+    scheduler.add_job(
+        run_scheduled_comment_analyze,
+        trigger=IntervalTrigger(minutes=COMMENT_ANALYZE_INTERVAL_MINUTES),
+        id=JOB_ID_COMMENT_ANALYZE,
+        replace_existing=True,
+        max_instances=1,
+    )
+    logger.info(
+        "Auto comment analyze job scheduled: every %d minutes",
+        COMMENT_ANALYZE_INTERVAL_MINUTES,
+    )
+
     scheduler.start()
     trigger_analyze_enrich_now()
-    asyncio.ensure_future(run_scheduled_enrich())  # Run enrich feeder once on startup
+    asyncio.ensure_future(_safe_run(run_scheduled_enrich(), "enrich-startup"))
+    asyncio.ensure_future(_safe_run(run_scheduled_comment_analyze(), "comment-analyze-startup"))
     start_analyze_worker()
     start_enrich_worker()
 
@@ -663,13 +824,26 @@ def update_config(auto_analyze: Optional[bool] = None, auto_enrich: Optional[boo
     _save_config()
 
 
+async def _safe_run(coro, label: str):
+    """Wrapper that logs any exception from a fire-and-forget coroutine."""
+    try:
+        await coro
+    except Exception:
+        logger.exception("Background task '%s' failed with unhandled exception", label)
+
+
 def trigger_now():
     asyncio.ensure_future(run_scheduled_scrape())
 
 
 def trigger_analyze_enrich_now():
     """Run analyze/enrich job once on startup to process backlog immediately."""
-    asyncio.ensure_future(run_scheduled_analyze_enrich())
+    asyncio.ensure_future(_safe_run(run_scheduled_analyze_enrich(), "analyze-enrich-startup"))
+
+
+def trigger_comment_analyze_now():
+    """Manually trigger comment analyzer."""
+    asyncio.ensure_future(_safe_run(run_scheduled_comment_analyze(), "comment-analyze-manual"))
 
 
 async def run_scheduled_analyze_enrich():

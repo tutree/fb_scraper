@@ -192,29 +192,19 @@ const buildMonitor = (logs, task) => {
 export default function ScraperPage() {
   const [scraperTask, setScraperTask] = useState(null)
   const [scraperLogs, setScraperLogs] = useState([])
-  const [scraperStarting, setScraperStarting] = useState(false)
-  const [scraperStopping, setScraperStopping] = useState(false)
   const [cookieModalOpen, setCookieModalOpen] = useState(false)
   const [cookieJsonInput, setCookieJsonInput] = useState('')
   const [cookieSubmitting, setCookieSubmitting] = useState(false)
   const [cookieStatus, setCookieStatus] = useState(null)
   const [feedback, setFeedback] = useState(null)
-  const [scraperConfig, setScraperConfig] = useState({
-    keywords: '',
-    maxResults: 10,
-    useDefaultKeywords: false,
-  })
   const [logLines, setLogLines] = useState(120)
   const [showTechnicalLogs, setShowTechnicalLogs] = useState(false)
   const logsContainerRef = useRef(null)
 
-  const parseKeywords = (raw) => {
-    const parts = String(raw || '')
-      .split(/\r?\n|,|;/)
-      .map((item) => item.trim())
-      .filter(Boolean)
-    return [...new Set(parts)]
-  }
+  const [keywordModalOpen, setKeywordModalOpen] = useState(false)
+  const [keywordInput, setKeywordInput] = useState('')
+  const [savedKeywords, setSavedKeywords] = useState([])
+  const [keywordSubmitting, setKeywordSubmitting] = useState(false)
 
   const fetchScraperStatus = useCallback(async () => {
     try {
@@ -243,53 +233,45 @@ export default function ScraperPage() {
     }
   }, [])
 
-  const startScraper = async () => {
-    setScraperStarting(true)
-    setFeedback(null)
+  const fetchKeywords = useCallback(async () => {
     try {
-      const keywords = parseKeywords(scraperConfig.keywords)
-      if (!scraperConfig.useDefaultKeywords && keywords.length === 0) {
-        setFeedback({
-          type: 'error',
-          text: 'Enter at least one keyword or enable "Use default keywords".',
-        })
-        return
-      }
+      const res = await api.get(`/search/keywords`)
+      setSavedKeywords(res.data?.keywords || [])
+    } catch {
+      setSavedKeywords([])
+    }
+  }, [])
 
-      await api.post(`/search/start`, {
-        keywords: scraperConfig.useDefaultKeywords ? null : keywords,
-        max_results: Math.max(1, Number(scraperConfig.maxResults) || 100),
-        use_proxy: true,
-      })
-
+  const submitKeywords = async () => {
+    const newKws = keywordInput
+      .split(/\r?\n|,|;/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+    if (newKws.length === 0) return
+    setKeywordSubmitting(true)
+    try {
+      const res = await api.post(`/search/keywords`, { keywords: newKws })
+      setSavedKeywords(res.data?.keywords || [])
+      setKeywordInput('')
       setFeedback({
         type: 'success',
-        text: scraperConfig.useDefaultKeywords
-          ? 'Scraper started with default keywords from config/keywords.json.'
-          : `Scraper started with ${keywords.length} custom keyword(s).`,
+        text: res.data?.added?.length
+          ? `Added ${res.data.added.length} keyword(s). Total: ${res.data.total}`
+          : 'All keywords already exist.',
       })
-      await Promise.all([fetchScraperStatus(), fetchScraperLogs(logLines)])
     } catch (err) {
-      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to start scraper') })
+      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to add keywords') })
     } finally {
-      setScraperStarting(false)
+      setKeywordSubmitting(false)
     }
   }
 
-  const stopScraper = async () => {
-    setScraperStopping(true)
-    setFeedback(null)
+  const removeKeyword = async (kw) => {
     try {
-      const res = await api.post(`/search/stop`)
-      setFeedback({
-        type: 'success',
-        text: res.data?.message || 'Stop requested. Waiting for scraper to halt.',
-      })
-      await Promise.all([fetchScraperStatus(), fetchScraperLogs(logLines)])
+      const res = await api.delete(`/search/keywords`, { params: { keyword: kw } })
+      setSavedKeywords(res.data?.keywords || [])
     } catch (err) {
-      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to stop scraper') })
-    } finally {
-      setScraperStopping(false)
+      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to remove keyword') })
     }
   }
 
@@ -318,7 +300,8 @@ export default function ScraperPage() {
     fetchScraperStatus()
     fetchScraperLogs(logLines)
     fetchCookieStatus()
-  }, [fetchScraperStatus, fetchScraperLogs, fetchCookieStatus, logLines])
+    fetchKeywords()
+  }, [fetchScraperStatus, fetchScraperLogs, fetchCookieStatus, fetchKeywords, logLines])
 
   useEffect(() => {
     const status = scraperTask?.status
@@ -339,10 +322,7 @@ export default function ScraperPage() {
   }, [scraperLogs])
 
   const scraperStatus = scraperTask?.status || 'idle'
-  const scraperIsActive = ['running', 'stopping'].includes(scraperStatus)
   const scraperBadgeClass = SCRAPER_STATUS_BADGES[scraperStatus] || SCRAPER_STATUS_BADGES.idle
-  const canStartScraper = !scraperIsActive && !scraperStarting
-  const canStopScraper = scraperIsActive && scraperStatus !== 'stopped' && !scraperStopping
   const monitor = useMemo(() => buildMonitor(scraperLogs, scraperTask), [scraperLogs, scraperTask])
 
   return (
@@ -358,124 +338,68 @@ export default function ScraperPage() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="text-lg font-semibold text-slate-900">Task Status</h2>
-              <p className="text-xs text-slate-600">Start and stop scraper jobs from this page.</p>
+              <p className="text-xs text-slate-600">Monitor the background scraper and manage cookies &amp; keywords.</p>
             </div>
             <span className={`rounded-full px-3 py-1 text-xs font-semibold capitalize ${scraperBadgeClass}`}>
               {scraperStatus}
             </span>
           </div>
 
-          <div className="mt-4 grid gap-3 lg:grid-cols-2">
-            <div className="space-y-3 rounded-xl border border-slate-200 p-3">
-              <h3 className="text-sm font-semibold text-slate-800">Actions</h3>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={startScraper}
-                  disabled={!canStartScraper}
-                  className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:bg-slate-400"
-                >
-                  {scraperStarting ? 'Starting...' : 'Start Scraper'}
-                </button>
-                <button
-                  type="button"
-                  onClick={stopScraper}
-                  disabled={!canStopScraper}
-                  className="rounded-lg border border-rose-300 bg-rose-50 px-4 py-2 text-sm font-medium text-rose-700 disabled:opacity-40"
-                >
-                  {scraperStopping ? 'Stopping...' : 'Stop Scraper'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => { fetchScraperStatus(); fetchScraperLogs(logLines) }}
-                  className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
-                >
-                  Refresh
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setCookieModalOpen(true)}
-                  className="rounded-lg border border-sky-300 bg-sky-50 px-4 py-2 text-sm font-medium text-sky-700 hover:bg-sky-100"
-                >
-                  Update Facebook Cookie
-                </button>
-              </div>
-              <p className="text-xs text-slate-500">
-                Task: {scraperTask?.task_id || 'none'} {scraperTask?.updated_at ? `| Updated ${new Date(scraperTask.updated_at).toLocaleString()}` : ''}
+          <div className="mt-4 space-y-3 rounded-xl border border-slate-200 p-3">
+            <h3 className="text-sm font-semibold text-slate-800">Actions</h3>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setCookieModalOpen(true)}
+                className="rounded-lg border border-sky-300 bg-sky-50 px-4 py-2 text-sm font-medium text-sky-700 hover:bg-sky-100"
+              >
+                Update Facebook Cookie
+              </button>
+              <button
+                type="button"
+                onClick={() => { setKeywordModalOpen(true); fetchKeywords() }}
+                className="rounded-lg border border-violet-300 bg-violet-50 px-4 py-2 text-sm font-medium text-violet-700 hover:bg-violet-100"
+              >
+                Add Keywords
+              </button>
+              <button
+                type="button"
+                onClick={() => { fetchScraperStatus(); fetchScraperLogs(logLines) }}
+                className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
+              >
+                Refresh
+              </button>
+            </div>
+            <p className="text-xs text-slate-500">
+              Task: {scraperTask?.task_id || 'none'} {scraperTask?.updated_at ? `| Updated ${new Date(scraperTask.updated_at).toLocaleString()}` : ''}
+            </p>
+            <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+              <p>
+                Active account UIDs: {cookieStatus?.active_account_uids?.length ? cookieStatus.active_account_uids.join(', ') : 'none configured'}
               </p>
-              <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-                <p>
-                  Active account UIDs: {cookieStatus?.active_account_uids?.length ? cookieStatus.active_account_uids.join(', ') : 'none configured'}
-                </p>
-                <p>
-                  Latest saved cookie UID: {cookieStatus?.latest_cookie_uid || 'none'}
-                  {cookieStatus?.updated_at ? ` | Updated ${new Date(cookieStatus.updated_at).toLocaleString()}` : ''}
-                </p>
-                <p>
-                  Saved cookie count: {cookieStatus?.cookie_count ?? 0}
-                </p>
-              </div>
-              {scraperTask?.requested_keywords && (
-                <p className="text-xs text-slate-500">
-                  Requested keywords: {scraperTask.requested_keywords.join(', ')}
-                </p>
-              )}
-              {scraperTask?.requested_max_results != null && (
-                <p className="text-xs text-slate-500">
-                  Requested max results: {scraperTask.requested_max_results}
-                </p>
-              )}
-              {scraperTask?.error && (
-                <p className="rounded-md border border-rose-200 bg-rose-50 px-2 py-1 text-xs text-rose-700">
-                  Error: {scraperTask.error}
-                </p>
-              )}
-              {scraperTask?.result?.error && !scraperTask?.error && (
-                <p className="rounded-md border border-rose-200 bg-rose-50 px-2 py-1 text-xs text-rose-700">
-                  Error: {scraperTask.result.error}
-                </p>
-              )}
+              <p>
+                Latest saved cookie UID: {cookieStatus?.latest_cookie_uid || 'none'}
+                {cookieStatus?.updated_at ? ` | Updated ${new Date(cookieStatus.updated_at).toLocaleString()}` : ''}
+              </p>
+              <p>
+                Saved cookie count: {cookieStatus?.cookie_count ?? 0}
+              </p>
             </div>
-
-            <div className="space-y-3 rounded-xl border border-slate-200 p-3">
-              <h3 className="text-sm font-semibold text-slate-800">Config</h3>
-              <label className="flex items-center gap-2 text-xs text-slate-700">
-                <input
-                  type="checkbox"
-                  checked={scraperConfig.useDefaultKeywords}
-                  onChange={(e) => setScraperConfig((prev) => ({ ...prev, useDefaultKeywords: e.target.checked }))}
-                  className="h-4 w-4 rounded border-slate-300"
-                />
-                Use default keywords from backend config (config/keywords.json)
-              </label>
-              <label className="block text-xs text-slate-600">
-                Custom keywords (newline/comma/semicolon separated)
-                <textarea
-                  value={scraperConfig.keywords}
-                  onChange={(e) => setScraperConfig((prev) => ({ ...prev, keywords: e.target.value }))}
-                  rows={5}
-                  placeholder="math tutor&#10;looking for tutor"
-                  disabled={scraperConfig.useDefaultKeywords}
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                />
-              </label>
-              {!scraperConfig.useDefaultKeywords && (
-                <p className="text-xs text-slate-500">
-                  Parsed keywords: {parseKeywords(scraperConfig.keywords).length}
-                </p>
-              )}
-              <label className="block text-xs text-slate-600">
-                Max results
-                <input
-                  type="number"
-                  min={1}
-                  value={scraperConfig.maxResults}
-                  onChange={(e) => setScraperConfig((prev) => ({ ...prev, maxResults: e.target.value }))}
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                />
-              </label>
-            </div>
-
+            {scraperTask?.requested_keywords && (
+              <p className="text-xs text-slate-500">
+                Requested keywords: {scraperTask.requested_keywords.join(', ')}
+              </p>
+            )}
+            {scraperTask?.error && (
+              <p className="rounded-md border border-rose-200 bg-rose-50 px-2 py-1 text-xs text-rose-700 truncate">
+                Error: {scraperTask.error}
+              </p>
+            )}
+            {scraperTask?.result?.error && !scraperTask?.error && (
+              <p className="rounded-md border border-rose-200 bg-rose-50 px-2 py-1 text-xs text-rose-700 truncate">
+                Error: {scraperTask.result.error}
+              </p>
+            )}
           </div>
 
           <div className="mt-3 space-y-4 rounded-xl border border-slate-200 p-3">
@@ -552,23 +476,24 @@ export default function ScraperPage() {
               </div>
             </div>
 
-            <div className="rounded-lg border border-slate-200 p-3">
+            <div className="rounded-lg border border-slate-200 p-3 overflow-hidden">
               <div className="mb-2 flex items-center justify-between">
                 <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Issues</p>
-                <p className="text-xs text-slate-500">Warnings: {monitor.counters.warnings} | Errors: {monitor.counters.errors}</p>
+                <p className="text-xs text-slate-500 whitespace-nowrap">Warnings: {monitor.counters.warnings} | Errors: {monitor.counters.errors}</p>
               </div>
-              <div className="space-y-1 text-xs">
+              <div className="space-y-1 text-xs max-h-48 overflow-y-auto">
                 {monitor.issues.length === 0 ? (
                   <p className="text-slate-500">No active issues detected.</p>
                 ) : (
                   monitor.issues.map((issue, idx) => (
                     <p
                       key={`${idx}-${issue.text.slice(0, 24)}`}
-                      className={`rounded px-2 py-1 ${
+                      className={`rounded px-2 py-1 truncate ${
                         issue.level === 'error'
                           ? 'bg-rose-50 text-rose-700'
                           : 'bg-amber-50 text-amber-700'
                       }`}
+                      title={`${issue.timestamp ? issue.timestamp + ' - ' : ''}${issue.text}`}
                     >
                       {issue.timestamp ? `${issue.timestamp} - ` : ''}{issue.text}
                     </p>
@@ -676,6 +601,73 @@ export default function ScraperPage() {
                   {cookieSubmitting ? 'Saving...' : 'Save Cookie'}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {keywordModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 px-4">
+          <div className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-xl font-semibold text-slate-900">Manage Keywords</h2>
+                <p className="mt-1 text-sm text-slate-600">
+                  Add or remove keywords used by the background scraper.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setKeywordModalOpen(false)}
+                className="rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-3">
+              <div className="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto">
+                {savedKeywords.length === 0 ? (
+                  <p className="text-xs text-slate-500">No keywords configured yet.</p>
+                ) : (
+                  savedKeywords.map((kw) => (
+                    <span
+                      key={kw}
+                      className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs text-slate-700"
+                    >
+                      {kw}
+                      <button
+                        type="button"
+                        onClick={() => removeKeyword(kw)}
+                        className="ml-0.5 rounded-full text-slate-400 hover:text-rose-600 transition"
+                        title={`Remove "${kw}"`}
+                      >
+                        &times;
+                      </button>
+                    </span>
+                  ))
+                )}
+              </div>
+
+              <textarea
+                value={keywordInput}
+                onChange={(e) => setKeywordInput(e.target.value)}
+                rows={4}
+                placeholder="Enter new keywords (one per line, or comma/semicolon separated)&#10;math tutor&#10;looking for tutor"
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+              />
+            </div>
+
+            <div className="mt-4 flex items-center justify-between gap-3">
+              <p className="text-xs text-slate-500">{savedKeywords.length} keyword(s) saved</p>
+              <button
+                type="button"
+                onClick={submitKeywords}
+                disabled={!keywordInput.trim() || keywordSubmitting}
+                className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:bg-slate-400 transition"
+              >
+                {keywordSubmitting ? 'Adding...' : 'Add Keywords'}
+              </button>
             </div>
           </div>
         </div>

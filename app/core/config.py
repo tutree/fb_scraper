@@ -49,8 +49,8 @@ class Settings(BaseSettings):
 
     # Background automation (runs automatically on startup, uses config/keywords.json)
     AUTO_SCRAPE_ENABLED: bool = True
-    AUTO_SCRAPE_INTERVAL_MINUTES: int = 60
-    AUTO_SCRAPE_MAX_RESULTS: int = 20
+    AUTO_SCRAPE_INTERVAL_MINUTES: int = 180
+    AUTO_SCRAPE_MAX_RESULTS: int = 100
     AUTO_ANALYZE_AFTER_SCRAPE: bool = True
     AUTO_ENRICH_AFTER_ANALYZE: bool = True
 

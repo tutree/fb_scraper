@@ -19,6 +19,59 @@ const getErrorMessage = (err, fallback) =>
 
 const formatDate = (iso) => (iso ? new Date(iso).toLocaleString() : '—')
 
+const formatHour = (iso) => {
+  if (!iso) return ''
+  const d = new Date(iso)
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+function MiniBarChart({ data, color = '#6366f1', label = 'count' }) {
+  if (!data || data.length === 0) return <p className="py-4 text-center text-xs text-slate-400">No activity in the last 24h</p>
+  const max = Math.max(...data.map((d) => d.count), 1)
+  return (
+    <div className="flex items-end gap-[3px]" style={{ height: 80 }}>
+      {data.map((d, i) => (
+        <div key={i} className="group relative flex flex-1 flex-col items-center justify-end" style={{ minWidth: 0 }}>
+          <div className="absolute -top-6 hidden rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-white group-hover:block whitespace-nowrap z-10">
+            {formatHour(d.hour)}: {d.count}
+          </div>
+          <div
+            className="w-full rounded-t"
+            style={{ height: `${Math.max((d.count / max) * 100, 4)}%`, backgroundColor: color, minHeight: 2 }}
+          />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function StatPill({ label, value, color }) {
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold ${color}`}>
+      {value} <span className="font-normal">{label}</span>
+    </span>
+  )
+}
+
+function BreakdownBar({ items }) {
+  const total = items.reduce((s, i) => s + i.value, 0)
+  if (total === 0) return null
+  return (
+    <div className="mt-2 flex h-2.5 w-full overflow-hidden rounded-full">
+      {items.map((item, i) => (
+        item.value > 0 && (
+          <div
+            key={i}
+            className="transition-all"
+            style={{ width: `${(item.value / total) * 100}%`, backgroundColor: item.color }}
+            title={`${item.label}: ${item.value}`}
+          />
+        )
+      ))}
+    </div>
+  )
+}
+
 export default function JobsPage() {
   const [status, setStatus] = useState(null)
   const [history, setHistory] = useState([])
@@ -28,15 +81,18 @@ export default function JobsPage() {
   const [processTab, setProcessTab] = useState('scraped')
   const [recentProcessed, setRecentProcessed] = useState([])
   const [recentLoading, setRecentLoading] = useState(false)
+  const [jobStats, setJobStats] = useState(null)
 
   const fetchAll = async () => {
     try {
-      const [s, h] = await Promise.all([
+      const [s, h, js] = await Promise.all([
         api.get('/automation/status'),
-        api.get('/automation/history?limit=30'),
+        api.get('/automation/history?limit=5'),
+        api.get('/automation/job-stats'),
       ])
       setStatus(s.data)
       setHistory(Array.isArray(h.data) ? h.data : [])
+      setJobStats(js.data)
     } catch (err) {
       setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to load job status') })
     } finally {
@@ -118,6 +174,106 @@ export default function JobsPage() {
         <div className={`rounded-xl border px-4 py-3 text-sm ${feedback.type === 'error' ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
           {feedback.text}
         </div>
+      )}
+
+      {/* Job Analytics */}
+      {jobStats && (
+        <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <h2 className="text-lg font-bold text-slate-900">Job Analytics</h2>
+          <p className="mt-0.5 text-xs text-slate-500">Last 24 hours activity per background job</p>
+
+          <div className="mt-5 grid gap-5 sm:grid-cols-2">
+            {/* Scraper */}
+            <div className="rounded-xl border border-slate-200 bg-gradient-to-br from-indigo-50 to-white p-4">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-bold text-indigo-900">Scraper</h3>
+                <span className="rounded-full bg-indigo-100 px-2.5 py-0.5 text-xs font-semibold text-indigo-700">{jobStats.scraper_total} total</span>
+              </div>
+              <div className="mt-2 flex gap-2">
+                <StatPill label="today" value={jobStats.scraper_today} color="bg-indigo-100 text-indigo-800" />
+              </div>
+              <div className="mt-3">
+                <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Scraped per hour</p>
+                <MiniBarChart data={jobStats.scraper_hourly} color="#6366f1" />
+              </div>
+            </div>
+
+            {/* Post Analyzer */}
+            <div className="rounded-xl border border-slate-200 bg-gradient-to-br from-emerald-50 to-white p-4">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-bold text-emerald-900">Post Analyzer</h3>
+                <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-semibold text-emerald-700">{jobStats.post_analyze_done} done</span>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <StatPill label="pending" value={jobStats.post_analyze_pending} color="bg-amber-100 text-amber-800" />
+                <StatPill label="customers" value={jobStats.post_analyze_customer} color="bg-sky-100 text-sky-800" />
+                <StatPill label="tutors" value={jobStats.post_analyze_tutor} color="bg-rose-100 text-rose-800" />
+                <StatPill label="unknown" value={jobStats.post_analyze_unknown} color="bg-slate-100 text-slate-600" />
+              </div>
+              <BreakdownBar items={[
+                { label: 'Customers', value: jobStats.post_analyze_customer, color: '#0ea5e9' },
+                { label: 'Tutors', value: jobStats.post_analyze_tutor, color: '#f43f5e' },
+                { label: 'Unknown', value: jobStats.post_analyze_unknown, color: '#94a3b8' },
+                { label: 'Pending', value: jobStats.post_analyze_pending, color: '#f59e0b' },
+              ]} />
+              <div className="mt-3">
+                <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Analyzed per hour</p>
+                <MiniBarChart data={jobStats.post_analyze_hourly} color="#10b981" />
+              </div>
+            </div>
+
+            {/* Comment Analyzer */}
+            <div className="rounded-xl border border-slate-200 bg-gradient-to-br from-violet-50 to-white p-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-bold text-violet-900">Comment Analyzer</h3>
+                  <button
+                    onClick={async () => { try { await api.post('/automation/trigger-comment-analyze'); alert('Comment analyzer triggered!'); } catch (e) { alert(getErrorMessage(e, 'Failed to trigger')); } }}
+                    className="rounded bg-violet-600 px-2 py-0.5 text-[10px] font-semibold text-white hover:bg-violet-700 transition"
+                  >Run Now</button>
+                </div>
+                <span className="rounded-full bg-violet-100 px-2.5 py-0.5 text-xs font-semibold text-violet-700">{jobStats.comment_analyze_done} done</span>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <StatPill label="pending" value={jobStats.comment_analyze_pending} color="bg-amber-100 text-amber-800" />
+                <StatPill label="customers" value={jobStats.comment_analyze_customer} color="bg-sky-100 text-sky-800" />
+                <StatPill label="tutors" value={jobStats.comment_analyze_tutor} color="bg-rose-100 text-rose-800" />
+                <StatPill label="unknown" value={jobStats.comment_analyze_unknown} color="bg-slate-100 text-slate-600" />
+              </div>
+              <BreakdownBar items={[
+                { label: 'Customers', value: jobStats.comment_analyze_customer, color: '#8b5cf6' },
+                { label: 'Tutors', value: jobStats.comment_analyze_tutor, color: '#f43f5e' },
+                { label: 'Unknown', value: jobStats.comment_analyze_unknown, color: '#94a3b8' },
+                { label: 'Pending', value: jobStats.comment_analyze_pending, color: '#f59e0b' },
+              ]} />
+              <div className="mt-3">
+                <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Analyzed per hour</p>
+                <MiniBarChart data={jobStats.comment_analyze_hourly} color="#8b5cf6" />
+              </div>
+            </div>
+
+            {/* Enrichment */}
+            <div className="rounded-xl border border-slate-200 bg-gradient-to-br from-amber-50 to-white p-4">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-bold text-amber-900">Enrichment</h3>
+                <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-semibold text-amber-700">{jobStats.enrich_done} done</span>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <StatPill label="pending" value={jobStats.enrich_pending} color="bg-amber-100 text-amber-800" />
+                <StatPill label="not enrichable" value={jobStats.enrich_not_enrichable} color="bg-rose-100 text-rose-700" />
+              </div>
+              <BreakdownBar items={[
+                { label: 'Done', value: jobStats.enrich_done, color: '#f59e0b' },
+                { label: 'Pending', value: jobStats.enrich_pending, color: '#6366f1' },
+                { label: 'Not enrichable', value: jobStats.enrich_not_enrichable, color: '#f43f5e' },
+              ]} />
+              <div className="mt-3">
+                <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Enriched per hour</p>
+                <MiniBarChart data={jobStats.enrich_hourly} color="#f59e0b" />
+              </div>
+            </div>
+          </div>
+        </section>
       )}
 
       {/* Live Status */}

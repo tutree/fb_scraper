@@ -279,14 +279,13 @@ export default function CommentsPage() {
                     <th className="px-4 py-3">Type</th>
                     <th className="px-4 py-3">Score</th>
                     <th className="px-4 py-3">Analysis</th>
-                    <th className="px-4 py-3">Time</th>
-                    <th className="px-4 py-3">Actions</th>
+                    <th className="px-4 py-3">Timestamp</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {comments.length === 0 ? (
                     <tr>
-                      <td colSpan={8} className="px-4 py-10 text-center text-sm text-slate-500">No comments found.</td>
+                      <td colSpan={7} className="px-4 py-10 text-center text-sm text-slate-500">No comments found.</td>
                     </tr>
                   ) : (
                     comments.map((comment) => (
@@ -311,18 +310,8 @@ export default function CommentsPage() {
                           {comment.confidence_score != null ? `${(comment.confidence_score * 100).toFixed(0)}%` : '-'}
                         </td>
                         <td className="max-w-[320px] truncate px-4 py-3 text-sm text-slate-600">{comment.analysis_message || '-'}</td>
-                        <td className="px-4 py-3 text-sm text-slate-600">
-                          {comment.comment_timestamp || (comment.scraped_at ? new Date(comment.scraped_at).toLocaleDateString() : '-')}
-                        </td>
-                        <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
-                          <button
-                            type="button"
-                            onClick={() => analyzeSingle(comment.id)}
-                            disabled={analyzingId === comment.id || analyzingBatch}
-                            className="rounded-md bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-white disabled:bg-slate-400"
-                          >
-                            {analyzingId === comment.id ? 'Analyzing...' : 'Analyze'}
-                          </button>
+                        <td className="px-4 py-3 text-sm text-slate-600 whitespace-nowrap">
+                          {comment.comment_timestamp || '-'}
                         </td>
                       </tr>
                     ))

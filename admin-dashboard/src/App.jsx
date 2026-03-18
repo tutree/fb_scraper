@@ -21,6 +21,36 @@ const STATUS_BADGES = {
 const getErrorMessage = (err, fallback) =>
   err?.response?.data?.detail ?? err?.message ?? fallback
 
+function getPostAgeHours(ts) {
+  if (!ts) return null
+  const diff = Date.now() - new Date(ts).getTime()
+  return diff / (1000 * 60 * 60)
+}
+
+function getPostAgeRowClass(ts) {
+  const hours = getPostAgeHours(ts)
+  if (hours === null) return ''
+  if (hours < 5) return 'bg-emerald-50'
+  if (hours < 24) return 'bg-sky-50'
+  if (hours < 72) return 'bg-amber-50'
+  return ''
+}
+
+function formatRelativeTime(ts) {
+  if (!ts) return '—'
+  const hours = getPostAgeHours(ts)
+  if (hours === null) return '—'
+  if (hours < 1) return `${Math.round(hours * 60)}m ago`
+  if (hours < 24) return `${Math.round(hours)}h ago`
+  const days = Math.round(hours / 24)
+  if (days === 1) return '1 day ago'
+  if (days < 7) return `${days} days ago`
+  const weeks = Math.round(days / 7)
+  if (weeks === 1) return '1 week ago'
+  if (weeks < 5) return `${weeks} weeks ago`
+  return new Date(ts).toLocaleDateString()
+}
+
 function App() {
   const { isAdmin } = useAuth()
   const [results, setResults] = useState([])
@@ -30,7 +60,7 @@ function App() {
   const [selectedResult, setSelectedResult] = useState(null)
   const [showDetailDialog, setShowDetailDialog] = useState(false)
   const [filters, setFilters] = useState({
-    userType: '',
+    userType: 'customer',
     status: '',
     analyzed: '',
     sortBy: 'scraped_at',
@@ -484,7 +514,7 @@ function App() {
             </select>
             <select value={filters.sortBy} onChange={(e) => { setFilters({ ...filters, sortBy: e.target.value }); setCurrentPage(1) }} className="rounded-lg border border-slate-300 px-3 py-2 text-sm">
               <option value="scraped_at">Sort: Scraped At</option>
-              <option value="post_date">Sort: Post Date</option>
+              <option value="post_date_timestamp">Sort: Post Date</option>
               <option value="confidence_score">Sort: Confidence</option>
               <option value="analyzed_at">Sort: Analyzed At</option>
               <option value="name">Sort: Name</option>
@@ -508,6 +538,12 @@ function App() {
         </section>
 
         <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+          <div className="flex items-center gap-4 border-b border-slate-200 bg-slate-50 px-4 py-2 text-[10px] text-slate-500">
+            <span className="font-semibold uppercase tracking-wider">Row colors:</span>
+            <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded bg-emerald-100 border border-emerald-200" /> &lt; 5 hours</span>
+            <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded bg-sky-100 border border-sky-200" /> &lt; 1 day</span>
+            <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded bg-amber-100 border border-amber-200" /> &lt; 3 days</span>
+          </div>
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-slate-200">
               <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
@@ -520,7 +556,7 @@ function App() {
                   <th className="px-4 py-3">Keyword</th>
                   <th className="px-4 py-3">Status</th>
                   <th className="px-4 py-3">Post</th>
-                  <th className="px-4 py-3">Actions</th>
+                  <th className="px-4 py-3">Post Date</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -530,8 +566,9 @@ function App() {
                   results.map((result) => {
                     const userType = result.user_type || 'unknown'
                     const status = result.status || 'pending'
+                    const ageClass = getPostAgeRowClass(result.post_date_timestamp)
                     return (
-                      <tr key={result.id} className="cursor-pointer hover:bg-slate-50" onClick={() => openDetail(result)}>
+                      <tr key={result.id} className={`cursor-pointer hover:bg-slate-100 ${ageClass}`} onClick={() => openDetail(result)}>
                         <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
                           <input type="checkbox" checked={selectedIds.has(result.id)} onChange={() => toggleRow(result.id)} className="h-4 w-4 rounded border-slate-300" />
                         </td>
@@ -551,18 +588,7 @@ function App() {
                           </select>
                         </td>
                         <td className="max-w-[260px] truncate px-4 py-3 text-sm text-slate-600">{result.post_content ? result.post_content.substring(0, 100) : 'N/A'}</td>
-                        <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
-                          <div className="flex gap-2">
-                            
-                            <button type="button" onClick={() => analyzeSingle(result.id)} disabled={analyzingId === result.id || analyzingBatch} className="rounded-md bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-white disabled:bg-slate-400">
-                              {analyzingId === result.id ? 'Analyzing...' : 'Analyze'}
-                            </button>
-                            <button type="button" onClick={() => enrichSingle(result.id)} disabled={enrichingId === result.id || enrichingBatch} className={`rounded-md px-2.5 py-1.5 text-xs font-medium text-white disabled:bg-slate-400 ${result.enriched_at ? 'bg-violet-400' : 'bg-violet-600'}`}>
-                              {enrichingId === result.id ? 'Enriching...' : result.enriched_at ? 'Re-Enrich' : 'Enrich'}
-                            </button>
-                        
-                          </div>
-                        </td>
+                        <td className="px-4 py-3 text-sm text-slate-600 whitespace-nowrap" title={result.post_date_timestamp ? new Date(result.post_date_timestamp).toLocaleString() : (result.post_date || '')}>{result.post_date_timestamp ? formatRelativeTime(result.post_date_timestamp) : (result.post_date || '—')}</td>
                       </tr>
                     )
                   })
@@ -661,7 +687,7 @@ function App() {
                     <p><span className="font-semibold">Keyword:</span> {selectedResult.search_keyword || 'N/A'}</p>
                     <p><span className="font-semibold">Location:</span> {selectedResult.location || 'N/A'}</p>
                     <p><span className="font-semibold">Status:</span> {selectedResult.status || 'N/A'}</p>
-                    <p><span className="font-semibold">Post Date:</span> {selectedResult.post_date ?? 'N/A'}</p>
+                    <p><span className="font-semibold">Post Date:</span> {selectedResult.post_date_timestamp ? `${formatRelativeTime(selectedResult.post_date_timestamp)} (${new Date(selectedResult.post_date_timestamp).toLocaleString()})` : (selectedResult.post_date ?? 'N/A')}</p>
                     <p><span className="font-semibold">User Type:</span> {selectedResult.user_type || 'N/A'}</p>
                     <p><span className="font-semibold">Confidence:</span> {selectedResult.confidence_score != null ? `${(selectedResult.confidence_score * 100).toFixed(0)}%` : 'N/A'}</p>
                     <p className="md:col-span-2"><span className="font-semibold">Analyzed At:</span> {selectedResult.analyzed_at ? new Date(selectedResult.analyzed_at).toLocaleString() : 'N/A'}</p>

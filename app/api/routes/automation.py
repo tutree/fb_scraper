@@ -1,8 +1,15 @@
-from fastapi import APIRouter, Query
+from datetime import datetime, timedelta, timezone
+
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import func as sa_func
+from sqlalchemy.orm import Session
 from typing import Optional, List
 
 from ...core.config import settings
+from ...core.database import get_db
+from ...models.search_result import SearchResult, UserType
+from ...models.post_comment import PostComment
 from ...services.background_jobs import (
     get_status,
     get_history,
@@ -10,7 +17,9 @@ from ...services.background_jobs import (
     disable_auto_scrape,
     update_config,
     trigger_now,
+    trigger_comment_analyze_now,
 )
+from ...services.enformion_service import EnformionService
 
 router = APIRouter(prefix="/automation", tags=["automation"])
 
@@ -89,3 +98,173 @@ async def update_automation(body: AutomationUpdate):
 async def trigger_scrape_now():
     trigger_now()
     return {"message": "Scrape triggered — running in background"}
+
+
+@router.post("/trigger-comment-analyze")
+async def trigger_comment_analyze():
+    trigger_comment_analyze_now()
+    return {"message": "Comment analyzer triggered — running in background"}
+
+
+# ---------------------------------------------------------------------------
+# Job statistics / visualizations
+# ---------------------------------------------------------------------------
+
+class HourlyStat(BaseModel):
+    hour: str
+    count: int
+
+
+class JobStats(BaseModel):
+    # Scraper
+    scraper_total: int = 0
+    scraper_today: int = 0
+    scraper_hourly: List[HourlyStat] = []
+
+    # Post analyzer
+    post_analyze_done: int = 0
+    post_analyze_pending: int = 0
+    post_analyze_customer: int = 0
+    post_analyze_tutor: int = 0
+    post_analyze_unknown: int = 0
+    post_analyze_hourly: List[HourlyStat] = []
+
+    # Comment analyzer
+    comment_analyze_done: int = 0
+    comment_analyze_pending: int = 0
+    comment_analyze_customer: int = 0
+    comment_analyze_tutor: int = 0
+    comment_analyze_unknown: int = 0
+    comment_analyze_hourly: List[HourlyStat] = []
+
+    # Enrichment
+    enrich_done: int = 0
+    enrich_pending: int = 0
+    enrich_not_enrichable: int = 0
+    enrich_hourly: List[HourlyStat] = []
+
+
+def _hourly_counts(db: Session, model, ts_column, hours: int = 24) -> List[HourlyStat]:
+    """Return per-hour counts for the last N hours."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    rows = (
+        db.query(
+            sa_func.date_trunc("hour", ts_column).label("h"),
+            sa_func.count().label("c"),
+        )
+        .filter(ts_column >= cutoff)
+        .group_by("h")
+        .order_by("h")
+        .all()
+    )
+    return [HourlyStat(hour=r.h.isoformat(), count=r.c) for r in rows]
+
+
+@router.get("/job-stats", response_model=JobStats)
+async def job_stats(db: Session = Depends(get_db)):
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # -- Scraper --
+    scraper_total = db.query(sa_func.count(SearchResult.id)).scalar() or 0
+    scraper_today = (
+        db.query(sa_func.count(SearchResult.id))
+        .filter(SearchResult.scraped_at >= today_start)
+        .scalar() or 0
+    )
+    scraper_hourly = _hourly_counts(db, SearchResult, SearchResult.scraped_at)
+
+    # -- Post analyzer --
+    post_analyze_done = (
+        db.query(sa_func.count(SearchResult.id))
+        .filter(SearchResult.analyzed_at.isnot(None))
+        .scalar() or 0
+    )
+    post_analyze_pending = (
+        db.query(sa_func.count(SearchResult.id))
+        .filter(SearchResult.analyzed_at.is_(None))
+        .scalar() or 0
+    )
+    post_analyze_customer = (
+        db.query(sa_func.count(SearchResult.id))
+        .filter(SearchResult.user_type == UserType.CUSTOMER)
+        .scalar() or 0
+    )
+    post_analyze_tutor = (
+        db.query(sa_func.count(SearchResult.id))
+        .filter(SearchResult.user_type == UserType.TUTOR)
+        .scalar() or 0
+    )
+    post_analyze_unknown = (
+        db.query(sa_func.count(SearchResult.id))
+        .filter(SearchResult.user_type == UserType.UNKNOWN)
+        .scalar() or 0
+    )
+    post_analyze_hourly = _hourly_counts(db, SearchResult, SearchResult.analyzed_at)
+
+    # -- Comment analyzer --
+    comment_analyze_done = (
+        db.query(sa_func.count(PostComment.id))
+        .filter(PostComment.analyzed_at.isnot(None))
+        .scalar() or 0
+    )
+    comment_analyze_pending = (
+        db.query(sa_func.count(PostComment.id))
+        .filter(PostComment.analyzed_at.is_(None))
+        .scalar() or 0
+    )
+    comment_analyze_customer = (
+        db.query(sa_func.count(PostComment.id))
+        .filter(PostComment.user_type == UserType.CUSTOMER)
+        .scalar() or 0
+    )
+    comment_analyze_tutor = (
+        db.query(sa_func.count(PostComment.id))
+        .filter(PostComment.user_type == UserType.TUTOR)
+        .scalar() or 0
+    )
+    comment_analyze_unknown = (
+        db.query(sa_func.count(PostComment.id))
+        .filter(PostComment.user_type == UserType.UNKNOWN)
+        .scalar() or 0
+    )
+    comment_analyze_hourly = _hourly_counts(db, PostComment, PostComment.analyzed_at)
+
+    # -- Enrichment --
+    enrich_done = (
+        db.query(sa_func.count(SearchResult.id))
+        .filter(SearchResult.enriched_at.isnot(None))
+        .scalar() or 0
+    )
+    analyzed_not_enriched = (
+        db.query(SearchResult.id, SearchResult.name, SearchResult.location)
+        .filter(SearchResult.analyzed_at.isnot(None), SearchResult.enriched_at.is_(None))
+        .all()
+    )
+    enrich_not_enrichable = sum(
+        1 for r in analyzed_not_enriched if not EnformionService.can_enrich(r.name, r.location)[0]
+    )
+    enrich_pending = len(analyzed_not_enriched) - enrich_not_enrichable
+    enrich_hourly = _hourly_counts(db, SearchResult, SearchResult.enriched_at)
+
+    return JobStats(
+        scraper_total=scraper_total,
+        scraper_today=scraper_today,
+        scraper_hourly=scraper_hourly,
+        post_analyze_done=post_analyze_done,
+        post_analyze_pending=post_analyze_pending,
+        post_analyze_customer=post_analyze_customer,
+        post_analyze_tutor=post_analyze_tutor,
+        post_analyze_unknown=post_analyze_unknown,
+        post_analyze_hourly=post_analyze_hourly,
+        comment_analyze_done=comment_analyze_done,
+        comment_analyze_pending=comment_analyze_pending,
+        comment_analyze_customer=comment_analyze_customer,
+        comment_analyze_tutor=comment_analyze_tutor,
+        comment_analyze_unknown=comment_analyze_unknown,
+        comment_analyze_hourly=comment_analyze_hourly,
+        enrich_done=enrich_done,
+        enrich_pending=enrich_pending,
+        enrich_not_enrichable=enrich_not_enrichable,
+        enrich_hourly=enrich_hourly,
+    )

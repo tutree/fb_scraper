@@ -29,6 +29,10 @@ def run_startup_migrations() -> None:
             "ALTER TABLE search_results ADD COLUMN IF NOT EXISTS post_date VARCHAR NULL;",
         ),
         (
+            "search_results.post_date_timestamp",
+            "ALTER TABLE search_results ADD COLUMN IF NOT EXISTS post_date_timestamp TIMESTAMP WITH TIME ZONE NULL;",
+        ),
+        (
             "search_results.enriched_phones",
             "ALTER TABLE search_results ADD COLUMN IF NOT EXISTS enriched_phones JSONB NULL;",
         ),

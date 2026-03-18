@@ -11,6 +11,7 @@ class SearchResultBase(BaseModel):
     post_content: Optional[str] = None
     post_url: Optional[str] = None
     post_date: Optional[str] = None
+    post_date_timestamp: Optional[datetime] = None
     search_keyword: str
     profile_url: Optional[str] = None
 
@@ -26,6 +27,7 @@ class SearchResultUpdate(BaseModel):
     post_content: Optional[str] = None
     post_url: Optional[str] = None
     post_date: Optional[str] = None
+    post_date_timestamp: Optional[datetime] = None
     search_keyword: Optional[str] = None
     profile_url: Optional[str] = None
     status: Optional[ResultStatus] = None

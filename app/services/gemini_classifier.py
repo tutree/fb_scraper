@@ -74,11 +74,7 @@ class GeminiClassifier:
     async def classify_user(self, post_content: str, user_name: str = "") -> Dict:
         """
         Classify a user based on their post content.
-        
-        Args:
-            post_content: The text content of the Facebook post
-            user_name: Optional user name for context
-            
+
         Returns:
             Dict with keys: type, confidence, reason
         """
@@ -87,9 +83,9 @@ class GeminiClassifier:
             return {
                 "type": "UNKNOWN",
                 "confidence": 0.0,
-                "reason": "No post content available"
+                "reason": "No post content available",
             }
-        
+
         prompt = f"""You are analyzing a Facebook post scraped from a search results page. The raw text may contain Facebook UI artifacts such as repeated words like "Facebook", navigation labels ("Like", "Comment", "Share"), reaction counts, or timestamps mixed into the post body. Your first task is to mentally extract only the actual user-written post content, ignoring all UI noise.
 
 User: {user_name if user_name else "Unknown"}
@@ -103,26 +99,29 @@ After extracting the real post content, classify the user:
 Return ONLY valid JSON in this exact format (no markdown, no extra text):
 {{"type": "CUSTOMER", "confidence": 0.95, "reason": "User explicitly asks for a tutor"}}
 """
-        
+
         try:
-            logger.debug(f"Sending classification request for user: {user_name}")
+            logger.debug("Sending classification request for user: %s", user_name)
             result = await self._generate_json(prompt)
-            logger.debug(f"Classification result: {result['type']} (confidence: {result['confidence']:.2f})")
+            logger.debug(
+                "Classification result: %s (confidence: %.2f)",
+                result["type"], result["confidence"],
+            )
             return result
-            
+
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse AI response as JSON: {e}")
+            logger.error("Failed to parse AI response as JSON: %s", e)
             return {
                 "type": "UNKNOWN",
                 "confidence": 0.0,
-                "reason": f"Failed to parse AI response: {str(e)}"
+                "reason": f"Failed to parse AI response: {str(e)}",
             }
         except Exception as e:
-            logger.error(f"AI classification error: {e}", exc_info=True)
+            logger.error("AI classification error: %s", e, exc_info=True)
             return {
                 "type": "UNKNOWN",
                 "confidence": 0.0,
-                "reason": f"Classification error: {str(e)}"
+                "reason": f"Classification error: {str(e)}",
             }
 
     async def classify_comment_user(

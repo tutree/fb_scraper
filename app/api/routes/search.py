@@ -1,7 +1,10 @@
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from pydantic import BaseModel
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
 from threading import Lock
+from pathlib import Path
+import json
 import uuid
 
 from ...core.database import SessionLocal
@@ -207,6 +210,70 @@ async def update_saved_cookie(request: CookieUpdateRequest) -> CookieUpdateRespo
         updated_at=result["updated_at"],
         active_account_uids=result["active_account_uids"],
     )
+
+
+KEYWORDS_FILE = Path(__file__).resolve().parents[3] / "config" / "keywords.json"
+
+
+class AddKeywordsRequest(BaseModel):
+    keywords: List[str]
+
+
+@router.get("/keywords")
+async def get_keywords():
+    """Return current keywords from config/keywords.json."""
+    try:
+        data = json.loads(KEYWORDS_FILE.read_text(encoding="utf-8"))
+        return {"keywords": data.get("searchKeywords", [])}
+    except FileNotFoundError:
+        return {"keywords": []}
+
+
+@router.post("/keywords")
+async def add_keywords(request: AddKeywordsRequest):
+    """Add new keywords to config/keywords.json (deduplicates)."""
+    new_kws = [kw.strip() for kw in request.keywords if kw.strip()]
+    if not new_kws:
+        raise HTTPException(status_code=400, detail="No valid keywords provided")
+
+    try:
+        data = json.loads(KEYWORDS_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        data = {"searchKeywords": []}
+
+    existing = data.get("searchKeywords", [])
+    existing_lower = {k.lower() for k in existing}
+    added = [kw for kw in new_kws if kw.lower() not in existing_lower]
+    existing.extend(added)
+    data["searchKeywords"] = existing
+
+    KEYWORDS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    KEYWORDS_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    logger.info("Keywords updated: added %d, total %d", len(added), len(existing))
+
+    return {"added": added, "total": len(existing), "keywords": existing}
+
+
+@router.delete("/keywords")
+async def remove_keyword(keyword: str = Query(...)):
+    """Remove a single keyword from config/keywords.json."""
+    try:
+        data = json.loads(KEYWORDS_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Keywords file not found")
+
+    existing = data.get("searchKeywords", [])
+    keyword_lower = keyword.lower().strip()
+    updated = [kw for kw in existing if kw.lower().strip() != keyword_lower]
+
+    if len(updated) == len(existing):
+        raise HTTPException(status_code=404, detail=f"Keyword '{keyword}' not found")
+
+    data["searchKeywords"] = updated
+    KEYWORDS_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    logger.info("Keyword removed: '%s', total %d", keyword, len(updated))
+
+    return {"removed": keyword, "total": len(updated), "keywords": updated}
 
 
 async def run_search_task(
