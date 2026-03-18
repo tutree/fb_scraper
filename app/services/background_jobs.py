@@ -148,9 +148,10 @@ def _load_config():
     cfg = _load_json(REDIS_KEY_CONFIG)
     if cfg:
         settings.AUTO_SCRAPE_ENABLED = cfg.get("auto_scrape_enabled", settings.AUTO_SCRAPE_ENABLED)
-        settings.AUTO_SCRAPE_INTERVAL_MINUTES = cfg.get("interval_minutes", settings.AUTO_SCRAPE_INTERVAL_MINUTES)
         settings.AUTO_ANALYZE_AFTER_SCRAPE = cfg.get("auto_analyze", settings.AUTO_ANALYZE_AFTER_SCRAPE)
         settings.AUTO_ENRICH_AFTER_ANALYZE = cfg.get("auto_enrich", settings.AUTO_ENRICH_AFTER_ANALYZE)
+    # Always apply the code default for interval — don't let a stale Redis value override it
+    _save_config()
 
 
 def get_scheduler() -> AsyncIOScheduler:
