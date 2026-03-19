@@ -684,7 +684,7 @@ async def scroll_and_process_posts(
                     }
 
                     function extractDateFromElement(el) {
-                        if (!el) return null;
+                        if (!el || typeof el.getAttribute !== 'function') return null;
                         const ariaLabel = normalizeText(el.getAttribute('aria-label') || '');
                         if (isLikelyPostDate(ariaLabel)) return ariaLabel;
 
@@ -841,7 +841,7 @@ async def scroll_and_process_posts(
                             'a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid"], a[href*="/photo/"]'
                         );
                         const postUrl = postLink ? postLink.href : null;
-                        const postDate = extractPostDate(child, postUrl);
+                        const postDate = extractPostDate(child, postLink);
                         const profileLink = Array.from(child.querySelectorAll('a[href]'))
                             .find((a) => isProfileHref(a.href));
                         if (!profileLink) return;
