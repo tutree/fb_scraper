@@ -309,6 +309,10 @@ async def _solve_recaptcha_visual_grid(page: Page, max_rounds: int = 12) -> bool
         logger.error("[Grid] No 2Captcha solver — set CAPTCHA_2CAPTCHA_API_KEY")
         return False
 
+    consecutive_click_failures = 0
+    api_retries = 0
+    MAX_API_RETRIES = 2
+
     for round_idx in range(max_rounds):
         challenge_frame = await _find_challenge_frame(page)
         if not challenge_frame:
@@ -366,8 +370,30 @@ async def _solve_recaptcha_visual_grid(page: Page, max_rounds: int = 12) -> bool
                     lang="en",
                 )
 
-            result = await asyncio.get_event_loop().run_in_executor(None, _run)
+            try:
+                result = await asyncio.get_event_loop().run_in_executor(None, _run)
+            except Exception as api_exc:
+                err_str = str(api_exc)
+                if api_retries < MAX_API_RETRIES and (
+                    "bad response" in err_str.lower()
+                    or "timeout" in err_str.lower()
+                    or "502" in err_str
+                    or "522" in err_str
+                    or "503" in err_str
+                ):
+                    api_retries += 1
+                    logger.warning(
+                        "[Grid] 2Captcha transient error (%s), retry %d/%d in 5s...",
+                        err_str,
+                        api_retries,
+                        MAX_API_RETRIES,
+                    )
+                    await asyncio.sleep(5)
+                    continue
+                raise
+
             logger.info("[Grid] 2Captcha raw result: %r", result)
+            api_retries = 0
 
             code = (
                 result.get("code", "") if isinstance(result, dict) else str(result)
@@ -387,6 +413,7 @@ async def _solve_recaptcha_visual_grid(page: Page, max_rounds: int = 12) -> bool
                 except Exception as exc:
                     logger.warning("[Grid] Failed to click Skip: %s", exc)
                 await asyncio.sleep(4)
+                consecutive_click_failures = 0
                 continue
 
             if not code.startswith("click:"):
@@ -404,6 +431,7 @@ async def _solve_recaptcha_visual_grid(page: Page, max_rounds: int = 12) -> bool
 
             logger.info("[Grid] Clicking tiles: %s (1-indexed)", tile_nums)
 
+            clicks_ok = 0
             for tile_num in tile_nums:
                 tile_idx = tile_num - 1
                 try:
@@ -414,12 +442,31 @@ async def _solve_recaptcha_visual_grid(page: Page, max_rounds: int = 12) -> bool
                         tile = challenge_frame.locator(f'td[id="{tile_idx}"]').first
                     if await tile.count() > 0:
                         await tile.click(timeout=3000)
-                        logger.debug("[Grid] Clicked tile %d (id=%d)", tile_num, tile_idx)
+                        clicks_ok += 1
                     else:
                         logger.warning("[Grid] Tile id=%d not found in DOM", tile_idx)
                 except Exception as exc:
                     logger.warning("[Grid] Failed to click tile %d: %s", tile_num, exc)
                 await asyncio.sleep(0.4)
+
+            if clicks_ok == 0:
+                consecutive_click_failures += 1
+                logger.warning(
+                    "[Grid] ALL %d tile clicks failed (stale challenge?) — "
+                    "consecutive failures: %d",
+                    len(tile_nums),
+                    consecutive_click_failures,
+                )
+                if consecutive_click_failures >= 2:
+                    logger.error(
+                        "[Grid] Challenge is stale/expired (2 consecutive rounds "
+                        "with zero successful clicks) — stopping"
+                    )
+                    return False
+                await asyncio.sleep(3)
+                continue
+            else:
+                consecutive_click_failures = 0
 
             await asyncio.sleep(1.5)
 
