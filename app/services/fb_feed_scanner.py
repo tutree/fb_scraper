@@ -899,23 +899,9 @@ async def scroll_and_process_posts(
                 break
 
     users_saved = 0
-    seen_profile_ids: set = set()
-    deduped_links: List[Dict] = []
-    for link in user_links:
-        url = link.get("url", "")
-        profile_id = _re.search(r"profile\.php\?id=(\d+)", url)
-        pid = profile_id.group(1) if profile_id else url.split("?")[0].rstrip("/")
-        if pid in seen_profile_ids:
-            logger.info(f"Skipping duplicate profile: {pid}")
-            continue
-        seen_profile_ids.add(pid)
-        deduped_links.append(link)
-
-    if len(deduped_links) < len(user_links):
-        logger.info(
-            f"Deduplication: {len(user_links)} → {len(deduped_links)} unique profiles"
-        )
-    filtered_links: List[Dict] = deduped_links
+    # No deduplication by profile/user ID here — same user can have multiple posts.
+    # Deduplication is only by post_url when saving (in fb_profile_processor).
+    filtered_links: List[Dict] = user_links
     logger.info(f"Processing {len(filtered_links)} links sequentially")
 
     for i, link in enumerate(filtered_links):
