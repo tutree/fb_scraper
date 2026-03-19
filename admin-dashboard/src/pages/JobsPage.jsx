@@ -303,6 +303,7 @@ export default function JobsPage() {
                 <MiniBarChart data={jobStats.enrich_hourly} color="#f59e0b" />
               </div>
             </div>
+
           </div>
         </section>
       )}
@@ -451,7 +452,7 @@ export default function JobsPage() {
                 <th className="px-4 py-3">New</th>
                 <th className="px-4 py-3">Analyzed</th>
                 <th className="px-4 py-3">Enriched</th>
-                <th className="px-4 py-3">Error</th>
+                <th className="px-4 py-3">Detail</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -470,7 +471,9 @@ export default function JobsPage() {
                     <td className="px-4 py-3 text-slate-900 font-medium">{h.new_records}</td>
                     <td className="px-4 py-3 text-slate-900 font-medium">{h.analyzed}</td>
                     <td className="px-4 py-3 text-slate-900 font-medium">{h.enriched}</td>
-                    <td className="max-w-[200px] truncate px-4 py-3 text-xs text-rose-600">{h.error || '—'}</td>
+                    <td className="max-w-[200px] truncate px-4 py-3 text-xs" title={h.error || h.detail || ''}>
+                      {h.error ? <span className="text-rose-600">{h.error}</span> : h.detail ? <span className="text-cyan-600">{h.detail}</span> : '—'}
+                    </td>
                   </tr>
                 ))
               )}

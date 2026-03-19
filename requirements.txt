@@ -1,7 +1,8 @@
+# Use Python 3.11 or 3.12. Python 3.14 has no pre-built wheels for pydantic-core (would need Rust to build).
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 sqlalchemy==2.0.23
-psycopg2-binary==2.9.9
+psycopg2-binary>=2.9.9
 pydantic==2.5.0
 pydantic-settings==2.1.0
 playwright==1.40.0
@@ -16,5 +17,6 @@ passlib[bcrypt]==1.7.4
 bcrypt==4.1.2
 tenacity==8.2.3
 pyotp==2.9.0
+2captcha-python==1.5.0
 google-generativeai==0.3.2
 apscheduler==3.10.4

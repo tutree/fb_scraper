@@ -565,7 +565,64 @@ class BrowserManager:
         page._kiro_has_loaded_cookies = bool(storage_state)
 
         return page
-    
+
+    async def close_page_context(self, page: Optional[Page]) -> None:
+        """Close a tab and its browser context (e.g. before starting a clean login attempt)."""
+        if not page:
+            return
+        ctx = getattr(page, "_kiro_context", None)
+        try:
+            await page.close()
+        except Exception as exc:
+            logger.debug("close_page_context: page.close: %s", exc)
+        if ctx:
+            try:
+                await ctx.close()
+            except Exception as exc:
+                logger.debug("close_page_context: context.close: %s", exc)
+
+    async def create_fresh_page_for_login(self, account_uid: str) -> Page:
+        """
+        New browser context with no saved cookies — required so each credential
+        sees the real login form instead of checkpoint/redirect from a stale session.
+        """
+        logger.info("Creating clean browser page for login attempt (UID: %s)", account_uid)
+        browser = await self.get_browser()
+        viewport = self.viewport
+        user_agent = random.choice(self.user_agents)
+
+        context = await browser.new_context(
+            viewport=viewport,
+            user_agent=user_agent,
+            locale="en-US",
+            timezone_id="America/New_York",
+            has_touch=False,
+            is_mobile=False,
+            device_scale_factor=1,
+            storage_state=None,
+        )
+        try:
+            await context.grant_permissions(
+                ["clipboard-read", "clipboard-write"],
+                origin="https://www.facebook.com",
+            )
+            await context.grant_permissions(
+                ["clipboard-read", "clipboard-write"],
+                origin="https://web.facebook.com",
+            )
+        except Exception as exc:
+            logger.debug("Could not grant clipboard permissions: %s", exc)
+
+        logger.info("Injecting stealth scripts (fresh login context)...")
+        await context.add_init_script(STEALTH_SCRIPT)
+        page = await context.new_page()
+        page.set_default_navigation_timeout(120000)
+        page.set_default_timeout(60000)
+        page._kiro_context = context
+        page._kiro_account_uid = account_uid
+        page._kiro_has_loaded_cookies = False
+        return page
+
     async def save_cookies(self, page: Page) -> bool:
         """Save cookies from the page for future use."""
         from pathlib import Path

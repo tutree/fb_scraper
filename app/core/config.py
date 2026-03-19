@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     ENFORMION_AP_NAME: str = ""
     ENFORMION_AP_PASSWORD: str = ""
 
+    # 2Captcha (for Facebook login captcha solving)
+    CAPTCHA_2CAPTCHA_API_KEY: str = ""
+
     # Background automation (runs automatically on startup, uses config/keywords.json)
     AUTO_SCRAPE_ENABLED: bool = True
     AUTO_SCRAPE_INTERVAL_MINUTES: int = 180
@@ -61,8 +64,11 @@ class Settings(BaseSettings):
         "math tutor needed",
     ]
 
+    HEADLESS: bool = True
+
     class Config:
         env_file = ".env"
+        extra = "ignore"
 
     @property
     def proxies(self) -> List[str]:

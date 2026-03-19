@@ -12,6 +12,7 @@ from ..core.logging_config import get_logger
 logger = get_logger(__name__)
 
 CREDENTIALS_PATH = Path("config/credentials.json")
+ACCOUNTS_JSON_PATH = Path("config/accounts.json")
 COOKIE_DIRS = [Path("cookies"), Path("config/cookies")]
 
 
@@ -57,8 +58,27 @@ def _cookie_uid_order() -> List[str]:
     return [uid for uid, _ in sorted(uid_mtime.items(), key=lambda item: item[1], reverse=True)]
 
 
+def _load_accounts_json() -> List[Dict]:
+    """Load accounts from config/accounts.json (flat list with uid/password/totp_secret)."""
+    if not ACCOUNTS_JSON_PATH.exists():
+        return []
+    try:
+        with open(ACCOUNTS_JSON_PATH, "r", encoding="utf-8") as f:
+            accounts = json.load(f)
+        valid = [a for a in accounts if a.get("uid") and a.get("password")]
+        if valid:
+            logger.info(
+                "Loaded %d accounts from %s", len(valid), ACCOUNTS_JSON_PATH,
+            )
+        return valid
+    except Exception as exc:
+        logger.warning("Failed to parse %s: %s", ACCOUNTS_JSON_PATH, exc)
+        return []
+
+
 def load_accounts() -> List[Dict]:
-    """Load Facebook accounts from credentials.json, prioritising cookie-backed UIDs."""
+    """Load Facebook accounts from credentials.json, prioritising cookie-backed UIDs.
+    Falls back to config/accounts.json, then env variables."""
     logger.info(f"Loading Facebook accounts from: {CREDENTIALS_PATH.absolute()}")
     if CREDENTIALS_PATH.exists():
         try:
@@ -102,13 +122,28 @@ def load_accounts() -> List[Dict]:
                     if fallback:
                         logger.warning("Falling back to cookie-backed accounts: %s", [a.get("uid") for a in fallback])
                         selected_accounts = fallback
-            for acc in selected_accounts:
-                logger.info("  - Account: %s, 2FA configured: %s", acc.get("uid", "Unknown"), "Yes" if acc.get("totp_secret") else "No")
-            return selected_accounts
+            if selected_accounts:
+                for acc in selected_accounts:
+                    logger.info("  - Account: %s, 2FA configured: %s", acc.get("uid", "Unknown"), "Yes" if acc.get("totp_secret") else "No")
+                return selected_accounts
         except Exception as exc:
-            logger.error("Failed to parse credentials file '%s': %s. Falling back to env.", CREDENTIALS_PATH, exc)
-    else:
-        logger.warning(f"Credentials file not found at {CREDENTIALS_PATH}, using environment variables")
+            logger.error("Failed to parse credentials file '%s': %s.", CREDENTIALS_PATH, exc)
+
+    # Fallback: try config/accounts.json
+    accounts_json = _load_accounts_json()
+    if accounts_json:
+        cookie_uid_order = _cookie_uid_order()
+        if cookie_uid_order:
+            by_uid = {str(a["uid"]).strip(): a for a in accounts_json}
+            ordered = [by_uid[uid] for uid in cookie_uid_order if uid in by_uid]
+            rest = [a for a in accounts_json if str(a["uid"]).strip() not in {str(o["uid"]).strip() for o in ordered}]
+            accounts_json = ordered + rest
+        for acc in accounts_json:
+            logger.info("  - Account: %s, 2FA configured: %s", acc.get("uid", "Unknown"), "Yes" if acc.get("totp_secret") else "No")
+        return accounts_json
+
+    # Final fallback: env variables + cookie-backed UIDs
+    logger.warning("No credentials.json or accounts.json found, using environment variables")
     cookie_uid_order = _cookie_uid_order()
     env_uid = str(settings.FACEBOOK_EMAIL or "").strip()
 

@@ -109,10 +109,14 @@ def main():
     try:
         response = requests.get("http://localhost:8001/health")
         if response.status_code != 200:
-            print("❌ API is not running. Please start it with: docker compose up -d")
+            print("❌ API is not running.")
+            print("   Start the API with: docker compose up -d")
+            print("   Or run without API: python run_standalone.py")
             return
     except requests.exceptions.ConnectionError:
-        print("❌ Cannot connect to API. Please start it with: docker compose up -d")
+        print("❌ Cannot connect to API.")
+        print("   Start the API with: docker compose up -d")
+        print("   Or run without API: python run_standalone.py")
         return
     
     print("\nWhat would you like to do?")

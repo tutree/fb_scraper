@@ -39,6 +39,9 @@ venv.bak/
 cookies/
 !cookies/README.md
 
+# Account credentials - SENSITIVE
+config/accounts.json
+
 # Database
 *.db
 *.sqlite

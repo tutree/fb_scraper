@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from app.core.database import get_db
 from app.services.browser_manager import BrowserManager
 from app.services.proxy_manager import ProxyManager
-from app.services.facebook_scraper import FacebookScraper
+from app.services.facebook_scraper import FacebookScraper, NoActiveCookieError
 from app.core.logging_config import setup_logging, get_logger
 
 # Setup logging
@@ -63,6 +63,7 @@ async def main():
     
     browser_manager = BrowserManager(proxy_manager=proxy_manager)
     
+    auth_failed = False
     try:
         # Initialize scraper
         scraper = FacebookScraper(db=db, browser_manager=browser_manager)
@@ -75,9 +76,13 @@ async def main():
             logger.info("=" * 80)
             
             try:
-                results = await scraper.search_keyword(keyword, max_results=max_results)
-                logger.info(f"Keyword '{keyword}' completed: {len(results)} results")
-                total_results += len(results)
+                count = await scraper.search_keyword(keyword, max_results=max_results)
+                logger.info(
+                    "Keyword '%s' completed: %s profiles processed",
+                    keyword,
+                    count,
+                )
+                total_results += int(count or 0)
                 logger.info(f"Total results so far: {total_results}")
                 
                 # Delay between keywords
@@ -87,12 +92,23 @@ async def main():
                     logger.info(f"Waiting {delay:.1f}s before next keyword search...")
                     await asyncio.sleep(delay)
                     
+            except NoActiveCookieError as e:
+                logger.error(
+                    "Session invalid and auto-login failed for all accounts — stopping "
+                    "(fix cookies or credentials, then retry). Detail: %s",
+                    e,
+                )
+                auth_failed = True
+                break
             except Exception as e:
                 logger.error(f"Error searching keyword '{keyword}': {e}", exc_info=True)
                 continue
         
         logger.info("=" * 80)
-        logger.info(f"SCRAPING COMPLETED - Total results: {total_results}")
+        if auth_failed:
+            logger.error("SCRAPING STOPPED — authentication failed.")
+        else:
+            logger.info(f"SCRAPING COMPLETED - Total results: {total_results}")
         logger.info("=" * 80)
         
     finally:
@@ -101,6 +117,9 @@ async def main():
         await browser_manager.close()
         db.close()
         logger.info("✓ Cleanup complete")
+
+    if auth_failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

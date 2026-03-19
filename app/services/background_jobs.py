@@ -247,7 +247,6 @@ def get_status() -> dict:
     analyze_job = scheduler.get_job(JOB_ID_ANALYZE_ENRICH)
     enrich_job = scheduler.get_job(JOB_ID_ENRICH)
     comment_job = scheduler.get_job(JOB_ID_COMMENT_ANALYZE)
-
     analyze_worker_alive = _analyze_worker_task is not None and not _analyze_worker_task.done()
     enrich_worker_alive = _enrich_worker_task is not None and not _enrich_worker_task.done()
 

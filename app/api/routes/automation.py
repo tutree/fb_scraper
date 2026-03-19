@@ -73,6 +73,7 @@ class JobHistoryEntry(BaseModel):
     analyzed: int = 0
     enriched: int = 0
     error: Optional[str] = None
+    detail: Optional[str] = None
 
 
 class AutomationUpdate(BaseModel):
@@ -118,6 +119,7 @@ async def trigger_scrape_now():
 async def trigger_comment_analyze():
     trigger_comment_analyze_now()
     return {"message": "Comment analyzer triggered — running in background"}
+
 
 
 # ---------------------------------------------------------------------------

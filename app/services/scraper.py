@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 from .browser_manager import BrowserManager
-from .facebook_scraper import FacebookScraper
+from .facebook_scraper import FacebookScraper, NoActiveCookieError
 from .proxy_manager import ProxyManager
 from ..models.search_result import SearchResult
 from ..core.config import settings
@@ -82,15 +82,20 @@ class ScraperService:
                 logger.info(f"KEYWORD {idx}/{len(keywords)}: '{keyword}'")
                 logger.info("=" * 80)
 
-                # Search for this keyword
-                processed_count = await self.facebook_scraper.search_keyword(
-                    keyword, max_results, should_stop=should_stop
-                )
-                processed_count = int(processed_count or 0)
-                total_results_count += processed_count
-                
-                logger.info(f"Keyword '{keyword}' completed: {processed_count} results")
-                logger.info(f"Total results so far: {total_results_count}")
+                try:
+                    processed_count = await self.facebook_scraper.search_keyword(
+                        keyword, max_results, should_stop=should_stop
+                    )
+                    processed_count = int(processed_count or 0)
+                    total_results_count += processed_count
+                    logger.info(f"Keyword '{keyword}' completed: {processed_count} results")
+                    logger.info(f"Total results so far: {total_results_count}")
+                except NoActiveCookieError:
+                    logger.error(
+                        "All auto-login attempts failed for keyword '%s' — skipping to next keyword",
+                        keyword,
+                    )
+                    continue
 
                 # Longer random delay between searches (10-30 seconds)
                 if idx < len(keywords):  # Don't wait after last keyword
