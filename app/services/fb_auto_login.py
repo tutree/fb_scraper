@@ -292,7 +292,7 @@ async def _extract_grid_info(challenge_frame):
     return instruction, rows, cols
 
 
-async def _solve_recaptcha_visual_grid(page: Page, max_rounds: int = 5) -> bool:
+async def _solve_recaptcha_visual_grid(page: Page, max_rounds: int = 12) -> bool:
     """
     Solve reCAPTCHA v2 Enterprise IMAGE CHALLENGE via 2Captcha Grid API.
 
@@ -475,7 +475,7 @@ async def _solve_recaptcha_enterprise_2captcha(page: Page) -> bool:
     challenge_frame = await _find_challenge_frame(page)
     if challenge_frame:
         logger.info("[Enterprise] Visual challenge detected — using Grid API")
-        if await _solve_recaptcha_visual_grid(page, max_rounds=5):
+        if await _solve_recaptcha_visual_grid(page, max_rounds=12):
             await asyncio.sleep(3)
             return True
         logger.warning("[Enterprise] Grid solver failed — trying token fallback")
