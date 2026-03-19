@@ -136,8 +136,10 @@ async def scroll_and_process_posts(
     """
     logger.info(f"Starting extraction for keyword: '{keyword}' (target: {max_results} posts)")
 
-    logger.info("Preloading search feed with progressive scrolls...")
-    for i in range(8):
+    # Initial warmup: more scrolls so first extraction sees more posts (needed for 100+ per keyword)
+    warmup_scrolls = min(20, max(12, max_results // 8))
+    logger.info("Preloading search feed with %d progressive scrolls...", warmup_scrolls)
+    for i in range(warmup_scrolls):
         if should_stop and should_stop():
             logger.warning("Stop requested before scroll warmup completed.")
             return 0
@@ -556,15 +558,19 @@ async def scroll_and_process_posts(
 
     seen_link_keys = {_link_key(link) for link in user_links}
 
-    # Progressive scan: keep scrolling until we hit the target or stall
+    # Progressive scan: keep scrolling until we hit the target or stall (up to many rounds for 100+ per keyword)
+    max_scan_rounds = max(40, (max_results // 3) + 10)
+    no_growth_threshold = 5
     if len(user_links) < max_results:
         logger.info(
-            "Initial extraction below target (%d/%d). Continuing progressive scan...",
+            "Initial extraction below target (%d/%d). Continuing progressive scan (max %d rounds, stop after %d no-growth)...",
             len(user_links),
             max_results,
+            max_scan_rounds,
+            no_growth_threshold,
         )
         no_growth_rounds = 0
-        for scan_round in range(1, 10):
+        for scan_round in range(1, max_scan_rounds + 1):
             if should_stop and should_stop():
                 break
 
@@ -885,7 +891,12 @@ async def scroll_and_process_posts(
 
             if added == 0:
                 no_growth_rounds += 1
-                logger.info("Progressive scan round %d: no new links (%d/3)", scan_round, no_growth_rounds)
+                logger.info(
+                    "Progressive scan round %d: no new links (%d/%d)",
+                    scan_round,
+                    no_growth_rounds,
+                    no_growth_threshold,
+                )
             else:
                 no_growth_rounds = 0
                 logger.info(
@@ -895,7 +906,7 @@ async def scroll_and_process_posts(
                     len(user_links),
                 )
 
-            if len(user_links) >= max_results or no_growth_rounds >= 3:
+            if len(user_links) >= max_results or no_growth_rounds >= no_growth_threshold:
                 break
 
     users_saved = 0
