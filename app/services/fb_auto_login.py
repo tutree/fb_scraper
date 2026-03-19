@@ -292,21 +292,174 @@ async def _extract_grid_info(challenge_frame):
     return instruction, rows, cols
 
 
+def _is_dynamic_challenge(instruction: str, rows: int, cols: int) -> bool:
+    """Return True if the challenge uses dynamic tile replacement (3x3 fade type)."""
+    lower = instruction.lower()
+    return (
+        "once there are none left" in lower
+        or "click verify once" in lower
+        or ("select all images" in lower and rows == 3 and cols == 3)
+    )
+
+
+async def _grid_screenshot_and_solve(
+    solver, challenge_frame, instruction: str, rows: int, cols: int
+) -> str:
+    """Screenshot the grid, send to 2Captcha, return the code string."""
+    target = challenge_frame.locator("#rc-imageselect-target").first
+    if await target.count() == 0:
+        target = challenge_frame.locator(".rc-imageselect-challenge").first
+    if await target.count() == 0:
+        raise RuntimeError("Cannot find image grid element to screenshot")
+
+    screenshot_bytes = await target.screenshot()
+
+    fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix="fb_grid_")
+    try:
+        os.write(fd, screenshot_bytes)
+    finally:
+        os.close(fd)
+
+    try:
+        logger.info("[Grid] Sending %dx%d grid image to 2Captcha workers...", rows, cols)
+        path_str = str(tmp_path)
+
+        def _run():
+            return solver.grid(
+                path_str, rows=rows, cols=cols, hintText=instruction,
+                canSkip=1, lang="en",
+            )
+
+        result = await asyncio.get_event_loop().run_in_executor(None, _run)
+        logger.info("[Grid] 2Captcha raw result: %r", result)
+        code = result.get("code", "") if isinstance(result, dict) else str(result)
+        return code
+    finally:
+        try:
+            Path(tmp_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+async def _click_grid_tiles(challenge_frame, tile_nums: list[int]) -> int:
+    """Click tiles by 1-indexed number. Returns count of successful clicks."""
+    clicks_ok = 0
+    for tile_num in tile_nums:
+        tile_idx = tile_num - 1
+        try:
+            tile = challenge_frame.locator(
+                f'td.rc-imageselect-tile[id="{tile_idx}"]'
+            ).first
+            if await tile.count() == 0:
+                tile = challenge_frame.locator(f'td[id="{tile_idx}"]').first
+            if await tile.count() > 0:
+                await tile.click(timeout=3000)
+                clicks_ok += 1
+            else:
+                logger.warning("[Grid] Tile id=%d not found in DOM", tile_idx)
+        except Exception as exc:
+            logger.warning("[Grid] Failed to click tile %d: %s", tile_num, exc)
+        await asyncio.sleep(0.4)
+    return clicks_ok
+
+
+def _parse_tile_nums(code: str) -> list[int]:
+    """Parse 'click:1/3/5' into [1, 3, 5]."""
+    nums = []
+    for p in code.replace("click:", "").split("/"):
+        p = p.strip()
+        if p.isdigit():
+            nums.append(int(p))
+    return nums
+
+
+async def _solve_dynamic_grid(
+    solver, page: Page, challenge_frame, instruction: str, rows: int, cols: int,
+    max_sub_rounds: int = 15,
+) -> bool:
+    """Solve the dynamic 3x3 challenge where tiles fade and get replaced."""
+    logger.info("[Grid-Dynamic] Starting dynamic tile solver (3x3 fade type)")
+
+    for sub in range(max_sub_rounds):
+        challenge_frame = await _find_challenge_frame(page)
+        if not challenge_frame:
+            logger.info("[Grid-Dynamic] Challenge frame gone -- puzzle solved")
+            return True
+
+        try:
+            code = await _grid_screenshot_and_solve(
+                solver, challenge_frame, instruction, rows, cols
+            )
+        except Exception as exc:
+            logger.error("[Grid-Dynamic] Screenshot/solve failed: %s", exc)
+            return False
+
+        if not code:
+            logger.error("[Grid-Dynamic] Empty response from 2Captcha")
+            return False
+
+        if "No_matching_images" in code:
+            logger.info(
+                "[Grid-Dynamic] No matching tiles left (sub-round %d) -- clicking Verify",
+                sub + 1,
+            )
+            try:
+                verify_btn = challenge_frame.locator("#recaptcha-verify-button").first
+                if await verify_btn.count() > 0:
+                    await verify_btn.click(timeout=5000)
+            except Exception as exc:
+                logger.warning("[Grid-Dynamic] Failed to click Verify: %s", exc)
+            await asyncio.sleep(4)
+            return True
+
+        if not code.startswith("click:"):
+            logger.error("[Grid-Dynamic] Unexpected format: %s", code)
+            return False
+
+        tile_nums = _parse_tile_nums(code)
+        if not tile_nums:
+            logger.error("[Grid-Dynamic] No tiles parsed from: %s", code)
+            return False
+
+        logger.info(
+            "[Grid-Dynamic] Sub-round %d: clicking tiles %s, then waiting for fade...",
+            sub + 1, tile_nums,
+        )
+
+        clicks_ok = await _click_grid_tiles(challenge_frame, tile_nums)
+        if clicks_ok == 0:
+            logger.warning("[Grid-Dynamic] All clicks failed -- challenge may be stale")
+            return False
+
+        # Wait for tiles to fade out and new images to load
+        await asyncio.sleep(5)
+
+    # Exhausted sub-rounds -- click Verify and hope for the best
+    logger.warning("[Grid-Dynamic] Exhausted %d sub-rounds, clicking Verify", max_sub_rounds)
+    try:
+        cf = await _find_challenge_frame(page)
+        if cf:
+            verify_btn = cf.locator("#recaptcha-verify-button").first
+            if await verify_btn.count() > 0:
+                await verify_btn.click(timeout=5000)
+    except Exception:
+        pass
+    await asyncio.sleep(4)
+    return True
+
+
 async def _solve_recaptcha_visual_grid(page: Page, max_rounds: int = 12) -> bool:
     """
     Solve reCAPTCHA v2 Enterprise IMAGE CHALLENGE via 2Captcha Grid API.
 
-    Instead of sending a sitekey and getting a token (which Facebook rejects
-    because the challenge is session-bound), this:
-    1. Screenshots the actual puzzle grid from the browser
-    2. Sends it to 2Captcha workers who identify which tiles to click
-    3. Clicks those tiles in the challenge iframe
-    4. Clicks Verify / Skip
-    5. Repeats if new images appear (up to max_rounds)
+    Handles two types:
+    - Static grid (4x4): select all matching tiles, click Verify, repeat if new puzzle
+    - Dynamic grid (3x3): click matching tiles, they fade and get replaced, repeat
+      until no matches remain, then click Verify
     """
     solver = _get_2captcha_solver()
     if not solver:
-        logger.error("[Grid] No 2Captcha solver — set CAPTCHA_2CAPTCHA_API_KEY")
+        logger.error("[Grid] No 2Captcha solver -- set CAPTCHA_2CAPTCHA_API_KEY")
         return False
 
     consecutive_click_failures = 0
@@ -318,7 +471,7 @@ async def _solve_recaptcha_visual_grid(page: Page, max_rounds: int = 12) -> bool
         if not challenge_frame:
             if round_idx > 0:
                 logger.info(
-                    "[Grid] Challenge frame gone after round %d — puzzle likely solved",
+                    "[Grid] Challenge frame gone after round %d -- puzzle likely solved",
                     round_idx,
                 )
                 return True
@@ -327,179 +480,119 @@ async def _solve_recaptcha_visual_grid(page: Page, max_rounds: int = 12) -> bool
 
         instruction, rows, cols = await _extract_grid_info(challenge_frame)
         logger.info(
-            "[Grid] Round %d/%d — instruction: %r, grid: %dx%d",
-            round_idx + 1,
-            max_rounds,
-            instruction[:80],
-            rows,
-            cols,
+            "[Grid] Round %d/%d -- instruction: %r, grid: %dx%d",
+            round_idx + 1, max_rounds, instruction[:80], rows, cols,
         )
 
-        # Screenshot the image grid
-        tmp_path = None
-        try:
-            target = challenge_frame.locator("#rc-imageselect-target").first
-            if await target.count() == 0:
-                target = challenge_frame.locator(".rc-imageselect-challenge").first
-            if await target.count() == 0:
-                logger.error("[Grid] Cannot find image grid element to screenshot")
-                return False
-            screenshot_bytes = await target.screenshot()
-        except Exception as exc:
-            logger.error("[Grid] Failed to screenshot challenge grid: %s", exc)
-            return False
-
-        try:
-            fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix="fb_grid_")
-            try:
-                os.write(fd, screenshot_bytes)
-            finally:
-                os.close(fd)
-
-            logger.info("[Grid] Sending %dx%d grid image to 2Captcha workers...", rows, cols)
-
-            path_str = str(tmp_path)
-
-            def _run():
-                return solver.grid(
-                    path_str,
-                    rows=rows,
-                    cols=cols,
-                    hintText=instruction,
-                    canSkip=1,
-                    lang="en",
-                )
-
-            try:
-                result = await asyncio.get_event_loop().run_in_executor(None, _run)
-            except Exception as api_exc:
-                err_str = str(api_exc)
-                if api_retries < MAX_API_RETRIES and (
-                    "bad response" in err_str.lower()
-                    or "timeout" in err_str.lower()
-                    or "502" in err_str
-                    or "522" in err_str
-                    or "503" in err_str
-                ):
-                    api_retries += 1
-                    logger.warning(
-                        "[Grid] 2Captcha transient error (%s), retry %d/%d in 5s...",
-                        err_str,
-                        api_retries,
-                        MAX_API_RETRIES,
-                    )
-                    await asyncio.sleep(5)
-                    continue
-                raise
-
-            logger.info("[Grid] 2Captcha raw result: %r", result)
-            api_retries = 0
-
-            code = (
-                result.get("code", "") if isinstance(result, dict) else str(result)
+        # Detect dynamic vs static challenge
+        if _is_dynamic_challenge(instruction, rows, cols):
+            result = await _solve_dynamic_grid(
+                solver, page, challenge_frame, instruction, rows, cols
             )
-
-            if not code:
-                logger.error("[Grid] Empty response from 2Captcha")
-                return False
-
-            if "No_matching_images" in code:
-                logger.info("[Grid] No matching images — clicking Skip")
-                try:
-                    skip_btn = challenge_frame.locator(
-                        "#recaptcha-verify-button"
-                    ).first
-                    await skip_btn.click(timeout=5000)
-                except Exception as exc:
-                    logger.warning("[Grid] Failed to click Skip: %s", exc)
-                await asyncio.sleep(4)
-                consecutive_click_failures = 0
+            if result:
+                # After dynamic solve, check if a new challenge appeared
+                await asyncio.sleep(2)
+                cf = await _find_challenge_frame(page)
+                if cf is None:
+                    return True
+                # New challenge appeared -- continue the outer loop
                 continue
-
-            if not code.startswith("click:"):
-                logger.error("[Grid] Unexpected response format: %s", code)
-                return False
-
-            tile_nums = []
-            for p in code.replace("click:", "").split("/"):
-                p = p.strip()
-                if p.isdigit():
-                    tile_nums.append(int(p))
-            if not tile_nums:
-                logger.error("[Grid] No tile numbers parsed from: %s", code)
-                return False
-
-            logger.info("[Grid] Clicking tiles: %s (1-indexed)", tile_nums)
-
-            clicks_ok = 0
-            for tile_num in tile_nums:
-                tile_idx = tile_num - 1
-                try:
-                    tile = challenge_frame.locator(
-                        f'td.rc-imageselect-tile[id="{tile_idx}"]'
-                    ).first
-                    if await tile.count() == 0:
-                        tile = challenge_frame.locator(f'td[id="{tile_idx}"]').first
-                    if await tile.count() > 0:
-                        await tile.click(timeout=3000)
-                        clicks_ok += 1
-                    else:
-                        logger.warning("[Grid] Tile id=%d not found in DOM", tile_idx)
-                except Exception as exc:
-                    logger.warning("[Grid] Failed to click tile %d: %s", tile_num, exc)
-                await asyncio.sleep(0.4)
-
-            if clicks_ok == 0:
-                consecutive_click_failures += 1
-                logger.warning(
-                    "[Grid] ALL %d tile clicks failed (stale challenge?) — "
-                    "consecutive failures: %d",
-                    len(tile_nums),
-                    consecutive_click_failures,
-                )
-                if consecutive_click_failures >= 2:
-                    logger.error(
-                        "[Grid] Challenge is stale/expired (2 consecutive rounds "
-                        "with zero successful clicks) — stopping"
-                    )
-                    return False
-                await asyncio.sleep(3)
-                continue
-            else:
-                consecutive_click_failures = 0
-
-            await asyncio.sleep(1.5)
-
-            # Click Verify
-            try:
-                verify_btn = challenge_frame.locator(
-                    "#recaptcha-verify-button"
-                ).first
-                if await verify_btn.count() > 0:
-                    btn_text = (await verify_btn.inner_text()).strip()
-                    await verify_btn.click(timeout=5000)
-                    logger.info("[Grid] Clicked Verify/Skip button (%s)", btn_text)
-                else:
-                    logger.warning("[Grid] Verify button not found")
-            except Exception as exc:
-                logger.warning("[Grid] Failed to click Verify: %s", exc)
-
-            await asyncio.sleep(4)
-
-        except Exception as exc:
-            logger.error("[Grid] 2Captcha grid solve failed: %s", exc)
             return False
-        finally:
-            if tmp_path:
-                try:
-                    Path(tmp_path).unlink(missing_ok=True)
-                except Exception:
-                    pass
+
+        # --- Static grid path (original logic) ---
+        try:
+            code = await _grid_screenshot_and_solve(
+                solver, challenge_frame, instruction, rows, cols
+            )
+        except RuntimeError as exc:
+            logger.error("[Grid] %s", exc)
+            return False
+        except Exception as api_exc:
+            err_str = str(api_exc)
+            if api_retries < MAX_API_RETRIES and (
+                "bad response" in err_str.lower()
+                or "timeout" in err_str.lower()
+                or "502" in err_str
+                or "522" in err_str
+                or "503" in err_str
+            ):
+                api_retries += 1
+                logger.warning(
+                    "[Grid] 2Captcha transient error (%s), retry %d/%d in 5s...",
+                    err_str, api_retries, MAX_API_RETRIES,
+                )
+                await asyncio.sleep(5)
+                continue
+            logger.error("[Grid] 2Captcha grid solve failed: %s", api_exc)
+            return False
+
+        api_retries = 0
+
+        if not code:
+            logger.error("[Grid] Empty response from 2Captcha")
+            return False
+
+        if "No_matching_images" in code:
+            logger.info("[Grid] No matching images -- clicking Skip")
+            try:
+                skip_btn = challenge_frame.locator("#recaptcha-verify-button").first
+                await skip_btn.click(timeout=5000)
+            except Exception as exc:
+                logger.warning("[Grid] Failed to click Skip: %s", exc)
+            await asyncio.sleep(4)
+            consecutive_click_failures = 0
+            continue
+
+        if not code.startswith("click:"):
+            logger.error("[Grid] Unexpected response format: %s", code)
+            return False
+
+        tile_nums = _parse_tile_nums(code)
+        if not tile_nums:
+            logger.error("[Grid] No tile numbers parsed from: %s", code)
+            return False
+
+        logger.info("[Grid] Clicking tiles: %s (1-indexed)", tile_nums)
+        clicks_ok = await _click_grid_tiles(challenge_frame, tile_nums)
+
+        if clicks_ok == 0:
+            consecutive_click_failures += 1
+            logger.warning(
+                "[Grid] ALL %d tile clicks failed (stale challenge?) -- "
+                "consecutive failures: %d",
+                len(tile_nums), consecutive_click_failures,
+            )
+            if consecutive_click_failures >= 2:
+                logger.error(
+                    "[Grid] Challenge is stale/expired (2 consecutive rounds "
+                    "with zero successful clicks) -- stopping"
+                )
+                return False
+            await asyncio.sleep(3)
+            continue
+        else:
+            consecutive_click_failures = 0
+
+        await asyncio.sleep(1.5)
+
+        # Click Verify
+        try:
+            verify_btn = challenge_frame.locator("#recaptcha-verify-button").first
+            if await verify_btn.count() > 0:
+                btn_text = (await verify_btn.inner_text()).strip()
+                await verify_btn.click(timeout=5000)
+                logger.info("[Grid] Clicked Verify/Skip button (%s)", btn_text)
+            else:
+                logger.warning("[Grid] Verify button not found")
+        except Exception as exc:
+            logger.warning("[Grid] Failed to click Verify: %s", exc)
+
+        await asyncio.sleep(4)
 
     # Check if challenge frame is gone (success)
     cf = await _find_challenge_frame(page)
     if cf is None:
-        logger.info("[Grid] Challenge frame gone after all rounds — success")
+        logger.info("[Grid] Challenge frame gone after all rounds -- success")
         return True
 
     logger.warning("[Grid] Challenge frame still present after %d rounds", max_rounds)
@@ -841,35 +934,43 @@ async def _post_login_resolve_challenges(
             logger.info("Checkpoint / 2FA for %s (attempt %s)", uid, checkpoint_attempts)
 
             page_url = (page.url or "").lower()
-            # two_step_verification?flow=pre_authentication shows reCAPTCHA *before* OTP field
-            if "two_step_verification" in page_url or "pre_authentication" in page_url:
-                # Quick check: if OTP field is already visible, skip captcha entirely
+            is_pre_auth = "pre_authentication" in page_url or (
+                "two_step_verification/authentication" in page_url
+            )
+            is_direct_2fa = (
+                "two_step_verification/two_factor" in page_url
+                or "flow=two_factor_login" in page_url
+            )
+
+            if is_direct_2fa:
+                logger.info(
+                    "Direct 2FA page (no captcha) for %s -- proceeding to OTP",
+                    uid,
+                )
+            elif is_pre_auth or "two_step_verification" in page_url:
                 quick_otp = await _wait_for_2fa_code_input(page, timeout_seconds=5.0)
                 if quick_otp:
                     logger.info(
-                        "OTP field already visible on pre-auth page — no captcha needed (UID=%s)",
+                        "OTP field already visible on pre-auth page -- no captcha needed (UID=%s)",
                         uid,
                     )
                 else:
                     logger.info(
-                        "Two-step pre-auth page — running reCAPTCHA checkbox before OTP (UID=%s)",
+                        "Two-step pre-auth page -- running reCAPTCHA checkbox before OTP (UID=%s)",
                         uid,
                     )
-                    # 1) Click checkbox once
                     await _click_recaptcha_im_not_a_robot_label(
                         page, pre_wait_seconds=10.0, poll_seconds=20.0
                     )
-                    # 2) Wait for challenge iframe to fully load after checkbox
                     logger.info("Waiting 8s for challenge iframe to appear after checkbox click...")
                     await asyncio.sleep(8)
-                    # 3) Solve the puzzle via 2Captcha Enterprise (do NOT click checkbox again!)
                     captcha_solved = await _solve_captcha_if_present(page, skip_recaptcha_primer=True)
                     if captcha_solved:
-                        logger.info("reCAPTCHA solved — waiting for page to advance before 2FA...")
+                        logger.info("reCAPTCHA solved -- waiting for page to advance before 2FA...")
                         await asyncio.sleep(5)
                     else:
                         logger.warning(
-                            "reCAPTCHA solve returned False for %s — "
+                            "reCAPTCHA solve returned False for %s -- "
                             "2FA field may not appear; trying anyway...",
                             uid,
                         )
@@ -922,8 +1023,14 @@ async def _wait_for_2fa_code_input(page: Page, timeout_seconds: float = 90.0):
     """
     Wait for Facebook's OTP field after reCAPTCHA / interstitials (loads late on pre-auth).
     Returns a Locator ready to fill, or None.
+
+    Facebook's modern two_factor page uses a floating label ("Code") instead of a
+    placeholder attribute, so pure CSS attribute selectors miss the input.  We fall
+    back to a JS DOM probe that marks the first visible text-like input on checkpoint
+    pages with a data attribute so we can target it with a Playwright locator.
     """
-    selectors = (
+
+    css_selectors = (
         'input[name="approvals_code"]',
         'input#approvals_code',
         'input[id="approvals_code"]',
@@ -933,20 +1040,121 @@ async def _wait_for_2fa_code_input(page: Page, timeout_seconds: float = 90.0):
         'input[placeholder*="code" i]',
         'input[aria-label*="code" i]',
         'input[autocomplete="one-time-code"]',
+        'input[name*="code" i]',
+        'input[type="text"][name*="approvals" i]',
+        'input[type="tel"]',
+        'input[type="number"]',
+        'input[inputmode="numeric"]',
     )
+
+    JS_FIND_OTP_INPUT = """
+    () => {
+        const inputs = document.querySelectorAll('input');
+        for (const el of inputs) {
+            const t = (el.type || '').toLowerCase();
+            if (t === 'hidden' || t === 'submit' || t === 'button' || t === 'checkbox'
+                || t === 'radio' || t === 'image' || t === 'file' || t === 'reset') continue;
+            const rect = el.getBoundingClientRect();
+            if (rect.width < 10 || rect.height < 10) continue;
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden'
+                || style.opacity === '0') continue;
+            // check if associated label or nearby text mentions "code"
+            const ph = (el.placeholder || '').toLowerCase();
+            const nm = (el.name || '').toLowerCase();
+            const al = (el.getAttribute('aria-label') || '').toLowerCase();
+            let labelText = '';
+            if (el.id) {
+                const lbl = document.querySelector('label[for="' + el.id + '"]');
+                if (lbl) labelText = (lbl.textContent || '').toLowerCase();
+            }
+            if (!labelText) {
+                const parent = el.closest('div, form, section');
+                if (parent) {
+                    const lbl = parent.querySelector('label, span, div');
+                    if (lbl && lbl !== el.parentElement)
+                        labelText = (lbl.textContent || '').toLowerCase();
+                }
+            }
+            const hints = ph + ' ' + nm + ' ' + al + ' ' + labelText;
+            if (hints.includes('code') || hints.includes('approvals')
+                || hints.includes('otp') || hints.includes('verif')) {
+                el.setAttribute('data-otp-detected', 'true');
+                return {found: true, tag: el.tagName, type: t, name: nm,
+                        placeholder: ph, label: labelText.slice(0, 40)};
+            }
+        }
+        // Fallback: if on a two_step_verification page, tag the first visible
+        // text-like input (there's usually only one)
+        if (location.href.includes('two_step_verification')
+            || location.href.includes('checkpoint')) {
+            for (const el of inputs) {
+                const t = (el.type || '').toLowerCase();
+                if (t === 'hidden' || t === 'submit' || t === 'button' || t === 'checkbox'
+                    || t === 'radio' || t === 'image' || t === 'file' || t === 'reset') continue;
+                const rect = el.getBoundingClientRect();
+                if (rect.width < 10 || rect.height < 10) continue;
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden'
+                    || style.opacity === '0') continue;
+                el.setAttribute('data-otp-detected', 'true');
+                return {found: true, tag: el.tagName, type: t,
+                        name: (el.name || ''), placeholder: (el.placeholder || ''),
+                        label: 'fallback-first-visible-input'};
+            }
+        }
+        // Dump all inputs for diagnostics
+        const dump = [];
+        for (const el of inputs) {
+            dump.push({tag: el.tagName, type: el.type, name: el.name,
+                       id: el.id, ph: el.placeholder,
+                       vis: el.getBoundingClientRect().width > 0});
+        }
+        return {found: false, inputs: dump};
+    }
+    """
+
     deadline = time.monotonic() + timeout_seconds
+    logged_dump = False
     while time.monotonic() < deadline:
-        for sel in selectors:
-            loc = page.locator(sel).first
+        # --- Pass 1: fast CSS selectors ---
+        for sel in css_selectors:
             try:
+                loc = page.locator(sel).first
                 if await loc.count() == 0:
                     continue
-                await loc.wait_for(state="visible", timeout=2500)
-                logger.info("Found 2FA input: %s", sel)
+                await loc.wait_for(state="visible", timeout=2000)
+                logger.info("Found 2FA input via CSS: %s", sel)
                 return loc
             except Exception:
                 continue
-        await asyncio.sleep(0.8)
+
+        # --- Pass 2: JS DOM probe ---
+        try:
+            result = await page.evaluate(JS_FIND_OTP_INPUT)
+            if isinstance(result, dict) and result.get("found"):
+                loc = page.locator('input[data-otp-detected="true"]').first
+                try:
+                    await loc.wait_for(state="visible", timeout=3000)
+                    logger.info(
+                        "Found 2FA input via JS probe: type=%s name=%s label=%s",
+                        result.get("type"), result.get("name"), result.get("label"),
+                    )
+                    return loc
+                except Exception:
+                    pass
+            elif not logged_dump and isinstance(result, dict):
+                logger.warning(
+                    "JS probe found no OTP input. All inputs on page: %s",
+                    result.get("inputs", []),
+                )
+                logged_dump = True
+        except Exception as exc:
+            logger.debug("JS OTP probe error: %s", exc)
+
+        await asyncio.sleep(1.0)
+
+    logger.error("Could not find 2FA input after %.0fs", timeout_seconds)
     return None
 
 
@@ -1068,9 +1276,22 @@ async def login_on_page(page: Page, account: Dict) -> bool:
     logger.info("AUTO-LOGIN: Logging in as %s on existing page", uid)
     logger.info("=" * 50)
 
+    # Auto-close any popup tabs Facebook may open during login/2FA
+    def _on_popup(popup_page):
+        async def _close():
+            try:
+                logger.info("Closing unwanted popup: %s", popup_page.url)
+                await popup_page.close()
+            except Exception:
+                pass
+        asyncio.ensure_future(_close())
+
+    context = page.context
+    context.on("page", _on_popup)
+
     try:
-        # Load login page and wait for it to be stable (avoid proceeding before FB redirects)
-        await page.goto(LOGIN_URL, wait_until="load", timeout=30000)
+        # Load login page (timeout raised for slow proxy connections)
+        await page.goto(LOGIN_URL, wait_until="load", timeout=60000)
         logger.info("Loaded login page, waiting for form to be stable...")
 
         # Wait for the login form to appear (email input). Do NOT click cookie consent
@@ -1235,3 +1456,8 @@ async def login_on_page(page: Page, account: Dict) -> bool:
     except Exception as exc:
         logger.exception("Auto-login error for %s: %s", uid, exc)
         return False
+    finally:
+        try:
+            context.remove_listener("page", _on_popup)
+        except Exception:
+            pass

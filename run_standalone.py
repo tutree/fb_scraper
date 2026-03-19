@@ -51,14 +51,18 @@ async def main():
     logger.info(f"Max results per keyword: {max_results}")
     logger.info("")
     
-    # Get database session first
-    db = next(get_db())
+    # Get database session (non-critical for standalone mode)
+    db = None
+    try:
+        db = next(get_db())
+        logger.info("Database connected")
+    except Exception as e:
+        logger.warning(f"Database unavailable (non-critical for standalone): {e}")
     
     # Initialize components
-    # Note: ProxyManager will be None since we're running directly on US PC
-    proxy_manager = ProxyManager(db)  # Pass db session
+    proxy_manager = ProxyManager(db)
     if not proxy_manager.proxies:
-        logger.info("✓ No proxy configured - running with direct connection (US PC)")
+        logger.info("No proxy configured - running with direct connection (US PC)")
         proxy_manager = None
     
     browser_manager = BrowserManager(proxy_manager=proxy_manager)
@@ -115,8 +119,11 @@ async def main():
         # Cleanup
         logger.info("Closing browser...")
         await browser_manager.close()
-        db.close()
-        logger.info("✓ Cleanup complete")
+        if proxy_manager:
+            proxy_manager.close()
+        if db:
+            db.close()
+        logger.info("Cleanup complete")
 
     if auth_failed:
         sys.exit(1)
@@ -126,8 +133,8 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("\n✗ Scraper interrupted by user")
+        logger.info("\nScraper interrupted by user")
         sys.exit(0)
     except Exception as e:
-        logger.error(f"✗ Fatal error: {e}", exc_info=True)
+        logger.error(f"Fatal error: {e}", exc_info=True)
         sys.exit(1)
