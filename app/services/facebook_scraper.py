@@ -124,16 +124,68 @@ class FacebookScraper:
             logger.warning(f"Could not inspect auth state reliably: {exc}")
             return {"logged_out": False, "logged_in": False}
 
+    def _discover_all_cookie_uids(self) -> list[str]:
+        """Return UIDs for every cookie file in the cookies dirs, freshest first."""
+        uid_mtime: dict[str, float] = {}
+        for d in self.browser_manager._cookie_dirs():
+            if not d.exists():
+                continue
+            for f in d.glob("*.json"):
+                stem = f.stem.strip()
+                if stem.isdigit():
+                    try:
+                        uid_mtime[stem] = max(uid_mtime.get(stem, 0.0), f.stat().st_mtime)
+                    except Exception:
+                        pass
+        return [uid for uid, _ in sorted(uid_mtime.items(), key=lambda x: x[1], reverse=True)]
+
+    async def _try_cookie_session(self, uid: str, account: Optional[Dict] = None) -> bool:
+        """Try loading a saved cookie session for *uid*.  Returns True on success."""
+        storage_state, storage_path = self.browser_manager._load_storage_state_for_uid(uid)
+        if not storage_state:
+            return False
+
+        logger.info("Trying saved cookies for UID %s (%s)", uid, storage_path)
+        cookie_page: Optional[Page] = None
+        try:
+            cookie_page = await self.browser_manager.create_page_with_cookies(uid)
+            await cookie_page.goto(
+                "https://www.facebook.com",
+                wait_until="domcontentloaded",
+                timeout=60000,
+            )
+            await asyncio.sleep(4)
+
+            auth = await self._inspect_auth_state(cookie_page)
+            if auth["logged_in"]:
+                logger.info("Cookie session valid for %s -- skipping login", uid)
+                self._current_page = cookie_page
+                self._current_account = account or {"uid": uid}
+                return True
+
+            logger.warning("Cookie session invalid for %s -- removing stale file", uid)
+            if storage_path and storage_path.exists():
+                try:
+                    storage_path.unlink()
+                    logger.info("Removed stale cookie file: %s", storage_path)
+                except Exception as exc:
+                    logger.warning("Could not remove %s: %s", storage_path, exc)
+        except Exception as exc:
+            logger.warning("Cookie check failed for %s: %s", uid, exc)
+        finally:
+            if cookie_page is not None and self._current_page is not cookie_page:
+                await self.browser_manager.close_page_context(cookie_page)
+        return False
+
     async def _try_auto_login(self, stale_page: Optional[Page]) -> bool:
         """
-        Two-phase login: first try saved cookies for every account, then fall
-        back to fresh credential login.  Invalid cookie files are removed so
-        they don't slow down future runs.
+        Three-phase login:
+          1. Try saved cookies for configured accounts (accounts.json)
+          2. Try saved cookies uploaded via the dashboard (any UID in cookies/)
+          3. Fall back to fresh credential login (captcha / 2FA)
+        Invalid cookie files are removed so they don't slow down future runs.
         """
         login_accounts = load_login_accounts()
-        if not login_accounts:
-            logger.error("Auto-login failed — no accounts in config/accounts.json")
-            return False
 
         # Drop expired/checkpoint session so it cannot pollute login attempts
         if stale_page is not None:
@@ -141,45 +193,33 @@ class FacebookScraper:
             await self.browser_manager.close_page_context(stale_page)
         self._current_page = None
 
-        # --- Phase 1: try saved cookies for every account ---
-        for account in login_accounts:
-            uid = account["uid"]
-            storage_state, storage_path = self.browser_manager._load_storage_state_for_uid(uid)
-            if not storage_state:
-                continue
-
-            logger.info("Trying saved cookies for account %s (%s)", uid, storage_path)
-            cookie_page: Optional[Page] = None
-            try:
-                cookie_page = await self.browser_manager.create_page_with_cookies(uid)
-                await cookie_page.goto(
-                    "https://www.facebook.com",
-                    wait_until="domcontentloaded",
-                    timeout=60000,
-                )
-                await asyncio.sleep(4)
-
-                auth = await self._inspect_auth_state(cookie_page)
-                if auth["logged_in"]:
-                    logger.info("Cookie session valid for %s — skipping login", uid)
-                    self._current_page = cookie_page
-                    self._current_account = account
+        # --- Phase 1: try saved cookies for configured accounts ---
+        account_by_uid: dict[str, Dict] = {}
+        if login_accounts:
+            account_by_uid = {str(a["uid"]).strip(): a for a in login_accounts}
+            for account in login_accounts:
+                uid = str(account["uid"]).strip()
+                if await self._try_cookie_session(uid, account):
                     return True
 
-                logger.warning("Cookie session invalid for %s — removing stale file", uid)
-                if storage_path and storage_path.exists():
-                    try:
-                        storage_path.unlink()
-                        logger.info("Removed stale cookie file: %s", storage_path)
-                    except Exception as exc:
-                        logger.warning("Could not remove %s: %s", storage_path, exc)
-            except Exception as exc:
-                logger.warning("Cookie check failed for %s: %s", uid, exc)
-            finally:
-                if cookie_page is not None and self._current_page is not cookie_page:
-                    await self.browser_manager.close_page_context(cookie_page)
+        # --- Phase 2: try ALL cookie files (includes dashboard uploads) ---
+        all_cookie_uids = self._discover_all_cookie_uids()
+        tried = set(account_by_uid.keys())
+        extra_uids = [uid for uid in all_cookie_uids if uid not in tried]
+        if extra_uids:
+            logger.info(
+                "Found %d extra cookie file(s) not in accounts.json: %s",
+                len(extra_uids), extra_uids,
+            )
+        for uid in extra_uids:
+            if await self._try_cookie_session(uid):
+                return True
 
-        # --- Phase 2: fresh credential login ---
+        # --- Phase 3: fresh credential login ---
+        if not login_accounts:
+            logger.error("Auto-login failed — no accounts in config/accounts.json and no valid cookies")
+            return False
+
         logger.info("No valid cookie session found — falling back to credential login")
         for i, account in enumerate(login_accounts):
             uid = account["uid"]
@@ -204,7 +244,7 @@ class FacebookScraper:
             logger.warning("Auto-login failed for account %s — trying next", uid)
 
         logger.error(
-            "Auto-login exhausted all %d accounts — none could log in", len(login_accounts)
+            "Auto-login exhausted all accounts and cookies — none could log in"
         )
         return False
 
