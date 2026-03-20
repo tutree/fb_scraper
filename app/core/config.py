@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
 
     # Scraper Settings
-    MAX_RESULTS_PER_KEYWORD: int = 100
+    MAX_RESULTS_PER_KEYWORD: int = 60
     SCRAPE_DELAY_MIN: int = 3  # seconds
     SCRAPE_DELAY_MAX: int = 8
     MAX_RETRIES: int = 3
@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     # Background automation (runs automatically on startup, uses config/keywords.json)
     AUTO_SCRAPE_ENABLED: bool = True
     AUTO_SCRAPE_INTERVAL_MINUTES: int = 180
-    AUTO_SCRAPE_MAX_RESULTS: int = 100
+    AUTO_SCRAPE_MAX_RESULTS: int = 60
     AUTO_ANALYZE_AFTER_SCRAPE: bool = True
     AUTO_ENRICH_AFTER_ANALYZE: bool = True
 

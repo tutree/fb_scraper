@@ -71,9 +71,9 @@ async def _extract_dates_via_tooltip_hover(
     should_stop: Optional[Callable[[], bool]] = None,
 ) -> Dict[int, str]:
     """
-    For each article index 0..article_count-1, hover the obfuscated date element,
-    wait for div[role="tooltip"], read its text and extract date with month-name regex.
-    Returns dict: article_index -> date string (e.g. "Tuesday, March 17, 2026 at 12:09 AM").
+    For each article, hover every <a> tag inside it and check whether a
+    date tooltip appears.  No DOM guessing — just brute-force hover and check.
+    Returns dict: article_index -> date string.
     """
     date_by_index: Dict[int, str] = {}
     articles_loc = page.locator("div[role='main'] div[role='article']")
@@ -84,31 +84,59 @@ async def _extract_dates_via_tooltip_hover(
     if n == 0:
         return date_by_index
 
-    for i in range(min(article_count, n)):
+    end = min(article_count, n)
+    extracted = 0
+
+    for i in range(end):
         if should_stop and should_stop():
             break
         try:
             article = articles_loc.nth(i)
-            # Date link: FB uses href with #? for the obfuscated date; tooltip shows on hover
-            date_links = article.locator("a[href*='#?']")
-            if await date_links.count() == 0:
-                continue
-            await date_links.first.hover()
-            await asyncio.sleep(0.3)
-            tooltip = page.locator("div[role='tooltip']")
-            try:
-                await tooltip.first.wait_for(state="visible", timeout=2000)
-            except Exception:
+            links = article.locator("a[href]")
+            link_count = await links.count()
+
+            found_date = False
+            for j in range(link_count):
+                if found_date:
+                    break
+                link = links.nth(j)
+
+                try:
+                    if not await link.is_visible(timeout=500):
+                        continue
+                except Exception:
+                    continue
+
+                try:
+                    await link.scroll_into_view_if_needed(timeout=1500)
+                except Exception:
+                    pass
+
+                try:
+                    await link.hover(timeout=2000)
+                except Exception:
+                    continue
+                await asyncio.sleep(0.3)
+
+                tooltip = page.locator("div[role='tooltip']")
+                try:
+                    await tooltip.first.wait_for(state="visible", timeout=1500)
+                except Exception:
+                    await page.mouse.move(0, 0)
+                    await asyncio.sleep(0.08)
+                    continue
+
+                raw = await tooltip.first.text_content()
                 await page.mouse.move(0, 0)
                 await asyncio.sleep(0.1)
-                continue
-            raw = await tooltip.first.text_content()
-            await page.mouse.move(0, 0)
-            await asyncio.sleep(0.15)
-            if raw:
-                m = _TOOLTIP_DATE_RE.search(raw)
-                if m:
-                    date_by_index[i] = m.group(0).strip()
+
+                if raw:
+                    m = _TOOLTIP_DATE_RE.search(raw)
+                    if m:
+                        date_by_index[i] = m.group(0).strip()
+                        extracted += 1
+                        found_date = True
+
         except Exception as e:
             logger.debug("Tooltip date extraction for article %s: %s", i, e)
         try:
@@ -116,6 +144,9 @@ async def _extract_dates_via_tooltip_hover(
         except Exception:
             pass
 
+    logger.info(
+        "Tooltip date hover: %d/%d articles got dates", extracted, end,
+    )
     return date_by_index
 
 

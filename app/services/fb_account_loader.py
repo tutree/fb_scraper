@@ -13,6 +13,8 @@ logger = get_logger(__name__)
 
 CREDENTIALS_PATH = Path("config/credentials.json")
 ACCOUNTS_JSON_PATH = Path("config/accounts.json")
+
+_accounts_logged_once = False
 COOKIE_DIRS = [Path("cookies"), Path("config/cookies")]
 
 
@@ -66,10 +68,8 @@ def _load_accounts_json() -> List[Dict]:
         with open(ACCOUNTS_JSON_PATH, "r", encoding="utf-8") as f:
             accounts = json.load(f)
         valid = [a for a in accounts if a.get("uid") and a.get("password")]
-        if valid:
-            logger.info(
-                "Loaded %d accounts from %s", len(valid), ACCOUNTS_JSON_PATH,
-            )
+        if valid and not _accounts_logged_once:
+            logger.info("Loaded %d accounts from %s", len(valid), ACCOUNTS_JSON_PATH)
         return valid
     except Exception as exc:
         logger.warning("Failed to parse %s: %s", ACCOUNTS_JSON_PATH, exc)
@@ -79,7 +79,11 @@ def _load_accounts_json() -> List[Dict]:
 def load_accounts() -> List[Dict]:
     """Load Facebook accounts from credentials.json, prioritising cookie-backed UIDs.
     Falls back to config/accounts.json, then env variables."""
-    logger.info(f"Loading Facebook accounts from: {CREDENTIALS_PATH.absolute()}")
+    global _accounts_logged_once
+    verbose = not _accounts_logged_once
+
+    if verbose:
+        logger.info("Loading Facebook accounts from: %s", CREDENTIALS_PATH.absolute())
     if CREDENTIALS_PATH.exists():
         try:
             with open(CREDENTIALS_PATH, encoding="utf-8-sig") as f:
@@ -87,9 +91,10 @@ def load_accounts() -> List[Dict]:
             all_accounts = data.get("facebook_accounts", [])
             active_accounts = [a for a in all_accounts if a.get("active")]
             cookie_uid_order = _cookie_uid_order()
-            logger.info(f"Found {len(all_accounts)} total accounts, {len(active_accounts)} active")
-            if cookie_uid_order:
-                logger.info(f"Found cookie sessions for {len(cookie_uid_order)} account uid(s)")
+            if verbose:
+                logger.info("Found %d total accounts, %d active", len(all_accounts), len(active_accounts))
+                if cookie_uid_order:
+                    logger.info("Found cookie sessions for %d account uid(s)", len(cookie_uid_order))
             selected_accounts: List[Dict] = []
             if active_accounts:
                 active_by_uid = {
@@ -98,7 +103,7 @@ def load_accounts() -> List[Dict]:
                     if str(a.get("uid", "")).strip()
                 }
                 ordered_active = [active_by_uid[uid] for uid in cookie_uid_order if uid in active_by_uid]
-                if ordered_active:
+                if ordered_active and verbose:
                     logger.info("Prioritizing active accounts with freshest cookies: %s", [a.get("uid") for a in ordered_active])
                 merged = ordered_active + active_accounts
                 deduped: List[Dict] = []
@@ -123,13 +128,14 @@ def load_accounts() -> List[Dict]:
                         logger.warning("Falling back to cookie-backed accounts: %s", [a.get("uid") for a in fallback])
                         selected_accounts = fallback
             if selected_accounts:
-                for acc in selected_accounts:
-                    logger.info("  - Account: %s, 2FA configured: %s", acc.get("uid", "Unknown"), "Yes" if acc.get("totp_secret") else "No")
+                if verbose:
+                    for acc in selected_accounts:
+                        logger.info("  - Account: %s, 2FA: %s", acc.get("uid", "Unknown"), "Yes" if acc.get("totp_secret") else "No")
+                    _accounts_logged_once = True
                 return selected_accounts
         except Exception as exc:
             logger.error("Failed to parse credentials file '%s': %s.", CREDENTIALS_PATH, exc)
 
-    # Fallback: try config/accounts.json
     accounts_json = _load_accounts_json()
     if accounts_json:
         cookie_uid_order = _cookie_uid_order()
@@ -138,11 +144,12 @@ def load_accounts() -> List[Dict]:
             ordered = [by_uid[uid] for uid in cookie_uid_order if uid in by_uid]
             rest = [a for a in accounts_json if str(a["uid"]).strip() not in {str(o["uid"]).strip() for o in ordered}]
             accounts_json = ordered + rest
-        for acc in accounts_json:
-            logger.info("  - Account: %s, 2FA configured: %s", acc.get("uid", "Unknown"), "Yes" if acc.get("totp_secret") else "No")
+        if verbose:
+            for acc in accounts_json:
+                logger.info("  - Account: %s, 2FA: %s", acc.get("uid", "Unknown"), "Yes" if acc.get("totp_secret") else "No")
+            _accounts_logged_once = True
         return accounts_json
 
-    # Final fallback: env variables + cookie-backed UIDs
     logger.warning("No credentials.json or accounts.json found, using environment variables")
     cookie_uid_order = _cookie_uid_order()
     env_uid = str(settings.FACEBOOK_EMAIL or "").strip()
@@ -157,14 +164,17 @@ def load_accounts() -> List[Dict]:
         env_uid = cookie_uid_order[0]
     elif not env_uid and cookie_uid_order:
         env_uid = cookie_uid_order[0]
-        logger.info("Using freshest cookie uid for env fallback account: %s", env_uid)
+        if verbose:
+            logger.info("Using freshest cookie uid for env fallback account: %s", env_uid)
 
     env_account = {
         "uid": env_uid,
         "password": settings.FACEBOOK_PASSWORD,
         "totp_secret": None,
     }
-    logger.info(f"Using env account: {env_account['uid']}")
+    if verbose:
+        logger.info("Using env account: %s", env_account["uid"])
+    _accounts_logged_once = True
     return [env_account]
 
 
