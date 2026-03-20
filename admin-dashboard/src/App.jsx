@@ -165,6 +165,12 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (!jobStatus?.is_running) return
+    const interval = setInterval(fetchData, 10000)
+    return () => clearInterval(interval)
+  }, [jobStatus?.is_running, filters, currentPage, itemsPerPage])
+
+  useEffect(() => {
     const isOpen = showDetailDialog || showCommentDialog || deleteConfirm.isOpen
     document.body.style.overflow = isOpen ? 'hidden' : ''
     return () => { document.body.style.overflow = '' }

@@ -137,7 +137,7 @@ async def scroll_and_process_posts(
     logger.info(f"Starting extraction for keyword: '{keyword}' (target: {max_results} posts)")
 
     # Initial warmup: more scrolls so first extraction sees more posts (needed for 100+ per keyword)
-    warmup_scrolls = min(20, max(12, max_results // 8))
+    warmup_scrolls = min(15, max(8, max_results // 8))
     logger.info("Preloading search feed with %d progressive scrolls...", warmup_scrolls)
     for i in range(warmup_scrolls):
         if should_stop and should_stop():
@@ -558,9 +558,8 @@ async def scroll_and_process_posts(
 
     seen_link_keys = {_link_key(link) for link in user_links}
 
-    # Progressive scan: keep scrolling until we hit the target or stall (up to many rounds for 100+ per keyword)
-    max_scan_rounds = max(40, (max_results // 3) + 10)
-    no_growth_threshold = 5
+    max_scan_rounds = min(25, max(10, (max_results // 4) + 5))
+    no_growth_threshold = 3
     if len(user_links) < max_results:
         logger.info(
             "Initial extraction below target (%d/%d). Continuing progressive scan (max %d rounds, stop after %d no-growth)...",

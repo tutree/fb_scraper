@@ -399,12 +399,23 @@ class FacebookScraper:
                 logger.warning("Stop requested while waiting for results load.")
                 return 0
 
+            current_search_url = page.url.lower()
+            redirected_to_login = (
+                "/login" in current_search_url
+                or "/checkpoint" in current_search_url
+                or "login_attempt" in current_search_url
+                or current_search_url.rstrip("/") == "https://www.facebook.com"
+            )
             auth_after_search = await self._inspect_auth_state(page)
-            if auth_after_search["logged_out"] or not auth_after_search["logged_in"]:
+            if auth_after_search["logged_out"] or redirected_to_login:
                 logger.warning(
-                    "Not logged in on search page (Reels tab link missing or login UI) — auto-login will be attempted"
+                    "Not logged in on search page (login UI detected or redirected away from search) — auto-login will be attempted"
                 )
                 raise NoActiveCookieError("no active cookie")
+            if not auth_after_search["logged_in"]:
+                logger.info(
+                    "Reels tab not found on search page (normal for search layout) — proceeding anyway"
+                )
 
             logger.info("Waiting for post elements to appear...")
             try:

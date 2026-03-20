@@ -197,7 +197,7 @@ export default function ScraperPage() {
   const [cookieSubmitting, setCookieSubmitting] = useState(false)
   const [cookieStatus, setCookieStatus] = useState(null)
   const [feedback, setFeedback] = useState(null)
-  const [logLines, setLogLines] = useState(120)
+  const [logLines, setLogLines] = useState(300)
   const [showTechnicalLogs, setShowTechnicalLogs] = useState(false)
   const logsContainerRef = useRef(null)
 
@@ -530,11 +530,12 @@ export default function ScraperPage() {
                     <option value={80}>80</option>
                     <option value={120}>120</option>
                     <option value={200}>200</option>
-                    <option value={400}>400</option>
+                    <option value={300}>300</option>
+                    <option value={500}>500</option>
                   </select>
                 </div>
               </div>
-              {showTechnicalLogs && (
+              { (
                 <div ref={logsContainerRef} className="h-80 overflow-y-auto rounded-lg bg-slate-950 p-2 font-mono text-[11px] text-slate-100">
                   {scraperLogs.length === 0 ? (
                     <p className="text-slate-400">No logs yet.</p>

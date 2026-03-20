@@ -375,7 +375,7 @@ def _parse_tile_nums(code: str) -> list[int]:
 
 async def _solve_dynamic_grid(
     solver, page: Page, challenge_frame, instruction: str, rows: int, cols: int,
-    max_sub_rounds: int = 15,
+    max_sub_rounds: int = 8,
 ) -> bool:
     """Solve the dynamic 3x3 challenge where tiles fade and get replaced."""
     logger.info("[Grid-Dynamic] Starting dynamic tile solver (3x3 fade type)")
@@ -448,7 +448,7 @@ async def _solve_dynamic_grid(
     return True
 
 
-async def _solve_recaptcha_visual_grid(page: Page, max_rounds: int = 12) -> bool:
+async def _solve_recaptcha_visual_grid(page: Page, max_rounds: int = 8) -> bool:
     """
     Solve reCAPTCHA v2 Enterprise IMAGE CHALLENGE via 2Captcha Grid API.
 
@@ -615,7 +615,7 @@ async def _solve_recaptcha_enterprise_2captcha(page: Page) -> bool:
     challenge_frame = await _find_challenge_frame(page)
     if challenge_frame:
         logger.info("[Enterprise] Visual challenge detected — using Grid API")
-        if await _solve_recaptcha_visual_grid(page, max_rounds=12):
+        if await _solve_recaptcha_visual_grid(page, max_rounds=8):
             await asyncio.sleep(3)
             return True
         logger.warning("[Enterprise] Grid solver failed — trying token fallback")
