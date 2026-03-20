@@ -57,6 +57,7 @@ function App() {
   const [stats, setStats] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [jobStatus, setJobStatus] = useState(null)
   const [selectedResult, setSelectedResult] = useState(null)
   const [showDetailDialog, setShowDetailDialog] = useState(false)
   const [filters, setFilters] = useState({
@@ -150,6 +151,18 @@ function App() {
   useEffect(() => {
     fetchData()
   }, [filters, currentPage, itemsPerPage])
+
+  useEffect(() => {
+    const fetchJobStatus = async () => {
+      try {
+        const res = await api.get('/automation/status')
+        setJobStatus(res.data)
+      } catch { /* silent */ }
+    }
+    fetchJobStatus()
+    const interval = setInterval(fetchJobStatus, 15000)
+    return () => clearInterval(interval)
+  }, [])
 
   useEffect(() => {
     const isOpen = showDetailDialog || showCommentDialog || deleteConfirm.isOpen
@@ -475,6 +488,49 @@ function App() {
             {feedback.text}
           </div>
         )}
+
+        {jobStatus && (() => {
+          const { is_running, last_run_status, last_run_at, current_step, auto_scrape_enabled, next_run } = jobStatus
+          let bg, border, text, dot, label, detail
+
+          if (is_running) {
+            bg = 'bg-blue-50'; border = 'border-blue-200'; text = 'text-blue-800'; dot = 'bg-blue-500'
+            label = 'Scraper Running'
+            detail = current_step || 'Working...'
+          } else if (last_run_status === 'completed') {
+            bg = 'bg-emerald-50'; border = 'border-emerald-200'; text = 'text-emerald-800'; dot = 'bg-emerald-500'
+            label = 'Last Run Succeeded'
+            detail = last_run_at ? `Completed ${formatRelativeTime(last_run_at)}` : 'Completed'
+          } else if (last_run_status === 'failed') {
+            bg = 'bg-rose-50'; border = 'border-rose-200'; text = 'text-rose-800'; dot = 'bg-rose-500'
+            label = 'Last Run Failed'
+            detail = last_run_at ? `Failed ${formatRelativeTime(last_run_at)}` : 'Failed'
+          } else if (last_run_status === 'skipped') {
+            bg = 'bg-amber-50'; border = 'border-amber-200'; text = 'text-amber-800'; dot = 'bg-amber-500'
+            label = 'Last Run Skipped'
+            detail = last_run_at ? formatRelativeTime(last_run_at) : ''
+          } else {
+            bg = 'bg-slate-50'; border = 'border-slate-200'; text = 'text-slate-600'; dot = 'bg-slate-400'
+            label = auto_scrape_enabled ? 'Scraper Idle' : 'Scraper Disabled'
+            detail = next_run ? `Next run ${formatRelativeTime(next_run)}` : ''
+          }
+
+          return (
+            <div className={`flex items-center justify-between rounded-xl border ${border} ${bg} px-4 py-3`}>
+              <div className={`flex items-center gap-3 text-sm font-medium ${text}`}>
+                <span className="relative flex h-2.5 w-2.5">
+                  {is_running && <span className={`absolute inline-flex h-full w-full animate-ping rounded-full ${dot} opacity-75`} />}
+                  <span className={`relative inline-flex h-2.5 w-2.5 rounded-full ${dot}`} />
+                </span>
+                {label}
+                {detail && <span className="font-normal opacity-75">&mdash; {detail}</span>}
+              </div>
+              {!is_running && auto_scrape_enabled && next_run && (
+                <span className={`text-xs ${text} opacity-60`}>Next: {new Date(next_run).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+              )}
+            </div>
+          )
+        })()}
 
         {stats && (
           <section className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">

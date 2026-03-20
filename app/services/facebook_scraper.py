@@ -14,6 +14,7 @@ All heavy lifting is delegated to focused sub-modules:
 """
 import asyncio
 import random
+from pathlib import Path
 from typing import Callable, Dict, List, Optional
 from urllib.parse import quote_plus
 
@@ -125,11 +126,9 @@ class FacebookScraper:
 
     async def _try_auto_login(self, stale_page: Optional[Page]) -> bool:
         """
-        Rotate through accounts from config/accounts.json.
-
-        Each attempt uses a **new** browser context with no cookies so Facebook
-        shows the real login form. Reusing the stale session page would keep
-        checkpoint redirects and hide #email for every account.
+        Two-phase login: first try saved cookies for every account, then fall
+        back to fresh credential login.  Invalid cookie files are removed so
+        they don't slow down future runs.
         """
         login_accounts = load_login_accounts()
         if not login_accounts:
@@ -142,6 +141,46 @@ class FacebookScraper:
             await self.browser_manager.close_page_context(stale_page)
         self._current_page = None
 
+        # --- Phase 1: try saved cookies for every account ---
+        for account in login_accounts:
+            uid = account["uid"]
+            storage_state, storage_path = self.browser_manager._load_storage_state_for_uid(uid)
+            if not storage_state:
+                continue
+
+            logger.info("Trying saved cookies for account %s (%s)", uid, storage_path)
+            cookie_page: Optional[Page] = None
+            try:
+                cookie_page = await self.browser_manager.create_page_with_cookies(uid)
+                await cookie_page.goto(
+                    "https://www.facebook.com",
+                    wait_until="domcontentloaded",
+                    timeout=60000,
+                )
+                await asyncio.sleep(4)
+
+                auth = await self._inspect_auth_state(cookie_page)
+                if auth["logged_in"]:
+                    logger.info("Cookie session valid for %s — skipping login", uid)
+                    self._current_page = cookie_page
+                    self._current_account = account
+                    return True
+
+                logger.warning("Cookie session invalid for %s — removing stale file", uid)
+                if storage_path and storage_path.exists():
+                    try:
+                        storage_path.unlink()
+                        logger.info("Removed stale cookie file: %s", storage_path)
+                    except Exception as exc:
+                        logger.warning("Could not remove %s: %s", storage_path, exc)
+            except Exception as exc:
+                logger.warning("Cookie check failed for %s: %s", uid, exc)
+            finally:
+                if cookie_page is not None and self._current_page is not cookie_page:
+                    await self.browser_manager.close_page_context(cookie_page)
+
+        # --- Phase 2: fresh credential login ---
+        logger.info("No valid cookie session found — falling back to credential login")
         for i, account in enumerate(login_accounts):
             uid = account["uid"]
             logger.info(
@@ -260,7 +299,16 @@ class FacebookScraper:
                 logger.warning(f"Error checking login status: {e}")
 
             if not is_logged_in:
-                logger.warning("Cookie session expired — auto-login will be attempted")
+                uid = account.get("uid", "")
+                logger.warning("Cookie session expired for %s — removing stale cookie file", uid)
+                for cookie_dir in self.browser_manager._cookie_dirs():
+                    stale_file = cookie_dir / f"{uid}.json"
+                    if stale_file.exists():
+                        try:
+                            stale_file.unlink()
+                            logger.info("Removed stale cookie file: %s", stale_file)
+                        except Exception as exc:
+                            logger.warning("Could not remove stale cookie %s: %s", stale_file, exc)
                 raise NoActiveCookieError("no active cookie")
 
             logger.info("Cookie session verified (cookie-only mode)")
