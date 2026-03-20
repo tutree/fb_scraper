@@ -21,10 +21,11 @@ from urllib.parse import quote_plus
 from playwright.async_api import Page
 from sqlalchemy.orm import Session
 
+from ..core.config import settings
 from ..core.logging_config import get_logger
 from .fb_account_loader import load_accounts
 from .fb_auto_login import load_login_accounts, login_on_page
-from .fb_feed_scanner import scroll_and_process_posts
+from .fb_feed_scanner import enable_search_posts_seen_filter, scroll_and_process_posts
 from .fb_login_verify import page_has_logged_in_reel_tab_link
 
 logger = get_logger(__name__)
@@ -428,6 +429,15 @@ class FacebookScraper:
                 logger.warning(f"Standard selectors not found, trying anyway: {e}")
                 if await self._sleep_with_stop(10, should_stop=should_stop):
                     logger.warning("Stop requested while waiting for post detection.")
+                    return 0
+
+            if settings.FB_SEARCH_ENABLE_POSTS_SEEN_FILTER:
+                try:
+                    await enable_search_posts_seen_filter(page)
+                except Exception as filt_exc:
+                    logger.debug("Posts You've Seen filter: %s", filt_exc)
+                if await self._sleep_with_stop(2, should_stop=should_stop):
+                    logger.warning("Stop requested after search filter toggle.")
                     return 0
 
             posts_processed = await scroll_and_process_posts(

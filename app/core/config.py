@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     SCRAPE_DELAY_MIN: int = 3  # seconds
     SCRAPE_DELAY_MAX: int = 8
     MAX_RETRIES: int = 3
+    # Facebook search /posts: toggle "Posts You've Seen" switch to reduce repeat posts in results
+    FB_SEARCH_ENABLE_POSTS_SEEN_FILTER: bool = True
 
     # AI provider
     AI_PROVIDER: str = "ollama"

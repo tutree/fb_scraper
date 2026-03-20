@@ -32,6 +32,65 @@ _TOOLTIP_DATE_RE = _re.compile(
 )
 
 
+async def enable_search_posts_seen_filter(page: Page) -> bool:
+    """
+    Turn ON the Facebook search posts filter switch labeled "Posts You've Seen"
+    (role=switch checkbox).  When active, FB tends to hide or de-prioritize posts you
+    already opened, which cuts down duplicate cards when scrolling the same keyword.
+
+    If your locale inverts the switch (checked = show only seen), set
+    FB_SEARCH_ENABLE_POSTS_SEEN_FILTER=false in .env.
+    """
+    switch = None
+    try:
+        by_role = page.get_by_role(
+            "switch", name=_re.compile(r"posts you'?ve seen", _re.I)
+        )
+        if await by_role.count() > 0:
+            switch = by_role.first
+    except Exception:
+        pass
+    if switch is None:
+        for sel in (
+            'input[role="switch"][aria-label="Posts You\'ve Seen"]',
+            'input[type="checkbox"][role="switch"][aria-label*="Posts You"][aria-label*="Seen"]',
+        ):
+            loc = page.locator(sel).first
+            try:
+                if await loc.count() > 0:
+                    switch = loc
+                    break
+            except Exception:
+                continue
+    if switch is None:
+        logger.info("Posts You've Seen filter control not in DOM — skipping")
+        return False
+
+    try:
+        await switch.scroll_into_view_if_needed(timeout=10000)
+        await asyncio.sleep(0.4)
+        checked = (await switch.get_attribute("aria-checked") or "").strip().lower()
+        if checked == "true":
+            logger.info("Posts You've Seen filter already enabled (aria-checked=true)")
+            return True
+        await switch.click(timeout=10000, force=True)
+        await asyncio.sleep(1.0)
+        checked2 = (await switch.get_attribute("aria-checked") or "").strip().lower()
+        if checked2 != "true":
+            await switch.click(timeout=10000, force=True)
+            await asyncio.sleep(0.8)
+            checked2 = (await switch.get_attribute("aria-checked") or "").strip().lower()
+        logger.info(
+            "Posts You've Seen filter toggled (aria-checked was %r -> %r)",
+            checked,
+            checked2,
+        )
+        return True
+    except Exception as exc:
+        logger.warning("Could not toggle Posts You've Seen filter: %s", exc)
+        return False
+
+
 async def _screenshot(page, label: str) -> None:
     """Save a PNG to logs/screenshots/<label>_HHMMSS.png, silently skip on error."""
     import datetime
