@@ -23,13 +23,84 @@ logger = get_logger(__name__)
 
 _SCREENSHOTS_DIR = Path(os.environ.get("LOGS_DIR", "logs")) / "screenshots"
 
-# Tooltip date format: "Tuesday, March 17, 2026 at 12:09 AM" (hover on obfuscated date)
+# Tooltip text varies: full weekday line, short month, day-first, ISO, etc.
 _TOOLTIP_DATE_RE = _re.compile(
     r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s*,\s*"
     r"(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+"
     r"\d{1,2}\s*,\s*\d{4}(?:\s+at\s+\d{1,2}:\d{2}\s*(?:AM|PM))?",
     _re.IGNORECASE,
 )
+_TOOLTIP_DATE_SHORT_MONTH_RE = _re.compile(
+    r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|January|February|March|April|May|June|"
+    r"July|August|September|October|November|December)\s+"
+    r"\d{1,2}\s*,\s*\d{4}(?:\s+at\s+\d{1,2}:\d{2}\s*(?:AM|PM))?",
+    _re.IGNORECASE,
+)
+_TOOLTIP_DATE_DAY_FIRST_RE = _re.compile(
+    r"\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|January|February|March|April|May|"
+    r"June|July|August|September|October|November|December)\s+\d{4}"
+    r"(?:\s+at\s+\d{1,2}:\d{2}\s*(?:AM|PM))?",
+    _re.IGNORECASE,
+)
+_TOOLTIP_DATE_ISO_RE = _re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
+
+
+def _parse_tooltip_date(raw: Optional[str]) -> Optional[str]:
+    """Best-effort parse of Facebook date tooltip body (format changes often)."""
+    if not raw:
+        return None
+    text = " ".join(str(raw).split())
+    for pat in (
+        _TOOLTIP_DATE_RE,
+        _TOOLTIP_DATE_SHORT_MONTH_RE,
+        _TOOLTIP_DATE_DAY_FIRST_RE,
+    ):
+        m = pat.search(text)
+        if m:
+            return m.group(0).strip()
+    m = _TOOLTIP_DATE_ISO_RE.search(text)
+    if m:
+        return m.group(0).strip()
+    return None
+
+
+# Injected into page.evaluate: return link indices for an article, highest-first (date link likely).
+_JS_DATE_LINK_HOVER_ORDER = """
+(article) => {
+    const links = Array.from(article.querySelectorAll('a[href]'));
+    function isPostUrl(href) {
+        if (!href) return false;
+        const h = String(href).toLowerCase();
+        return (
+            h.includes('/posts/') || h.includes('/permalink/') || h.includes('story_fbid') ||
+            h.includes('/photo/') || h.includes('/share/') || h.includes('/watch') ||
+            h.includes('/reel/') || h.includes('/videos/') || h.includes('story.php') ||
+            h.includes('watch?v=')
+        );
+    }
+    function score(i) {
+        const a = links[i];
+        const href = (a.href || '') + (a.getAttribute('href') || '');
+        let s = 0;
+        if (isPostUrl(href)) s += 100;
+        if (a.querySelector('span[style*="display:flex"], span[style*="display: flex"]')) s += 80;
+        if (a.hasAttribute('attributionsrc')) s += 40;
+        const al = (a.getAttribute('aria-label') || '').toLowerCase();
+        if (/min|hour|day|mar|jan|feb|apr|may|jun|jul|aug|sep|oct|nov|dec|ago|yesterday|today|\\d{4}/.test(al)) s += 50;
+        const txt = (a.innerText || a.textContent || '').replace(/\\s+/g, ' ').trim();
+        if (txt.length > 0 && txt.length < 40 && /\\d|ago|yesterday|today|min|hour/i.test(txt)) s += 30;
+        return s;
+    }
+    const indices = links.map((_, i) => i);
+    indices.sort((a, b) => {
+        const sa = score(a);
+        const sb = score(b);
+        if (sb !== sa) return sb - sa;
+        return a - b;
+    });
+    return indices;
+}
+"""
 
 
 async def enable_search_posts_seen_filter(page: Page) -> bool:
@@ -154,8 +225,20 @@ async def _extract_dates_via_tooltip_hover(
             links = article.locator("a[href]")
             link_count = await links.count()
 
+            hover_order: List[int] = list(range(link_count))
+            try:
+                order_js = await article.evaluate(_JS_DATE_LINK_HOVER_ORDER)
+                if (
+                    isinstance(order_js, list)
+                    and len(order_js) == link_count
+                    and set(order_js) == set(range(link_count))
+                ):
+                    hover_order = [int(x) for x in order_js]
+            except Exception:
+                pass
+
             found_date = False
-            for j in range(link_count):
+            for j in hover_order:
                 if found_date:
                     break
                 link = links.nth(j)
@@ -175,9 +258,9 @@ async def _extract_dates_via_tooltip_hover(
                     await link.hover(timeout=2000)
                 except Exception:
                     continue
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.45)
 
-                tooltip = page.locator("div[role='tooltip']")
+                tooltip = page.locator('[role="tooltip"]')
                 try:
                     await tooltip.first.wait_for(state="visible", timeout=1500)
                 except Exception:
@@ -190,9 +273,9 @@ async def _extract_dates_via_tooltip_hover(
                 await asyncio.sleep(0.1)
 
                 if raw:
-                    m = _TOOLTIP_DATE_RE.search(raw)
-                    if m:
-                        date_by_index[i] = m.group(0).strip()
+                    parsed = _parse_tooltip_date(raw)
+                    if parsed:
+                        date_by_index[i] = parsed
                         extracted += 1
                         found_date = True
 
@@ -340,12 +423,18 @@ async def scroll_and_process_posts(
 
             function isPostUrl(href) {
                 if (!href) return false;
+                const h = String(href).toLowerCase();
                 return (
-                    href.includes('/posts/') ||
-                    href.includes('/permalink/') ||
-                    href.includes('story_fbid') ||
-                    href.includes('/photo/') ||
-                    href.includes('/share/')
+                    h.includes('/posts/') ||
+                    h.includes('/permalink/') ||
+                    h.includes('story_fbid') ||
+                    h.includes('/photo/') ||
+                    h.includes('/share/') ||
+                    h.includes('/watch') ||
+                    h.includes('/reel/') ||
+                    h.includes('/videos/') ||
+                    h.includes('story.php') ||
+                    h.includes('watch?v=')
                 );
             }
 
@@ -554,6 +643,8 @@ async def scroll_and_process_posts(
                 const selectors = [
                     'a[href*="/posts/"]', 'a[href*="/permalink/"]',
                     'a[href*="story_fbid"]', 'a[href*="/photo/"]',
+                    'a[href*="/watch"]', 'a[href*="/reel/"]', 'a[href*="/videos/"]',
+                    'a[href*="watch?v="]',
                     'a[role="link"][href*="facebook.com"]', 'span[id] a[href]'
                 ];
                 for (const selector of selectors) {
@@ -814,12 +905,18 @@ async def scroll_and_process_posts(
 
                     function isPostUrl2(href) {
                         if (!href) return false;
+                        const h = String(href).toLowerCase();
                         return (
-                            href.includes('/posts/') ||
-                            href.includes('/permalink/') ||
-                            href.includes('story_fbid') ||
-                            href.includes('/photo/') ||
-                            href.includes('/share/')
+                            h.includes('/posts/') ||
+                            h.includes('/permalink/') ||
+                            h.includes('story_fbid') ||
+                            h.includes('/photo/') ||
+                            h.includes('/share/') ||
+                            h.includes('/watch') ||
+                            h.includes('/reel/') ||
+                            h.includes('/videos/') ||
+                            h.includes('story.php') ||
+                            h.includes('watch?v=')
                         );
                     }
 
@@ -927,7 +1024,8 @@ async def scroll_and_process_posts(
                     Array.from(feed.children).forEach((child, idx) => {
                         const postContent = cardText(child);
                         const postLink = child.querySelector(
-                            'a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid"], a[href*="/photo/"]'
+                            'a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid"], a[href*="/photo/"], ' +
+                            'a[href*="/watch"], a[href*="/reel/"], a[href*="/videos/"], a[href*="watch?v="]'
                         );
                         const postUrl = postLink ? postLink.href : null;
                         const postDate = extractPostDate(child, postLink);
