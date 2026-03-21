@@ -90,6 +90,7 @@ function App() {
   const [editCommentValues, setEditCommentValues] = useState(null)
   const [savingResult, setSavingResult] = useState(false)
   const [savingComment, setSavingComment] = useState(false)
+  const [exporting, setExporting] = useState(false)
   const selectAllRef = useRef(null)
 
   const getResultEditPayload = (r) => ({
@@ -443,6 +444,30 @@ function App() {
     }
   }
 
+  const exportEnriched = async () => {
+    setExporting(true)
+    setFeedback(null)
+    try {
+      const res = await api.get('/results/export/enriched', { responseType: 'blob' })
+      const disposition = res.headers['content-disposition'] || ''
+      const match = disposition.match(/filename="?(.+?)"?$/)
+      const filename = match ? match[1] : 'enriched_leads.xlsx'
+      const url = window.URL.createObjectURL(res.data)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      window.URL.revokeObjectURL(url)
+      setFeedback({ type: 'success', text: 'Enriched leads exported successfully.' })
+    } catch (err) {
+      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to export enriched leads') })
+    } finally {
+      setExporting(false)
+    }
+  }
+
   const pageIds = useMemo(() => results.map((result) => result.id), [results])
   const allSelected = pageIds.length > 0 && pageIds.every((id) => selectedIds.has(id))
   const someSelected = pageIds.some((id) => selectedIds.has(id))
@@ -598,6 +623,9 @@ function App() {
               {enrichingBatch ? 'Enriching...' : `Enrich Selected (${selectedIds.size})`}
             </button>
             <button type="button" onClick={() => setSelectedIds(new Set())} disabled={selectedIds.size === 0} className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-700 disabled:opacity-40">Clear Selection</button>
+            <button type="button" onClick={exportEnriched} disabled={exporting} className="ml-auto rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white disabled:bg-slate-400">
+              {exporting ? 'Exporting...' : 'Export Enriched'}
+            </button>
           </div>
         </section>
 

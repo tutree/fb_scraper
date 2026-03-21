@@ -1,9 +1,13 @@
+import io
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import cast, String
 from typing import Optional, List
 from uuid import UUID
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
 
 from ...core.database import get_db
 from ...services.scraper import ScraperService
@@ -230,6 +234,113 @@ async def get_recent_processed(
         )
         for r in results
     ]
+
+
+@router.get("/export/enriched")
+async def export_enriched_xlsx(db: Session = Depends(get_db)):
+    """Export enriched results that have at least one phone number and a location as .xlsx."""
+
+    rows = (
+        db.query(SearchResult)
+        .filter(
+            SearchResult.enriched_at.isnot(None),
+            SearchResult.enriched_phones.isnot(None),
+            SearchResult.location.isnot(None),
+            SearchResult.location != "",
+        )
+        .order_by(SearchResult.enriched_at.desc())
+        .all()
+    )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Enriched Leads"
+
+    headers = [
+        "Name",
+        "Location",
+        "Phone Numbers",
+        "Emails",
+        "Addresses",
+        "Age",
+        "User Type",
+        "Confidence",
+        "Post Date",
+        "Post URL",
+        "Profile URL",
+        "Keyword",
+        "Enriched At",
+    ]
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="334155", end_color="334155", fill_type="solid")
+    for col_idx, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    seen_names: set[str] = set()
+    row_num = 2
+    for r in rows:
+        norm_name = (r.name or "").strip().lower()
+        if not norm_name or norm_name in seen_names:
+            continue
+        phones = r.enriched_phones or []
+        if not phones:
+            continue
+        phone_str = "; ".join(p.get("number", "") for p in phones if p.get("number"))
+        if not phone_str:
+            continue
+        seen_names.add(norm_name)
+        email_str = "; ".join(r.enriched_emails or [])
+        addr_parts = []
+        for a in r.enriched_addresses or []:
+            addr_parts.append(
+                ", ".join(filter(None, [a.get("street"), a.get("unit"), a.get("city"), a.get("state"), a.get("zip")]))
+            )
+        addr_str = "; ".join(addr_parts)
+
+        values = [
+            r.name or "",
+            r.location or "",
+            phone_str,
+            email_str,
+            addr_str,
+            r.enriched_age or "",
+            r.user_type.value if r.user_type else "",
+            f"{r.confidence_score:.0%}" if r.confidence_score is not None else "",
+            r.post_date or "",
+            r.post_url or "",
+            r.profile_url or "",
+            r.search_keyword or "",
+            r.enriched_at.isoformat() if r.enriched_at else "",
+        ]
+        for col_idx, val in enumerate(values, 1):
+            ws.cell(row=row_num, column=col_idx, value=val)
+        row_num += 1
+
+    for col in ws.columns:
+        max_len = 0
+        col_letter = col[0].column_letter
+        for cell in col:
+            try:
+                max_len = max(max_len, len(str(cell.value or "")))
+            except Exception:
+                pass
+        ws.column_dimensions[col_letter].width = min(max_len + 4, 50)
+
+    ws.auto_filter.ref = ws.dimensions
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    filename = f"enriched_leads_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/{result_id}/comments", response_model=List[PostCommentResponse])
