@@ -1132,7 +1132,7 @@ async def scroll_and_process_posts(
         # 2) Scrape comments from the search page dialog
         comments_data: List[Dict] = []
         try:
-            comments_data, dialog_post_url = await click_comments_and_extract_from_dialog(
+            comments_data, dialog_post_url, dialog_post_date = await click_comments_and_extract_from_dialog(
                 page,
                 link["url"],
                 max_comments=0,
@@ -1143,6 +1143,9 @@ async def scroll_and_process_posts(
                 logger.info(f"  [PostURL] Set from dialog: {dialog_post_url}")
             elif not link.get("post_url"):
                 logger.info("  [PostURL] Dialog gave no URL and share button also failed — post_url will be None")
+            if dialog_post_date and not link.get("post_date"):
+                link["post_date"] = dialog_post_date
+                logger.info(f"  [PostDate] Set from dialog: {dialog_post_date}")
 
             if comments_data:
                 logger.info(f"  [Comments] Final count: {len(comments_data)}")

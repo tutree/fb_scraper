@@ -42,10 +42,13 @@ class ScraperService:
     async def run_search(
         self,
         keywords: Optional[List[str]] = None,
-        max_results: int = 100,
+        max_results: Optional[int] = None,
         should_stop: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Any]:
         """Main search orchestration."""
+        if max_results is None:
+            max_results = settings.MAX_RESULTS_PER_KEYWORD
+
         logger.info("=" * 80)
         logger.info("STARTING SCRAPER SERVICE")
         logger.info("=" * 80)

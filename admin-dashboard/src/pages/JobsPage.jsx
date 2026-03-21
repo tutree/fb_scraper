@@ -6,6 +6,7 @@ const STATUS_COLORS = {
   running: 'bg-blue-100 text-blue-800',
   failed: 'bg-rose-100 text-rose-800',
   skipped: 'bg-amber-100 text-amber-800',
+  stopped: 'bg-violet-100 text-violet-800',
 }
 
 const PROCESS_TABS = [
@@ -174,6 +175,28 @@ export default function JobsPage() {
     }
   }
 
+  const stopJob = async (job) => {
+    setFeedback(null)
+    try {
+      await api.post('/automation/stop-job', { job })
+      setFeedback({ type: 'success', text: 'Stop / pause requested.' })
+      fetchAll()
+    } catch (err) {
+      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed') })
+    }
+  }
+
+  const resumeJob = async (job) => {
+    setFeedback(null)
+    try {
+      await api.post('/automation/resume-job', { job })
+      setFeedback({ type: 'success', text: 'Resumed / cleared.' })
+      fetchAll()
+    } catch (err) {
+      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed') })
+    }
+  }
+
   if (loading) {
     return <div className="flex min-h-[50vh] items-center justify-center text-slate-500">Loading jobs...</div>
   }
@@ -326,6 +349,65 @@ export default function JobsPage() {
           </div>
         )}
 
+        <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Stop / pause jobs</p>
+          <p className="mt-1 text-xs text-slate-500">
+            Scraper: cooperative stop while a run is in progress. Post analyzer / enrichment: pause queue workers (items stay queued; resume to continue).
+          </p>
+          <div className="mt-3 flex flex-wrap gap-3">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-slate-700">Scraper</span>
+              <button
+                type="button"
+                disabled={!status?.is_running}
+                onClick={() => stopJob('scraper')}
+                className="rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Stop run
+              </button>
+              <button
+                type="button"
+                onClick={() => resumeJob('scraper')}
+                className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                title="Clear stuck stop flag without starting a run"
+              >
+                Clear stop flag
+              </button>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-slate-700">Post analyzer</span>
+              {status?.analyzer_paused ? (
+                <button type="button" onClick={() => resumeJob('analyzer')} className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700">
+                  Resume
+                </button>
+              ) : (
+                <button type="button" onClick={() => stopJob('analyzer')} className="rounded-lg border border-amber-200 bg-white px-3 py-1.5 text-xs font-semibold text-amber-800 hover:bg-amber-50">
+                  Pause
+                </button>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-slate-700">Enrichment</span>
+              {status?.enrichment_paused ? (
+                <button type="button" onClick={() => resumeJob('enrichment')} className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700">
+                  Resume
+                </button>
+              ) : (
+                <button type="button" onClick={() => stopJob('enrichment')} className="rounded-lg border border-amber-200 bg-white px-3 py-1.5 text-xs font-semibold text-amber-800 hover:bg-amber-50">
+                  Pause
+                </button>
+              )}
+            </div>
+          </div>
+          {(status?.scraper_stop_requested || status?.analyzer_paused || status?.enrichment_paused) && (
+            <p className="mt-2 text-xs text-slate-500">
+              {status?.scraper_stop_requested && <span className="mr-3">Scraper stop flag set</span>}
+              {status?.analyzer_paused && <span className="mr-3">Analyzer paused</span>}
+              {status?.enrichment_paused && <span>Enrichment paused</span>}
+            </p>
+          )}
+        </div>
+
         <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
             <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Scheduler</p>
@@ -417,6 +499,10 @@ export default function JobsPage() {
           <label className="flex items-center gap-2 text-sm text-slate-700" title="Periodic job will enrich analyzed rows with EnformionGO">
             <input type="checkbox" checked={status?.auto_enrich ?? true} disabled={updating} onChange={(e) => update({ auto_enrich: e.target.checked })} className="h-4 w-4 rounded border-slate-300" />
             Enrich (periodic job)
+          </label>
+          <label className="flex items-center gap-2 text-sm text-slate-700" title="If off, only saved cookies are used. If cookies expire, the scraper fails instead of opening a password login.">
+            <input type="checkbox" checked={status?.try_credential_login ?? false} disabled={updating} onChange={(e) => update({ try_credential_login: e.target.checked })} className="h-4 w-4 rounded border-slate-300" />
+            Try credential login
           </label>
           <label className="flex items-center gap-2 text-sm text-slate-700">
             Interval:

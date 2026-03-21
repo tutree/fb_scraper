@@ -1,10 +1,15 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 
 
 class SearchRequest(BaseModel):
     keywords: Optional[List[str]] = None  # If None, use default keywords
-    max_results: Optional[int] = 100
+    max_results: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=500,
+        description="Max profiles per keyword; omit to use MAX_RESULTS_PER_KEYWORD from settings (default 30)",
+    )
     use_proxy: bool = True
 
 

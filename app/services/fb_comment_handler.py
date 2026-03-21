@@ -17,6 +17,7 @@ from .facebook_comment_fix import expand_all_comments_in_dialog
 from .facebook_selectors import (
     COMMENT_TRIGGER_FROM_PAGE_JS,
     COMMENT_TRIGGER_FOR_PROFILE_JS,
+    DATE_FROM_DIALOG_JS,
     DIALOG_DIAG_JS,
     EXTRACT_DIALOG_COMMENTS_JS,
     HAS_DIALOG_JS,
@@ -201,14 +202,15 @@ async def click_comments_and_extract_from_dialog(
     profile_url: str,
     max_comments: int = 0,
     visible_index: Optional[int] = None,
-) -> Tuple[List[Dict], Optional[str]]:
+) -> Tuple[List[Dict], Optional[str], Optional[str]]:
     """
     On the search results page: find the post containing this profile link,
     click its Comments button to open the dialog, extract comments, then close with ESC.
-    Returns (comments: List[Dict], post_url: Optional[str]).
+    Returns (comments: List[Dict], post_url: Optional[str], post_date: Optional[str]).
     """
     comments_data: List[Dict] = []
     post_url_from_dialog: Optional[str] = None
+    post_date_from_dialog: Optional[str] = None
     try:
         limit = resolve_comment_limit(max_comments)
         profile_path = profile_url.split("?")[0].rstrip("/").lower()
@@ -252,7 +254,7 @@ async def click_comments_and_extract_from_dialog(
                 """
             )
             logger.warning(f"  [Comments click] FAILED - no comment button found. DOM state: {dom_diag}")
-            return comments_data, post_url_from_dialog
+            return comments_data, post_url_from_dialog, post_date_from_dialog
 
         logger.info("  [Comments click] SUCCESS - waiting for dialog to open...")
         # await _screenshot(page, f"03_after_click_{profile_path.split('/')[-1][:20]}")
@@ -283,7 +285,7 @@ async def click_comments_and_extract_from_dialog(
         has_dialog = bool(dialog_diag.get("hasDialog"))
         if not has_dialog:
             logger.warning("  [Comments] Comment click did NOT open a recognizable comments dialog")
-            return comments_data, post_url_from_dialog
+            return comments_data, post_url_from_dialog, post_date_from_dialog
 
         logger.info("  [Comments] Dialog confirmed - expanding all comments/replies...")
         await expand_all_comments_in_dialog(page, root_selector='[role="dialog"]')
@@ -297,6 +299,33 @@ async def click_comments_and_extract_from_dialog(
         else:
             logger.info("  [PostURL] No /posts/ link found in dialog")
 
+        try:
+            post_date_from_dialog = await page.evaluate(DATE_FROM_DIALOG_JS)
+            if post_date_from_dialog:
+                logger.info(f"  [PostDate] Extracted from dialog: {post_date_from_dialog}")
+            else:
+                logger.info("  [PostDate] No date found in dialog via JS")
+        except Exception as de:
+            logger.debug("  [PostDate] Dialog date JS error: %s", de)
+
+        if not post_date_from_dialog:
+            try:
+                attr_link = page.locator('[role="dialog"] a[attributionsrc]').first
+                await attr_link.scroll_into_view_if_needed(timeout=2000)
+                await asyncio.sleep(0.15)
+                await attr_link.hover(timeout=3000)
+                await asyncio.sleep(0.9)
+                tooltip = page.locator('[role="tooltip"]')
+                await tooltip.first.wait_for(state="visible", timeout=3000)
+                tip_text = await tooltip.first.inner_text()
+                if tip_text and tip_text.strip():
+                    post_date_from_dialog = tip_text.strip()
+                    logger.info(f"  [PostDate] Extracted from dialog hover: {post_date_from_dialog}")
+                await page.mouse.move(0, 0)
+                await asyncio.sleep(0.2)
+            except Exception:
+                logger.debug("  [PostDate] Dialog hover fallback did not yield a date")
+
     except Exception as e:
         logger.warning(f"  Could not extract comments from dialog: {e}")
     finally:
@@ -306,4 +335,4 @@ async def click_comments_and_extract_from_dialog(
         except Exception:
             pass
 
-    return comments_data, post_url_from_dialog
+    return comments_data, post_url_from_dialog, post_date_from_dialog

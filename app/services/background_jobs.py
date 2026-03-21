@@ -45,6 +45,10 @@ REDIS_KEY_ANALYZE_ENRICH_LOCK = f"{REDIS_PREFIX}analyze_enrich_lock"
 REDIS_KEY_ENRICH_QUEUE = f"{REDIS_PREFIX}enrich_queue"
 REDIS_KEY_ENRICH_LOCK = f"{REDIS_PREFIX}enrich_lock"
 REDIS_KEY_COMMENT_ANALYZE_LOCK = f"{REDIS_PREFIX}comment_analyze_lock"
+# Jobs page: stop in-flight scheduled scrape; pause queue workers without killing tasks
+REDIS_KEY_STOP_SCRAPE = f"{REDIS_PREFIX}stop_scrape_request"
+REDIS_KEY_PAUSE_ANALYZE = f"{REDIS_PREFIX}pause_analyze_worker"
+REDIS_KEY_PAUSE_ENRICH = f"{REDIS_PREFIX}pause_enrich_worker"
 MAX_HISTORY = 50
 ANALYZE_ENRICH_INTERVAL_MINUTES = 15
 ENRICH_INTERVAL_MINUTES = 30
@@ -136,12 +140,87 @@ def _is_locked() -> bool:
         return False
 
 
+def _scraper_stop_requested() -> bool:
+    try:
+        return bool(_get_redis().exists(REDIS_KEY_STOP_SCRAPE))
+    except Exception:
+        return False
+
+
+def _analyzer_worker_paused() -> bool:
+    try:
+        return bool(_get_redis().exists(REDIS_KEY_PAUSE_ANALYZE))
+    except Exception:
+        return False
+
+
+def _enrich_worker_paused() -> bool:
+    try:
+        return bool(_get_redis().exists(REDIS_KEY_PAUSE_ENRICH))
+    except Exception:
+        return False
+
+
+def request_background_scraper_stop() -> None:
+    """Set flag so the in-flight scheduled/manual scrape exits cooperatively."""
+    try:
+        _get_redis().set(REDIS_KEY_STOP_SCRAPE, "1")
+    except Exception as exc:
+        logger.warning("Could not set scraper stop flag: %s", exc)
+
+
+def clear_background_scraper_stop() -> None:
+    """Clear stop flag (e.g. user resumes or stale flag after crash)."""
+    try:
+        _get_redis().delete(REDIS_KEY_STOP_SCRAPE)
+    except Exception as exc:
+        logger.warning("Could not clear scraper stop flag: %s", exc)
+
+
+def pause_analyze_worker_job() -> None:
+    try:
+        _get_redis().set(REDIS_KEY_PAUSE_ANALYZE, "1")
+        logger.info("Post analyze queue worker: pause requested")
+    except Exception as exc:
+        logger.warning("Could not pause analyze worker: %s", exc)
+
+
+def resume_analyze_worker_job() -> None:
+    try:
+        _get_redis().delete(REDIS_KEY_PAUSE_ANALYZE)
+        logger.info("Post analyze queue worker: resumed")
+    except Exception as exc:
+        logger.warning("Could not resume analyze worker: %s", exc)
+
+
+def pause_enrich_worker_job() -> None:
+    try:
+        _get_redis().set(REDIS_KEY_PAUSE_ENRICH, "1")
+        logger.info("Enrich queue worker: pause requested")
+    except Exception as exc:
+        logger.warning("Could not pause enrich worker: %s", exc)
+
+
+def resume_enrich_worker_job() -> None:
+    try:
+        _get_redis().delete(REDIS_KEY_PAUSE_ENRICH)
+        logger.info("Enrich queue worker: resumed")
+    except Exception as exc:
+        logger.warning("Could not resume enrich worker: %s", exc)
+
+
+def should_stop_scheduled_scrape() -> bool:
+    """Passed to ScraperService.run_search for automation runs."""
+    return _scraper_stop_requested()
+
+
 def _save_config():
     _save_json(REDIS_KEY_CONFIG, {
         "auto_scrape_enabled": settings.AUTO_SCRAPE_ENABLED,
         "interval_minutes": settings.AUTO_SCRAPE_INTERVAL_MINUTES,
         "auto_analyze": settings.AUTO_ANALYZE_AFTER_SCRAPE,
         "auto_enrich": settings.AUTO_ENRICH_AFTER_ANALYZE,
+        "try_credential_login": settings.FB_TRY_CREDENTIAL_LOGIN,
     })
 
 
@@ -266,6 +345,10 @@ def get_status() -> dict:
         "enrich_queue_pending": enrich_queue["pending_count"],
         "enrich_queue_items": enrich_queue["pending_items"],
         "enrich_not_enrichable_count": enrich_not_enrichable,
+        "scraper_stop_requested": _scraper_stop_requested(),
+        "analyzer_paused": _analyzer_worker_paused(),
+        "enrichment_paused": _enrich_worker_paused(),
+        "try_credential_login": settings.FB_TRY_CREDENTIAL_LOGIN,
         "jobs": {
             "scraper": {
                 "running": _is_locked(),
@@ -378,6 +461,13 @@ async def _run_enrich_queue_worker() -> None:
                     if not result:
                         continue
                     _, id_str = result
+                    if _enrich_worker_paused():
+                        try:
+                            await client.lpush(REDIS_KEY_ENRICH_QUEUE, id_str)
+                        except Exception:
+                            pass
+                        await asyncio.sleep(0.5)
+                        continue
                     try:
                         rid = uuid.UUID(id_str)
                     except (ValueError, TypeError, AttributeError):
@@ -447,6 +537,13 @@ async def _run_analyze_queue_worker() -> None:
                     if not result:
                         continue
                     _, id_str = result
+                    if _analyzer_worker_paused():
+                        try:
+                            await client.lpush(REDIS_KEY_ANALYZE_QUEUE, id_str)
+                        except Exception:
+                            pass
+                        await asyncio.sleep(0.5)
+                        continue
                     try:
                         rid = uuid.UUID(id_str)
                     except (ValueError, TypeError, AttributeError):
@@ -619,23 +716,36 @@ async def _auto_analyze_comments(db, batch_size: int = 50) -> int:
 
     analyzed = 0
     for i, comment in enumerate(comments):
-        parent = parents.get(comment.search_result_id)
+        cid = str(comment.id)
+        try:
+            fresh = db.query(PostComment).get(comment.id)
+            if fresh is None:
+                logger.debug("Comment %s deleted by another job — skipping", cid)
+                continue
+        except Exception:
+            db.rollback()
+            continue
+
+        parent = parents.get(fresh.search_result_id)
         post_context = (parent.post_content or "") if parent else ""
         search_keyword = (parent.search_keyword or "") if parent else ""
 
-        if not comment.comment_text or not comment.comment_text.strip():
-            comment.user_type = UserType.UNKNOWN
-            comment.confidence_score = 0.0
-            comment.analysis_message = "No comment text"
-            comment.analyzed_at = datetime.now(timezone.utc)
+        if not fresh.comment_text or not fresh.comment_text.strip():
+            fresh.user_type = UserType.UNKNOWN
+            fresh.confidence_score = 0.0
+            fresh.analysis_message = "No comment text"
+            fresh.analyzed_at = datetime.now(timezone.utc)
             analyzed += 1
-            db.commit()
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
             continue
 
         try:
             result = await classifier.classify_comment_user(
-                comment_text=comment.comment_text,
-                author_name=comment.author_name or "",
+                comment_text=fresh.comment_text,
+                author_name=fresh.author_name or "",
                 post_context=post_context,
                 search_keyword=search_keyword,
             )
@@ -644,18 +754,18 @@ async def _auto_analyze_comments(db, batch_size: int = 50) -> int:
                 "TUTOR": UserType.TUTOR,
                 "UNKNOWN": UserType.UNKNOWN,
             }
-            comment.user_type = type_mapping.get(
+            fresh.user_type = type_mapping.get(
                 str(result.get("type", "UNKNOWN")).upper(), UserType.UNKNOWN
             )
-            comment.confidence_score = max(0.0, min(1.0, float(result.get("confidence", 0.0))))
-            comment.analysis_message = str(result.get("reason") or "")
-            comment.analyzed_at = datetime.now(timezone.utc)
+            fresh.confidence_score = max(0.0, min(1.0, float(result.get("confidence", 0.0))))
+            fresh.analysis_message = str(result.get("reason") or "")
+            fresh.analyzed_at = datetime.now(timezone.utc)
             analyzed += 1
             db.commit()
             if analyzed % 10 == 0:
                 logger.info("Comment auto-analyze: %d/%d done in this batch", analyzed, len(comments))
         except Exception as exc:
-            logger.warning("Comment auto-analyze failed for comment %s: %s", comment.id, exc)
+            logger.warning("Comment auto-analyze failed for comment %s: %s", cid, exc)
             db.rollback()
 
     return analyzed
@@ -715,6 +825,9 @@ async def run_scheduled_scrape():
         logger.info("Scheduled scrape skipped — previous run still active (Redis lock)")
         return
 
+    # Fresh run: clear any stale stop flag from a previous completed stop
+    clear_background_scraper_stop()
+
     run_id = str(uuid.uuid4())[:8]
     started_at = datetime.now(timezone.utc).isoformat()
     entry = {
@@ -743,7 +856,6 @@ async def run_scheduled_scrape():
             entry["status"] = "skipped"
             entry["error"] = "No active cookie session"
             entry["finished_at"] = datetime.now(timezone.utc).isoformat()
-            _push_history(entry)
             _save_json(REDIS_KEY_STATUS, {
                 "last_run_at": started_at,
                 "last_run_status": "skipped: no cookie",
@@ -759,6 +871,7 @@ async def run_scheduled_scrape():
         result = await scraper.run_search(
             keywords=None,
             max_results=settings.AUTO_SCRAPE_MAX_RESULTS,
+            should_stop=should_stop_scheduled_scrape,
         )
 
         ids_after = set(r.id for r in db.query(SearchResult.id).all())
@@ -767,12 +880,21 @@ async def run_scheduled_scrape():
         entry["new_records"] = len(new_ids)
         logger.info("Scrape done: %d results, %d new records (analysis handled by queue worker)", entry["scraped"], entry["new_records"])
 
-        entry["status"] = "completed"
+        if result.get("stopped"):
+            entry["status"] = "stopped"
+            entry["detail"] = "Stop requested from Jobs page"
+        else:
+            entry["status"] = "completed"
         entry["finished_at"] = datetime.now(timezone.utc).isoformat()
 
-        status_msg = (
-            f"scraped={entry['scraped']} new={entry['new_records']} (analyze/enrich via queue worker)"
-        )
+        if result.get("stopped"):
+            status_msg = (
+                f"stopped by user — scraped={entry['scraped']} new={entry['new_records']}"
+            )
+        else:
+            status_msg = (
+                f"scraped={entry['scraped']} new={entry['new_records']} (analyze/enrich via queue worker)"
+            )
         _save_json(REDIS_KEY_STATUS, {
             "last_run_at": started_at,
             "last_run_status": status_msg,
@@ -793,6 +915,7 @@ async def run_scheduled_scrape():
     finally:
         db.close()
         _release_lock()
+        clear_background_scraper_stop()
         _push_history(entry)
         logger.info("=" * 60)
         logger.info("SCHEDULED AUTO-SCRAPE [%s] FINISHED", run_id)
@@ -975,11 +1098,17 @@ def disable_auto_scrape():
     logger.info("Auto-scrape disabled")
 
 
-def update_config(auto_analyze: Optional[bool] = None, auto_enrich: Optional[bool] = None):
+def update_config(
+    auto_analyze: Optional[bool] = None,
+    auto_enrich: Optional[bool] = None,
+    try_credential_login: Optional[bool] = None,
+):
     if auto_analyze is not None:
         settings.AUTO_ANALYZE_AFTER_SCRAPE = auto_analyze
     if auto_enrich is not None:
         settings.AUTO_ENRICH_AFTER_ANALYZE = auto_enrich
+    if try_credential_login is not None:
+        settings.FB_TRY_CREDENTIAL_LOGIN = try_credential_login
     _save_config()
 
 

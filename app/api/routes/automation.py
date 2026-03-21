@@ -4,9 +4,8 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
-from typing import Optional, List
+from typing import List, Literal, Optional
 
-from ...core.config import settings
 from ...core.database import get_db
 from ...models.search_result import SearchResult, UserType
 from ...models.post_comment import PostComment
@@ -18,6 +17,12 @@ from ...services.background_jobs import (
     update_config,
     trigger_now,
     trigger_comment_analyze_now,
+    request_background_scraper_stop,
+    clear_background_scraper_stop,
+    pause_analyze_worker_job,
+    resume_analyze_worker_job,
+    pause_enrich_worker_job,
+    resume_enrich_worker_job,
 )
 from ...services.enformion_service import EnformionService
 
@@ -49,11 +54,15 @@ class AutomationStatus(BaseModel):
     interval_minutes: int
     auto_analyze: bool
     auto_enrich: bool
+    try_credential_login: bool = False
     next_run: Optional[str] = None
     last_run_at: Optional[str] = None
     last_run_status: Optional[str] = None
     is_running: bool = False
     current_step: Optional[str] = None
+    scraper_stop_requested: bool = False
+    analyzer_paused: bool = False
+    enrichment_paused: bool = False
     analyze_queue_pending: int = 0
     analyze_queue_ids: List[str] = []
     enrich_queue_pending: int = 0
@@ -81,6 +90,11 @@ class AutomationUpdate(BaseModel):
     interval_minutes: Optional[int] = Field(None, ge=5, le=1440)
     auto_analyze: Optional[bool] = None
     auto_enrich: Optional[bool] = None
+    try_credential_login: Optional[bool] = None
+
+
+class JobControlBody(BaseModel):
+    job: Literal["scraper", "analyzer", "enrichment"]
 
 
 @router.get("/status", response_model=AutomationStatus)
@@ -97,7 +111,11 @@ async def automation_history(
 
 @router.post("/update", response_model=AutomationStatus)
 async def update_automation(body: AutomationUpdate):
-    update_config(auto_analyze=body.auto_analyze, auto_enrich=body.auto_enrich)
+    update_config(
+        auto_analyze=body.auto_analyze,
+        auto_enrich=body.auto_enrich,
+        try_credential_login=body.try_credential_login,
+    )
 
     if body.auto_scrape_enabled is True:
         enable_auto_scrape(body.interval_minutes)
@@ -120,6 +138,29 @@ async def trigger_comment_analyze():
     trigger_comment_analyze_now()
     return {"message": "Comment analyzer triggered — running in background"}
 
+
+@router.post("/stop-job", response_model=AutomationStatus)
+async def stop_background_job(body: JobControlBody):
+    """Request cooperative stop (scraper) or pause queue processing (analyzer / enrichment)."""
+    if body.job == "scraper":
+        request_background_scraper_stop()
+    elif body.job == "analyzer":
+        pause_analyze_worker_job()
+    else:
+        pause_enrich_worker_job()
+    return AutomationStatus(**get_status())
+
+
+@router.post("/resume-job", response_model=AutomationStatus)
+async def resume_background_job(body: JobControlBody):
+    """Clear scraper stop flag or resume paused analyzer / enrichment workers."""
+    if body.job == "scraper":
+        clear_background_scraper_stop()
+    elif body.job == "analyzer":
+        resume_analyze_worker_job()
+    else:
+        resume_enrich_worker_job()
+    return AutomationStatus(**get_status())
 
 
 # ---------------------------------------------------------------------------

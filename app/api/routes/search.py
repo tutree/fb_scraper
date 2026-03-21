@@ -7,6 +7,7 @@ from pathlib import Path
 import json
 import uuid
 
+from ...core.config import settings
 from ...core.database import SessionLocal
 from ...core.logging_config import get_recent_logs
 from ...services.scraper import ScraperService
@@ -94,6 +95,11 @@ async def start_search(
                 )
 
     task_id = str(uuid.uuid4())
+    max_per_kw = (
+        request.max_results
+        if request.max_results is not None
+        else settings.MAX_RESULTS_PER_KEYWORD
+    )
 
     # Store task info
     now = _now_iso()
@@ -105,7 +111,7 @@ async def start_search(
             "updated_at": now,
             "stop_requested": False,
             "requested_keywords": request.keywords,
-            "requested_max_results": request.max_results or 100,
+            "requested_max_results": max_per_kw,
             "result": None,
             "error": None,
         }
@@ -117,7 +123,7 @@ async def start_search(
         run_search_task,
         task_id,
         request.keywords,
-        request.max_results or 100,
+        max_per_kw,
     )
 
     return SearchResponse(

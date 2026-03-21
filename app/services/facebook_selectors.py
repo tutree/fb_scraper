@@ -283,3 +283,88 @@ POST_URL_FROM_DIALOG_JS = """
     return a ? a.getAttribute('href').split('?')[0] : null;
 }
 """
+
+DATE_FROM_DIALOG_JS = """
+() => {
+    const dialog = document.querySelector('[role="dialog"]') || document;
+
+    function readFromAriaLabelledBy(node) {
+        if (!node || !node.getAttribute) return null;
+        const ids = (node.getAttribute('aria-labelledby') || '').split(' ').filter(Boolean);
+        for (const id of ids) {
+            const el = document.getElementById(id);
+            if (!el) continue;
+            const t = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+            if (t) return t;
+        }
+        return null;
+    }
+
+    function readVisibleChars(container) {
+        const wrapper = container.querySelector('span[style*="display: flex"], span[style*="display:flex"]');
+        const parent = wrapper || container;
+        const charSpans = parent.querySelectorAll(':scope > span');
+        if (charSpans.length < 3) return null;
+        let text = '';
+        for (const span of charSpans) {
+            if (span.children.length > 0) continue;
+            const ch = span.textContent;
+            if (!ch) continue;
+            const rect = span.getBoundingClientRect();
+            if (rect.width === 0 && rect.height === 0) continue;
+            const cs = getComputedStyle(span);
+            if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+            if (parseFloat(cs.opacity) === 0) continue;
+            if (cs.position === 'absolute' && cs.clip && cs.clip !== 'auto') continue;
+            if (parseFloat(cs.fontSize) === 0) continue;
+            if (cs.color === cs.backgroundColor && cs.color !== '') continue;
+            text += ch;
+        }
+        return text.replace(/\\s+/g, ' ').trim() || null;
+    }
+
+    // Try a[attributionsrc] links first (same element as feed date links)
+    for (const link of dialog.querySelectorAll('a[attributionsrc]')) {
+        const labelSpan = link.querySelector('span[aria-labelledby]');
+        if (labelSpan) {
+            const ariaText = readFromAriaLabelledBy(labelSpan);
+            if (ariaText) return ariaText;
+            const visible = readVisibleChars(labelSpan);
+            if (visible) return visible;
+        }
+    }
+
+    // Fallback: any span[aria-labelledby] with flex obfuscation near the top of dialog
+    for (const span of dialog.querySelectorAll('span[aria-labelledby]')) {
+        const closest = span.closest('a[href]');
+        // skip profile links
+        if (closest) {
+            const href = (closest.href || '').toLowerCase();
+            try {
+                const u = new URL(href, location.origin);
+                const parts = u.pathname.replace(/^\\//, '').replace(/\\/$/, '').split('/');
+                if (parts.length === 1 && /^[A-Za-z0-9._-]{2,}$/.test(parts[0])) continue;
+                if (parts[0] === 'profile.php') continue;
+            } catch(e) {}
+        }
+        const ariaText = readFromAriaLabelledBy(span);
+        if (ariaText) return ariaText;
+        const visible = readVisibleChars(span);
+        if (visible) return visible;
+    }
+
+    // Fallback: time[datetime] or abbr[title]
+    const timeEl = dialog.querySelector('time[datetime]');
+    if (timeEl) {
+        const dt = (timeEl.getAttribute('datetime') || '').trim();
+        if (dt) return dt;
+    }
+    const abbrEl = dialog.querySelector('abbr[title]');
+    if (abbrEl) {
+        const title = (abbrEl.getAttribute('title') || '').trim();
+        if (title) return title;
+    }
+
+    return null;
+}
+"""

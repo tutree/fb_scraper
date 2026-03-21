@@ -216,7 +216,13 @@ class FacebookScraper:
             if await self._try_cookie_session(uid):
                 return True
 
-        # --- Phase 3: fresh credential login ---
+        # --- Phase 3: fresh credential login (optional; disabled by default) ---
+        if not settings.FB_TRY_CREDENTIAL_LOGIN:
+            logger.warning(
+                "No valid cookie session — credential login is disabled (set FB_TRY_CREDENTIAL_LOGIN=true to enable)"
+            )
+            return False
+
         if not login_accounts:
             logger.error("Auto-login failed — no accounts in config/accounts.json and no valid cookies")
             return False
