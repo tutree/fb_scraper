@@ -1,4 +1,4 @@
-﻿"""
+"""
 Comment extraction for Facebook search results.
 When Comments button opens a dialog (hasDialog=True), extract from the dialog.
 """
@@ -530,7 +530,7 @@ async def extract_comments_from_post_on_search_page(
                 """
                 () => {
                     const a = document.querySelector(
-                        'a[href*="/posts/"], a[href*="/permalink.php"]'
+                        'a[href*="/posts/pfbid"], a[href*="/posts/"], a[href*="/permalink.php"]'
                     );
                     return a ? a.getAttribute('href').split('?')[0] : null;
                 }

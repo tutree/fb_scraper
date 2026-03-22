@@ -251,7 +251,7 @@ async def process_single_profile(
                         () => {
                             const postLinks = [];
                             const links = document.querySelectorAll(
-                                'a[href*="/posts/"], a[href*="/photo/"], a[href*="story_fbid"]'
+                                'a[href*="/posts/pfbid"], a[href*="/posts/"], a[href*="/photo/"], a[href*="story_fbid"]'
                             );
                             for (const link of links) {
                                 if (postLinks.length >= 3) break;

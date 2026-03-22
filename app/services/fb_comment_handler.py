@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from ..core.logging_config import get_logger
 from ..models.post_comment import PostComment
 from .facebook_comment_fix import expand_all_comments_in_dialog
+from .fb_search_feed_scroll import scroll_search_page_until_profile_card_visible
 from .facebook_selectors import (
     COMMENT_TRIGGER_FROM_PAGE_JS,
     COMMENT_TRIGGER_FOR_PROFILE_JS,
@@ -197,6 +198,126 @@ async def extract_comments(
         return 0
 
 
+async def extract_comments_from_post_permalink(
+    page: Page,
+    post_url: str,
+    max_comments: int = 0,
+) -> Tuple[List[Dict], Optional[str], Optional[str]]:
+    """
+    Navigate to a post permalink (or share short link), open the comments dialog using
+    COMMENT_TRIGGER_FROM_PAGE_JS, extract comments, then close with ESC.
+
+    Same return shape as click_comments_and_extract_from_dialog:
+    (comments_data, post_url, post_date).
+    """
+    comments_data: List[Dict] = []
+    post_url_out: Optional[str] = None
+    post_date_out: Optional[str] = None
+    try:
+        limit = resolve_comment_limit(max_comments)
+        logger.info(
+            "  [Comments] Permalink flow: goto post (limit=%s)",
+            limit if max_comments > 0 else "ALL",
+        )
+        await page.goto(post_url.strip(), wait_until="domcontentloaded", timeout=90000)
+        # Short /share/p/ links redirect; give the SPA time to settle to /posts/...
+        await asyncio.sleep(random.uniform(1.2, 2.0))
+        try:
+            await page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
+
+        canonical = (page.url or "").split("&__")[0].split("?")[0]
+        if "/posts/" in canonical or "/permalink/" in canonical:
+            post_url_out = canonical
+            logger.info("  [Comments] Permalink resolved URL: %s", canonical[:100])
+
+        logger.info("  [Comments] Looking for Comment trigger on post page...")
+        click_result = await page.evaluate(COMMENT_TRIGGER_FROM_PAGE_JS)
+        if isinstance(click_result, dict):
+            comment_button_clicked = bool(click_result.get("clicked"))
+            logger.info(
+                "  [Comments] Permalink comment trigger method=%s",
+                click_result.get("method"),
+            )
+        else:
+            comment_button_clicked = bool(click_result)
+
+        if comment_button_clicked:
+            await asyncio.sleep(8)
+
+        if comment_button_clicked:
+            try:
+                await page.wait_for_selector('[role="dialog"]', timeout=10000)
+            except Exception:
+                logger.warning("  [Comments] Permalink: wait_for_selector('[role=dialog]') timed out")
+
+        dialog_diag = await page.evaluate(DIALOG_DIAG_JS)
+        logger.info(
+            "  [Comments] Permalink dialog hasDialog=%s | dialogs=%s | articles=%s",
+            dialog_diag.get("hasDialog"),
+            dialog_diag.get("dialogCount"),
+            dialog_diag.get("articles"),
+        )
+
+        has_dialog = bool(dialog_diag.get("hasDialog"))
+        if not has_dialog:
+            logger.warning("  [Comments] Permalink: no comments dialog — trying page.url as post URL only")
+            if not post_url_out and page.url:
+                post_url_out = (page.url or "").split("&__")[0].split("?")[0]
+            return comments_data, post_url_out, post_date_out
+
+        logger.info("  [Comments] Permalink: expanding all comments/replies...")
+        await expand_all_comments_in_dialog(page, root_selector='[role="dialog"]')
+
+        comments_data = await page.evaluate(EXTRACT_DIALOG_COMMENTS_JS, limit)
+        logger.info("  [Comments] Permalink: extracted %d comments", len(comments_data))
+
+        from_dialog = await page.evaluate(POST_URL_FROM_DIALOG_JS)
+        if from_dialog:
+            post_url_out = from_dialog
+            logger.info("  [PostURL] Permalink dialog: %s", post_url_out)
+        elif page.url:
+            post_url_out = (page.url or "").split("&__")[0].split("?")[0]
+            logger.info("  [PostURL] Permalink using page URL: %s", post_url_out[:100])
+
+        try:
+            post_date_out = await page.evaluate(DATE_FROM_DIALOG_JS)
+            if post_date_out:
+                logger.info("  [PostDate] Permalink dialog: %s", post_date_out)
+        except Exception as de:
+            logger.debug("  [PostDate] Permalink dialog date JS: %s", de)
+
+        if not post_date_out:
+            try:
+                attr_link = page.locator('[role="dialog"] a[attributionsrc]').first
+                await attr_link.scroll_into_view_if_needed(timeout=2000)
+                await asyncio.sleep(0.15)
+                await attr_link.hover(timeout=3000)
+                await asyncio.sleep(0.9)
+                tooltip = page.locator('[role="tooltip"]')
+                await tooltip.first.wait_for(state="visible", timeout=3000)
+                tip_text = await tooltip.first.inner_text()
+                if tip_text and tip_text.strip():
+                    post_date_out = tip_text.strip()
+                    logger.info("  [PostDate] Permalink hover: %s", post_date_out)
+                await page.mouse.move(0, 0)
+                await asyncio.sleep(0.2)
+            except Exception:
+                logger.debug("  [PostDate] Permalink hover fallback skipped")
+
+    except Exception as e:
+        logger.warning("  [Comments] Permalink extraction error: %s", e)
+    finally:
+        try:
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.5)
+        except Exception:
+            pass
+
+    return comments_data, post_url_out, post_date_out
+
+
 async def click_comments_and_extract_from_dialog(
     page: Page,
     profile_url: str,
@@ -217,6 +338,9 @@ async def click_comments_and_extract_from_dialog(
 
         logger.info(f"  [Comments] Starting comment extraction for profile: {profile_path}")
         logger.info(f"  [Comments] visible_index={visible_index}, limit={limit if max_comments > 0 else 'ALL'}")
+
+        # Feed virtualization unmounts off-screen cards; stale visible_index breaks clicks.
+        await scroll_search_page_until_profile_card_visible(page, profile_path)
 
         # await _screenshot(page, f"02_before_comment_click_{profile_path.split('/')[-1][:20]}")
 

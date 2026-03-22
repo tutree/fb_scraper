@@ -131,16 +131,7 @@ COMMENT_TRIGGER_FOR_PROFILE_JS = """
         pageUrl: location.href.substring(0, 100),
     };
 
-    if (typeof preferredIdx === 'number' && preferredIdx >= 0 && preferredIdx < containers.length) {
-        const method = clickCommentTrigger(containers[preferredIdx]);
-        if (method) {
-            diag.clicked = true;
-            diag.method = method;
-            diag.matchedIdx = preferredIdx;
-            return diag;
-        }
-    }
-
+    // 1) Match by profile URL (stable after feed virtualization; preferred over stale index)
     for (let i = 0; i < containers.length; i++) {
         const article = containers[i];
         const anchors = article.querySelectorAll('a[href*="facebook.com"]');
@@ -158,6 +149,17 @@ COMMENT_TRIGGER_FOR_PROFILE_JS = """
             diag.clicked = true;
             diag.method = method;
             diag.matchedIdx = i;
+            return diag;
+        }
+    }
+
+    // 2) Preferred index hint (may be stale after scroll/virtualization)
+    if (typeof preferredIdx === 'number' && preferredIdx >= 0 && preferredIdx < containers.length) {
+        const method = clickCommentTrigger(containers[preferredIdx]);
+        if (method) {
+            diag.clicked = true;
+            diag.method = method;
+            diag.matchedIdx = preferredIdx;
             return diag;
         }
     }
@@ -279,7 +281,7 @@ EXTRACT_DIALOG_COMMENTS_JS = """
 
 POST_URL_FROM_DIALOG_JS = """
 () => {
-    const a = document.querySelector('a[href*="/posts/"], a[href*="/permalink.php"]');
+    const a = document.querySelector('a[href*="/posts/pfbid"], a[href*="/posts/"], a[href*="/permalink.php"]');
     return a ? a.getAttribute('href').split('?')[0] : null;
 }
 """

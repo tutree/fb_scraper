@@ -139,6 +139,43 @@ class TestLinkKey:
         assert _link_key(link) == "u|short"
 
 
+class TestIsUsablePostUrlForPermalinkFlow:
+    def test_posts_pfbid_true(self):
+        from app.services.fb_post_url import is_usable_post_url_for_permalink_flow
+
+        assert (
+            is_usable_post_url_for_permalink_flow(
+                "https://www.facebook.com/user/posts/pfbid0ABC"
+            )
+            is True
+        )
+
+    def test_share_p_true(self):
+        from app.services.fb_post_url import is_usable_post_url_for_permalink_flow
+
+        assert (
+            is_usable_post_url_for_permalink_flow(
+                "https://www.facebook.com/share/p/1AX5qUP1nr/"
+            )
+            is True
+        )
+
+    def test_photo_false(self):
+        from app.services.fb_post_url import is_usable_post_url_for_permalink_flow
+
+        assert (
+            is_usable_post_url_for_permalink_flow(
+                "https://www.facebook.com/photo/?fbid=123"
+            )
+            is False
+        )
+
+    def test_none_false(self):
+        from app.services.fb_post_url import is_usable_post_url_for_permalink_flow
+
+        assert is_usable_post_url_for_permalink_flow(None) is False
+
+
 class TestExtractCUserFromCookie:
     def test_dict_with_cookies_list(self):
         data = {"cookies": [{"name": "c_user", "value": "123456"}]}

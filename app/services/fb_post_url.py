@@ -8,64 +8,66 @@ from typing import Dict, Optional
 from playwright.async_api import Page
 
 from ..core.logging_config import get_logger
+from .fb_search_feed_scroll import scroll_search_page_until_profile_card_visible
 
 logger = get_logger(__name__)
 
 
-async def capture_post_url_via_share_button(
-    page: Page,
-    link: Dict,
-) -> Optional[str]:
+def is_usable_post_url_for_permalink_flow(url: Optional[str]) -> bool:
     """
-    Open a post card's Share sheet and click "Copy link".
-    Returns copied URL when available.
+    True if we can open comments via page.goto(post_url) and the permalink dialog flow
+    (avoids search-feed virtualization). Includes /share/p/ short links (redirect to /posts/).
+    Excludes bare profile-only URLs.
     """
-    visible_index = link.get("visible_index")
-    if visible_index is None:
-        return None
+    if not url or not isinstance(url, str):
+        return False
+    u = url.strip()
+    if not u.startswith("http"):
+        return False
+    low = u.lower().split("?")[0]
+    if "/posts/" in low or "/permalink/" in low:
+        return True
+    if "facebook.com/share/" in low or "/share/p/" in low:
+        return True
+    return False
 
-    try:
-        post_index = int(visible_index)
-    except Exception:
-        return None
+# Match post card by author profile URL, then open Share (same idea as comment trigger).
+_SHARE_CLICK_FOR_PROFILE_JS = """
+(profileHref) => {
+    function norm(u) {
+        try {
+            const url = new URL(u, window.location.origin);
+            return (url.origin + url.pathname).replace(/\\/$/, '').toLowerCase();
+        } catch (_) {
+            return (u || '').split('?')[0].replace(/\\/$/, '').toLowerCase();
+        }
+    }
+    const target = norm(profileHref || '');
+    if (!target) return { ok: false, reason: 'no_target' };
 
-    try:
-        card_found = await page.evaluate(
-            """
-            (idx) => {
-                const main = document.querySelector('div[role="main"]') || document;
-                const articles = main.querySelectorAll('div[role="article"]');
-                const feed = main.querySelector('div[role="feed"]');
-                const cards = articles.length > 0 ? Array.from(articles) : (feed ? Array.from(feed.children) : []);
-                const card = cards[idx];
-                if (!card) return false;
-                card.scrollIntoView({ block: 'center', behavior: 'instant' });
-                return true;
-            }
-            """,
-            post_index,
-        )
-        if not card_found:
-            return None
+    const main = document.querySelector('div[role="main"]') || document;
+    const candidates = [];
+    for (const el of main.querySelectorAll('div[role="article"]')) candidates.push(el);
+    const feed = main.querySelector('div[role="feed"]');
+    if (feed) {
+        for (const el of feed.children) candidates.push(el);
+    }
 
-        await asyncio.sleep(random.uniform(0.8, 1.5))
-
-        clicked_share = await page.evaluate(
-            """
-            (idx) => {
-                const main = document.querySelector('div[role="main"]') || document;
-                const articles = main.querySelectorAll('div[role="article"]');
-                const feed = main.querySelector('div[role="feed"]');
-                const cards = articles.length > 0 ? Array.from(articles) : (feed ? Array.from(feed.children) : []);
-                const card = cards[idx];
-                if (!card) return false;
+    for (const card of candidates) {
+        for (const a of card.querySelectorAll('a[href*="facebook.com"]')) {
+            const h = norm(a.href || '');
+            if (!h) continue;
+            if (h.includes(target) || target.includes(h)) {
+                try {
+                    card.scrollIntoView({ block: 'center', behavior: 'instant' });
+                } catch (_) {}
 
                 const inner = card.querySelector('div[data-ad-rendering-role="share_button"]');
                 let button = inner ? inner.closest('div[role="button"]') : null;
 
                 if (!button) {
-                    const candidates = card.querySelectorAll('div[role="button"], span[role="button"], a[role="button"]');
-                    for (const el of candidates) {
+                    const cand = card.querySelectorAll('div[role="button"], span[role="button"], a[role="button"]');
+                    for (const el of cand) {
                         const text = (el.innerText || el.textContent || '').trim().toLowerCase();
                         const aria = (el.getAttribute('aria-label') || '').trim().toLowerCase();
                         if (
@@ -79,16 +81,121 @@ async def capture_post_url_via_share_button(
                     }
                 }
 
-                if (!button) return false;
+                if (!button) return { ok: false, reason: 'no_share_button', matched: true, cards: candidates.length };
+
                 button.click();
-                return true;
+                return { ok: true, matched: true, cards: candidates.length };
             }
-            """,
-            post_index,
-        )
+        }
+    }
+    return { ok: false, reason: 'no_card', cards: candidates.length };
+}
+"""
+
+
+async def capture_post_url_via_share_button(
+    page: Page,
+    link: Dict,
+) -> Optional[str]:
+    """
+    Open a post card's Share sheet and click "Copy link".
+    Returns copied URL when available.
+
+    Prefer matching the post card by profile URL (feed virtualizes; visible_index is often stale).
+    Fall back to visible_index when profile match fails.
+    """
+    profile_href = (link.get("url") or "").strip()
+    visible_index = link.get("visible_index")
+
+    try:
+        # Re-mount the correct row before Share (same issue as comment clicks).
+        if profile_href and "/search/" in (page.url or "").lower():
+            await scroll_search_page_until_profile_card_visible(page, profile_href)
+
+        clicked_share = False
+        if profile_href:
+            share_res = await page.evaluate(_SHARE_CLICK_FOR_PROFILE_JS, profile_href)
+            if isinstance(share_res, dict) and share_res.get("ok"):
+                clicked_share = True
+                logger.debug(
+                    "  [PostURL] Share opened via profile match (cards=%s)",
+                    share_res.get("cards"),
+                )
+            else:
+                logger.debug(
+                    "  [PostURL] Share profile-match failed: %s — trying visible_index",
+                    share_res,
+                )
+
         if not clicked_share:
-            logger.debug("  [PostURL] Share button not found for card index %d", post_index)
-            return None
+            if visible_index is None:
+                return None
+            try:
+                post_index = int(visible_index)
+            except Exception:
+                return None
+
+            card_found = await page.evaluate(
+                """
+                (idx) => {
+                    const main = document.querySelector('div[role="main"]') || document;
+                    const articles = main.querySelectorAll('div[role="article"]');
+                    const feed = main.querySelector('div[role="feed"]');
+                    const cards = articles.length > 0 ? Array.from(articles) : (feed ? Array.from(feed.children) : []);
+                    const card = cards[idx];
+                    if (!card) return false;
+                    card.scrollIntoView({ block: 'center', behavior: 'instant' });
+                    return true;
+                }
+                """,
+                post_index,
+            )
+            if not card_found:
+                return None
+
+            await asyncio.sleep(random.uniform(0.8, 1.5))
+
+            clicked_share = await page.evaluate(
+                """
+                (idx) => {
+                    const main = document.querySelector('div[role="main"]') || document;
+                    const articles = main.querySelectorAll('div[role="article"]');
+                    const feed = main.querySelector('div[role="feed"]');
+                    const cards = articles.length > 0 ? Array.from(articles) : (feed ? Array.from(feed.children) : []);
+                    const card = cards[idx];
+                    if (!card) return false;
+
+                    const inner = card.querySelector('div[data-ad-rendering-role="share_button"]');
+                    let button = inner ? inner.closest('div[role="button"]') : null;
+
+                    if (!button) {
+                        const candidates = card.querySelectorAll('div[role="button"], span[role="button"], a[role="button"]');
+                        for (const el of candidates) {
+                            const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+                            const aria = (el.getAttribute('aria-label') || '').trim().toLowerCase();
+                            if (
+                                text === 'share' ||
+                                aria.includes('send this to friends') ||
+                                aria.includes('share')
+                            ) {
+                                button = el;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!button) return false;
+                    button.click();
+                    return true;
+                }
+                """,
+                post_index,
+            )
+            if not clicked_share:
+                logger.debug("  [PostURL] Share button not found for card index %d", post_index)
+                return None
+        else:
+            await asyncio.sleep(random.uniform(0.8, 1.5))
 
         logger.debug("  [PostURL] Share button clicked, waiting for share dialog...")
         await asyncio.sleep(random.uniform(1.1, 2.0))

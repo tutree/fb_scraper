@@ -125,7 +125,7 @@ def write_results(browser: Browser):
     post_url = dpage.evaluate("""
         () => {
             const a = document.querySelector(
-                'a[href*="/posts/"], a[href*="/permalink.php"]'
+                'a[href*="/posts/pfbid"], a[href*="/posts/"], a[href*="/permalink.php"]'
             );
             return a ? a.getAttribute('href').split('?')[0] : null;
         }

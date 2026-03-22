@@ -7,7 +7,8 @@ import os
 import random
 import re as _re
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Set
+from urllib.parse import quote_plus
 
 from playwright.async_api import Page
 from sqlalchemy.orm import Session
@@ -15,8 +16,14 @@ from sqlalchemy.orm import Session
 from ..core.config import settings
 from ..core.logging_config import get_logger
 from .fb_account_loader import _cookie_uid_order
-from .fb_comment_handler import click_comments_and_extract_from_dialog
-from .fb_post_url import capture_post_url_via_share_button
+from .fb_comment_handler import (
+    click_comments_and_extract_from_dialog,
+    extract_comments_from_post_permalink,
+)
+from .fb_post_url import (
+    capture_post_url_via_share_button,
+    is_usable_post_url_for_permalink_flow,
+)
 from .fb_profile_processor import process_single_profile
 
 logger = get_logger(__name__)
@@ -72,7 +79,8 @@ _JS_DATE_LINK_HOVER_ORDER = """
         if (!href) return false;
         const h = String(href).toLowerCase();
         return (
-            h.includes('/posts/') || h.includes('/permalink/') || h.includes('story_fbid') ||
+            h.includes('/posts/pfbid') || h.includes('/posts/') || h.includes('/permalink/') ||
+            h.includes('story_fbid') || h.includes('pfbid') ||
             h.includes('/photo/') || h.includes('/share/') || h.includes('/watch') ||
             h.includes('/reel/') || h.includes('/videos/') || h.includes('story.php') ||
             h.includes('watch?v=')
@@ -195,6 +203,22 @@ def _link_key(link: Dict) -> str:
     return f"{base}|{content}"
 
 
+async def _ensure_on_search_posts_page(
+    page: Page,
+    keyword: str,
+    sleep_with_stop: Callable,
+    should_stop: Optional[Callable[[], bool]],
+) -> None:
+    """Navigate to keyword search results when Share / search-dialog fallback is needed."""
+    if "/search/posts" in (page.url or "").lower():
+        return
+    target = f"https://www.facebook.com/search/posts/?q={quote_plus(keyword)}"
+    logger.info("  [Search] Navigating to search/posts for Share/dialog fallback (keyword=%r)", keyword)
+    await page.goto(target, wait_until="domcontentloaded", timeout=90000)
+    if await sleep_with_stop(random.uniform(2.0, 4.0), should_stop=should_stop):
+        return
+
+
 async def _extract_dates_via_tooltip_hover(
     page: Page,
     article_count: int,
@@ -292,6 +316,110 @@ async def _extract_dates_via_tooltip_hover(
     return date_by_index
 
 
+async def _extract_dates_via_tooltip_hover_feed_children(
+    page: Page,
+    card_count: int,
+    should_stop: Optional[Callable[[], bool]] = None,
+) -> Dict[int, str]:
+    """
+    Same hover→tooltip strategy as `_extract_dates_via_tooltip_hover`, but for
+    `div[role="feed"]` direct children. Search / Comet often has **no**
+    `div[role="article"]`, so the article-based path never runs; this path is
+    mandatory for post_date on those layouts. Indices match `visible_index`
+    from the feed-child extraction JS.
+    """
+    date_by_index: Dict[int, str] = {}
+    cards_loc = page.locator("div[role='main'] div[role='feed'] > *")
+    try:
+        n = await cards_loc.count()
+    except Exception:
+        n = 0
+    if n == 0:
+        logger.info("Tooltip date hover (feed cards): 0 feed children — skipping")
+        return date_by_index
+
+    end = min(max(0, card_count), n)
+    if end == 0:
+        return date_by_index
+
+    extracted = 0
+    for i in range(end):
+        if should_stop and should_stop():
+            break
+        try:
+            card = cards_loc.nth(i)
+            links = card.locator("a[href]")
+            link_count = await links.count()
+
+            hover_order: List[int] = list(range(link_count))
+            try:
+                order_js = await card.evaluate(_JS_DATE_LINK_HOVER_ORDER)
+                if (
+                    isinstance(order_js, list)
+                    and len(order_js) == link_count
+                    and set(order_js) == set(range(link_count))
+                ):
+                    hover_order = [int(x) for x in order_js]
+            except Exception:
+                pass
+
+            found_date = False
+            for j in hover_order:
+                if found_date:
+                    break
+                link = links.nth(j)
+
+                try:
+                    if not await link.is_visible(timeout=500):
+                        continue
+                except Exception:
+                    continue
+
+                try:
+                    await link.scroll_into_view_if_needed(timeout=1500)
+                except Exception:
+                    pass
+
+                try:
+                    await link.hover(timeout=2000)
+                except Exception:
+                    continue
+                await asyncio.sleep(0.45)
+
+                tooltip = page.locator('[role="tooltip"]')
+                try:
+                    await tooltip.first.wait_for(state="visible", timeout=1500)
+                except Exception:
+                    await page.mouse.move(0, 0)
+                    await asyncio.sleep(0.08)
+                    continue
+
+                raw = await tooltip.first.text_content()
+                await page.mouse.move(0, 0)
+                await asyncio.sleep(0.1)
+
+                if raw:
+                    parsed = _parse_tooltip_date(raw)
+                    if parsed:
+                        date_by_index[i] = parsed
+                        extracted += 1
+                        found_date = True
+
+        except Exception as e:
+            logger.debug("Tooltip date extraction for feed card %s: %s", i, e)
+        try:
+            await page.mouse.move(0, 0)
+        except Exception:
+            pass
+
+    logger.info(
+        "Tooltip date hover (feed cards): %d/%d feed children got dates",
+        extracted,
+        end,
+    )
+    return date_by_index
+
+
 async def scroll_and_process_posts(
     page: Page,
     keyword: str,
@@ -309,36 +437,36 @@ async def scroll_and_process_posts(
     """
     logger.info(f"Starting extraction for keyword: '{keyword}' (target: {max_results} posts)")
 
-    # Initial warmup: more scrolls so first extraction sees more posts (needed for 100+ per keyword)
-    warmup_scrolls = min(15, max(8, max_results // 8))
-    logger.info("Preloading search feed with %d progressive scrolls...", warmup_scrolls)
-    for i in range(warmup_scrolls):
-        if should_stop and should_stop():
-            logger.warning("Stop requested before scroll warmup completed.")
-            return 0
-        await page.evaluate("window.scrollBy(0, 1800)")
-        if await sleep_with_stop(8, should_stop=should_stop):
-            logger.warning("Stop requested during scroll warmup delay.")
-            return 0
-
-    # await _screenshot(page, f"01_results_loaded_{keyword[:30].replace(' ', '_')}")
+    # Let first paint + feed mount. Do NOT scroll before the first scrape (anti-virtualization).
+    if await sleep_with_stop(3, should_stop=should_stop):
+        logger.warning("Stop requested before initial settle.")
+        return 0
+    try:
+        await page.wait_for_selector('div[role="feed"]', timeout=20000)
+    except Exception as exc:
+        logger.warning("div[role=feed] not found within 20s: %s — continuing anyway", exc)
 
     current_url = page.url
     logger.info(f"Current page URL: {current_url}")
     page_diag = await page.evaluate(
         """
-        () => ({
-            title: document.title,
-            articles: document.querySelectorAll('div[role="article"]').length,
-            feed: !!document.querySelector('div[role="feed"]'),
-            totalAnchors: document.querySelectorAll('a[href]').length,
-            bodySnippet: document.body ? document.body.innerText.slice(0, 300) : 'NO BODY',
-        })
+        () => {
+            const feed = document.querySelector('div[role="feed"]');
+            return {
+                title: document.title,
+                articles: document.querySelectorAll('div[role="article"]').length,
+                feed: !!feed,
+                feedChildren: feed ? feed.children.length : 0,
+                totalAnchors: document.querySelectorAll('a[href]').length,
+                bodySnippet: document.body ? document.body.innerText.slice(0, 300) : 'NO BODY',
+            };
+        }
         """
     )
     logger.info(
         f"Page diagnostics: title={page_diag.get('title')!r}, "
         f"articles={page_diag.get('articles')}, feed={page_diag.get('feed')}, "
+        f"feedChildren={page_diag.get('feedChildren')}, "
         f"anchors={page_diag.get('totalAnchors')}"
     )
     logger.info(f"Page body snippet: {page_diag.get('bodySnippet')!r}")
@@ -356,8 +484,22 @@ async def scroll_and_process_posts(
     exclude_uids_list = list(exclude_uids)
     logger.info(f"Account UIDs to exclude from results: {exclude_uids_list}")
 
-    logger.info("Extracting author profile links via semantic DOM traversal...")
-    all_links = await page.evaluate(
+    user_links: List[Dict] = []
+    seen_link_keys: Set[str] = set()
+    max_scan_rounds = min(25, max(10, (max_results // 4) + 5))
+    no_growth_threshold = 3
+    no_growth_rounds = 0
+
+    logger.info(
+        "Scrape-then-scroll (anti-virtualization): up to %d rounds — extract before each scroll",
+        max_scan_rounds,
+    )
+
+    for scan_round in range(1, max_scan_rounds + 1):
+        if should_stop and should_stop():
+            break
+
+        batch = await page.evaluate(
         """
         (excludeUids) => {
             const results = [];
@@ -641,7 +783,7 @@ async def scroll_and_process_posts(
 
             function extractPostUrl(article) {
                 const selectors = [
-                    'a[href*="/posts/"]', 'a[href*="/permalink/"]',
+                    'a[href*="/posts/pfbid"]', 'a[href*="/posts/"]', 'a[href*="/permalink/"]',
                     'a[href*="story_fbid"]', 'a[href*="/photo/"]',
                     'a[href*="/watch"]', 'a[href*="/reel/"]', 'a[href*="/videos/"]',
                     'a[href*="watch?v="]',
@@ -706,395 +848,137 @@ async def scroll_and_process_posts(
             return results;
         }
         """,
-        exclude_uids_list,
-    )
+            exclude_uids_list,
+        )
 
-    # Hover obfuscated date elements to read tooltip and fill post_date
+        feed_children = await page.evaluate(
+            """() => {
+                const f = document.querySelector('div[role="feed"]');
+                return f ? f.children.length : 0;
+            }"""
+        )
+        new_count = 0
+        new_links_this_round: List[Dict] = []
+        for link in batch:
+            if not _is_user_profile_url(link.get("url", "")):
+                continue
+            key = _link_key(link)
+            if key in seen_link_keys:
+                continue
+            seen_link_keys.add(key)
+            user_links.append(link)
+            new_links_this_round.append(link)
+            new_count += 1
+
+        logger.info(
+            "  Scrape round %d/%d: +%d new unique (batch_raw=%d, feed_children=%d, total_unique=%d)",
+            scan_round,
+            max_scan_rounds,
+            new_count,
+            len(batch),
+            feed_children,
+            len(user_links),
+        )
+
+        # Post-URL-first: capture Share → Copy link while this round's cards still match the viewport
+        for early_link in new_links_this_round:
+            if should_stop and should_stop():
+                break
+            if early_link.get("post_url") and is_usable_post_url_for_permalink_flow(
+                str(early_link.get("post_url"))
+            ):
+                continue
+            try:
+                captured = await capture_post_url_via_share_button(page, early_link)
+                if captured:
+                    early_link["post_url"] = captured
+                    logger.info(
+                        "  [PostURL] Early capture (pre-scroll): %s",
+                        captured[:88] + ("..." if len(captured) > 88 else ""),
+                    )
+            except Exception as exc:
+                logger.debug("  [PostURL] Early capture error: %s", exc)
+            await asyncio.sleep(random.uniform(0.35, 0.75))
+
+        if len(user_links) >= max_results:
+            break
+
+        if new_count == 0:
+            no_growth_rounds += 1
+            logger.info(
+                "  No new unique links this round (%d/%d no-growth stops)",
+                no_growth_rounds,
+                no_growth_threshold,
+            )
+            if no_growth_rounds >= no_growth_threshold:
+                logger.info(
+                    "Stopping scrape-then-scroll: no new links for %d consecutive rounds",
+                    no_growth_threshold,
+                )
+                break
+        else:
+            no_growth_rounds = 0
+
+        await page.evaluate("window.scrollBy(0, 1800)")
+        if await sleep_with_stop(8, should_stop=should_stop):
+            break
+
+    # Mandatory tooltip dates: DOM-only dates miss obfuscated timestamps. Search layout
+    # often has feed children but no div[role=article] — use feed-card hover path.
     try:
         article_count = await page.locator("div[role='main'] div[role='article']").count()
+        feed_child_count = await page.locator("div[role='main'] div[role='feed'] > *").count()
+        max_vis = max(
+            (int(l["visible_index"]) for l in user_links if l.get("visible_index") is not None),
+            default=-1,
+        )
+        scan_feed_cards = max(max_vis + 1, 0) if max_vis >= 0 else min(feed_child_count, 80)
+
+        date_by_index: Dict[int, str] = {}
         if article_count > 0:
+            logger.info(
+                "Tooltip dates: using article layout (%d role=article nodes)",
+                article_count,
+            )
             date_by_index = await _extract_dates_via_tooltip_hover(
                 page, article_count, should_stop=should_stop
             )
-            for link in all_links:
-                idx = link.get("visible_index")
-                if idx is not None and idx in date_by_index:
-                    link["post_date"] = date_by_index[idx]
-    except Exception as e:
-        logger.debug("Tooltip date extraction (initial): %s", e)
+        elif feed_child_count > 0 and user_links:
+            logger.info(
+                "Tooltip dates: using feed-card layout (articles=0, %d feed children, scanning %d)",
+                feed_child_count,
+                min(scan_feed_cards, feed_child_count),
+            )
+            date_by_index = await _extract_dates_via_tooltip_hover_feed_children(
+                page,
+                min(scan_feed_cards, feed_child_count),
+                should_stop=should_stop,
+            )
+        else:
+            logger.warning(
+                "Tooltip dates: skipped (articles=%d, feed_children=%d, user_links=%d)",
+                article_count,
+                feed_child_count,
+                len(user_links),
+            )
 
-    logger.info(f"Total extracted: {len(all_links)} profile links")
-    for link in all_links:
+        for link in user_links:
+            idx = link.get("visible_index")
+            if idx is not None and idx in date_by_index:
+                link["post_date"] = date_by_index[idx]
+    except Exception as e:
+        logger.warning("Tooltip date extraction (after scrape-then-scroll): %s", e)
+
+    logger.info(
+        "Total unique profile links after scrape-then-scroll: %d",
+        len(user_links),
+    )
+    for link in user_links:
         logger.info(
             "  Extracted link: url=%s post_date=%r",
             link.get("url", "")[:60],
             link.get("post_date"),
         )
-
-    user_links = [l for l in all_links if _is_user_profile_url(l["url"])]
-    logger.info(
-        f"After pre-filtering: {len(user_links)} candidate user links "
-        f"(dropped {len(all_links) - len(user_links)})"
-    )
-
-    seen_link_keys = {_link_key(link) for link in user_links}
-
-    max_scan_rounds = min(25, max(10, (max_results // 4) + 5))
-    no_growth_threshold = 3
-    if len(user_links) < max_results:
-        logger.info(
-            "Initial extraction below target (%d/%d). Continuing progressive scan (max %d rounds, stop after %d no-growth)...",
-            len(user_links),
-            max_results,
-            max_scan_rounds,
-            no_growth_threshold,
-        )
-        no_growth_rounds = 0
-        for scan_round in range(1, max_scan_rounds + 1):
-            if should_stop and should_stop():
-                break
-
-            await page.evaluate("window.scrollBy(0, 2500)")
-            if await sleep_with_stop(8, should_stop=should_stop):
-                break
-
-            extra_links = await page.evaluate(
-                """
-                (excludeUids) => {
-                    const out = [];
-                    const seen = new Set();
-                    const feed = document.querySelector('div[role="feed"]');
-                    if (!feed) return out;
-
-                    function isProfileHref(href) {
-                        if (!href || !href.includes('facebook.com')) return false;
-                        for (const uid of excludeUids) {
-                            if (uid && href.includes(uid)) return false;
-                        }
-                        if (href.includes('/groups/') || href.includes('/events/') || href.includes('/pages/')) return false;
-                        if (href.includes('/search/') || href.includes('/hashtag/')) return false;
-                        return href.includes('profile.php') || /facebook\\.com\\/[A-Za-z0-9._-]{2,}(?:\\?|$)/.test(href);
-                    }
-
-                    function cardText(el) {
-                        const selectors = [
-                            'div[data-ad-rendering-role="story_message"]',
-                            'div[data-ad-comet-preview="message"]',
-                            'div[dir="auto"][style*="text-align"]',
-                            'span[dir="auto"]'
-                        ];
-                        for (const sel of selectors) {
-                            const found = el.querySelector(sel);
-                            if (found && found.textContent.trim().length > 20) {
-                                return found.textContent.trim();
-                            }
-                        }
-                        const dirAutoAll = el.querySelectorAll('[dir="auto"]');
-                        const fragments = [];
-                        const seen = new Set();
-                        for (const node of dirAutoAll) {
-                            const t = node.textContent.trim();
-                            if (t.length > 15 && !seen.has(t) && !/^(Facebook|Like|Comment|Share|Send|Follow|Suggested for you|Sponsored)$/i.test(t)) {
-                                seen.add(t);
-                                fragments.push(t);
-                            }
-                        }
-                        if (fragments.length > 0) {
-                            const joined = fragments.join(' ');
-                            return joined.length > 500 ? joined.slice(0, 500) + '...' : joined;
-                        }
-                        return null;
-                    }
-
-                    function normalizeText(value) {
-                        return (value || '').replace(/\\s+/g, ' ').trim();
-                    }
-
-                    const MONTH_RE2 = '(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)';
-                    const MONTH_DAY_RE2 = new RegExp('\\\\b' + MONTH_RE2 + '\\\\b[\\\\s,]*\\\\d', 'i');
-                    const DAY_MONTH_RE2 = new RegExp('\\\\d[\\\\s,]*\\\\b' + MONTH_RE2 + '\\\\b', 'i');
-                    function isLikelyPostDate(value) {
-                        const text = normalizeText(value);
-                        if (!text || text.length > 80) return false;
-                        if (/^(?:\\d+\\s*(?:s|m|min|h|hr|d|w|mo|y)|just now|yesterday|today)$/i.test(text)) return true;
-                        if (MONTH_DAY_RE2.test(text)) return true;
-                        if (DAY_MONTH_RE2.test(text)) return true;
-                        if (/\\b(?:today|yesterday)\\b/i.test(text)) return true;
-                        if (/\\b\\d{1,2}:\\d{2}\\b/.test(text)) return true;
-                        if (/\\b\\d+\\s*(?:mins?|minutes?|hrs?|hours?|days?|weeks?|months?|years?)\\s*(?:ago)?\\b/i.test(text)) return true;
-                        if (/^\\d{1,2}\\/\\d{1,2}\\/\\d{2,4}$/.test(text)) return true;
-                        if (/^\\w+ \\d{1,2}(?:,? \\d{4})?(?:\\s+at\\s+\\d{1,2}:\\d{2}\\s*(?:AM|PM)?)?$/i.test(text)) return true;
-                        return false;
-                    }
-
-                    function readVisibleCharsFromObfuscatedSpans(container) {
-                        const wrapper = container.querySelector('span[style*="display: flex"], span[style*="display:flex"]');
-                        const parent = wrapper || container;
-                        const charSpans = parent.querySelectorAll(':scope > span');
-                        if (charSpans.length < 3) return null;
-                        let text = '';
-                        for (const span of charSpans) {
-                            if (span.children.length > 0) continue;
-                            const ch = span.textContent;
-                            if (!ch) continue;
-                            const rect = span.getBoundingClientRect();
-                            if (rect.width === 0 && rect.height === 0) continue;
-                            const cs = getComputedStyle(span);
-                            if (cs.display === 'none' || cs.visibility === 'hidden') continue;
-                            if (parseFloat(cs.opacity) === 0) continue;
-                            if (cs.position === 'absolute' && cs.clip && cs.clip !== 'auto') continue;
-                            if (parseFloat(cs.fontSize) === 0) continue;
-                            if (cs.color === cs.backgroundColor && cs.color !== '') continue;
-                            text += ch;
-                        }
-                        return text.replace(/\\s+/g, ' ').trim() || null;
-                    }
-
-                    function readFromAriaLabelledBy(node) {
-                        if (!node || !node.getAttribute) return null;
-                        const labelledBy = node.getAttribute('aria-labelledby');
-                        if (!labelledBy) return null;
-                        for (const id of labelledBy.split(' ').filter(Boolean)) {
-                            const target = document.getElementById(id);
-                            if (!target) continue;
-                            const text = normalizeText(target.innerText || target.textContent || '');
-                            if (text && text.length > 0) return text;
-                        }
-                        return null;
-                    }
-
-                    function extractDateFromElement(el) {
-                        if (!el || typeof el.getAttribute !== 'function') return null;
-                        const ariaLabel = normalizeText(el.getAttribute('aria-label') || '');
-                        if (isLikelyPostDate(ariaLabel)) return ariaLabel;
-
-                        for (const child of el.querySelectorAll('[aria-labelledby]')) {
-                            const labelText = readFromAriaLabelledBy(child);
-                            if (labelText && isLikelyPostDate(labelText)) return labelText;
-                        }
-
-                        const obfuscatedContainers = el.querySelectorAll('span[aria-labelledby]');
-                        for (const oc of obfuscatedContainers) {
-                            const ariaText = readFromAriaLabelledBy(oc);
-                            if (ariaText && isLikelyPostDate(ariaText)) return ariaText;
-                            const visible = readVisibleCharsFromObfuscatedSpans(oc);
-                            if (visible && isLikelyPostDate(visible)) return visible;
-                        }
-
-                        const flexSpans = el.querySelectorAll('span[style*="display: flex"], span[style*="display:flex"]');
-                        for (const fs of flexSpans) {
-                            const container = fs.parentElement || fs;
-                            const visible = readVisibleCharsFromObfuscatedSpans(container);
-                            if (visible && isLikelyPostDate(visible)) return visible;
-                        }
-
-                        const timeEl = el.querySelector('time[datetime]');
-                        if (timeEl) {
-                            const dt = normalizeText(timeEl.getAttribute('datetime') || '');
-                            if (dt) return dt;
-                        }
-                        const abbrEl = el.querySelector('abbr[title], abbr[data-utime]');
-                        if (abbrEl) {
-                            const title = normalizeText(abbrEl.getAttribute('title') || '');
-                            if (title) return title;
-                        }
-                        const visibleText = normalizeText(el.innerText || el.textContent || '');
-                        if (isLikelyPostDate(visibleText)) return visibleText;
-                        return null;
-                    }
-
-                    function isPostUrl2(href) {
-                        if (!href) return false;
-                        const h = String(href).toLowerCase();
-                        return (
-                            h.includes('/posts/') ||
-                            h.includes('/permalink/') ||
-                            h.includes('story_fbid') ||
-                            h.includes('/photo/') ||
-                            h.includes('/share/') ||
-                            h.includes('/watch') ||
-                            h.includes('/reel/') ||
-                            h.includes('/videos/') ||
-                            h.includes('story.php') ||
-                            h.includes('watch?v=')
-                        );
-                    }
-
-                    function isDateAnchor2(href, rawHref) {
-                        if (!href && !rawHref) return false;
-                        if (isPostUrl2(href) || isPostUrl2(rawHref)) return true;
-                        if ((rawHref || '').includes('#?') || (href || '').includes('#?')) return true;
-                        return false;
-                    }
-
-                    function isProfileHref2(absoluteHref) {
-                        if (!absoluteHref || !absoluteHref.includes('facebook.com')) return false;
-                        try {
-                            const u = new URL(absoluteHref, location.origin);
-                            const parts = u.pathname.replace(/^\\//, '').replace(/\\/$/, '').split('/');
-                            const slug = parts[0];
-                            if (!slug) return false;
-                            if (slug === 'profile.php') return true;
-                            return /^[A-Za-z0-9._-]{2,}$/.test(slug) && parts.length === 1;
-                        } catch(e) { return false; }
-                    }
-
-                    function extractPostDate(card, postLinkEl) {
-                        const candidateAnchors = [];
-                        if (postLinkEl) candidateAnchors.push(postLinkEl);
-                        for (const a of card.querySelectorAll('a[href]')) {
-                            if (postLinkEl && a === postLinkEl) continue;
-                            const href = a.href || '';
-                            const rawHref = a.getAttribute('href') || '';
-                            if (!href && !rawHref) continue;
-                            if (isDateAnchor2(href, rawHref) && !isProfileHref2(href)) {
-                                candidateAnchors.push(a);
-                            }
-                        }
-
-                        for (const anchor of candidateAnchors) {
-                            const value = extractDateFromElement(anchor);
-                            if (value) return value;
-                        }
-
-                        const headerDiv = card.querySelector('div[data-ad-rendering-role="profile_name"]');
-                        if (headerDiv) {
-                            let ancestor = headerDiv;
-                            for (let i = 0; i < 8 && ancestor && ancestor !== card; i++) {
-                                ancestor = ancestor.parentElement;
-                                if (!ancestor) break;
-                                for (const child of ancestor.children) {
-                                    for (const a of child.querySelectorAll('a[href]')) {
-                                        const rawH = a.getAttribute('href') || '';
-                                        if (isDateAnchor2(a.href || '', rawH) && !isProfileHref2(a.href || '')) {
-                                            const val = extractDateFromElement(a);
-                                            if (val) return val;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        const allObfuscated = card.querySelectorAll('span[aria-labelledby]');
-                        for (const oc of allObfuscated) {
-                            const closestLink = oc.closest('a[href]');
-                            if (closestLink && isProfileHref2(closestLink.href || '')) continue;
-                            const ariaText = readFromAriaLabelledBy(oc);
-                            if (ariaText && isLikelyPostDate(ariaText)) return ariaText;
-                            const visible = readVisibleCharsFromObfuscatedSpans(oc);
-                            if (visible && isLikelyPostDate(visible)) return visible;
-                        }
-
-                        const allFlexSpans = card.querySelectorAll('span[style*="display: flex"], span[style*="display:flex"]');
-                        for (const fs of allFlexSpans) {
-                            const closestLink = fs.closest('a[href]');
-                            if (closestLink && isProfileHref2(closestLink.href || '')) continue;
-                            const container = fs.parentElement || fs;
-                            const visible = readVisibleCharsFromObfuscatedSpans(container);
-                            if (visible && isLikelyPostDate(visible)) return visible;
-                        }
-
-                        const fallbackTime = card.querySelector('time[datetime]');
-                        if (fallbackTime) {
-                            const dt = normalizeText(fallbackTime.getAttribute('datetime') || '');
-                            if (dt) return dt;
-                        }
-                        const fallbackAbbr = card.querySelector('abbr[title], abbr[data-utime]');
-                        if (fallbackAbbr) {
-                            const title = normalizeText(fallbackAbbr.getAttribute('title') || '');
-                            if (title) return title;
-                        }
-
-                        for (const a of card.querySelectorAll('a[href]')) {
-                            if (isProfileHref2(a.href || '')) continue;
-                            const linkText = normalizeText(a.innerText || a.textContent || '');
-                            if (linkText && linkText.length < 40 && isLikelyPostDate(linkText)) return linkText;
-                            const ariaL = normalizeText(a.getAttribute('aria-label') || '');
-                            if (ariaL && ariaL.length < 40 && isLikelyPostDate(ariaL)) return ariaL;
-                        }
-
-                        for (const span of card.querySelectorAll('span')) {
-                            if (span.children.length > 3) continue;
-                            const st = normalizeText(span.innerText || span.textContent || '');
-                            if (st && st.length > 2 && st.length < 30 && isLikelyPostDate(st)) return st;
-                        }
-                        return null;
-                    }
-
-                    Array.from(feed.children).forEach((child, idx) => {
-                        const postContent = cardText(child);
-                        const postLink = child.querySelector(
-                            'a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid"], a[href*="/photo/"], ' +
-                            'a[href*="/watch"], a[href*="/reel/"], a[href*="/videos/"], a[href*="watch?v="]'
-                        );
-                        const postUrl = postLink ? postLink.href : null;
-                        const postDate = extractPostDate(child, postLink);
-                        const profileLink = Array.from(child.querySelectorAll('a[href]'))
-                            .find((a) => isProfileHref(a.href));
-                        if (!profileLink) return;
-                        const key = `${postUrl || profileLink.href}|${(postContent || '').slice(0, 80)}`;
-                        if (seen.has(key)) return;
-                        seen.add(key);
-                        out.push({
-                            url: profileLink.href,
-                            text: (profileLink.textContent || '').trim(),
-                            type: 'direct',
-                            post_content: postContent || null,
-                            post_url: postUrl || null,
-                            post_date: postDate || null,
-                            visible_index: idx,
-                        });
-                    });
-                    return out;
-                }
-                """,
-                exclude_uids_list,
-            )
-
-            # Hover tooltip date extraction for progressive-scan results
-            try:
-                article_count = await page.locator("div[role='main'] div[role='article']").count()
-                if article_count > 0:
-                    date_by_index = await _extract_dates_via_tooltip_hover(
-                        page, article_count, should_stop=should_stop
-                    )
-                    for link in extra_links:
-                        idx = link.get("visible_index")
-                        if idx is not None and idx in date_by_index:
-                            link["post_date"] = date_by_index[idx]
-            except Exception as e:
-                logger.debug("Tooltip date extraction (progressive): %s", e)
-
-            added = 0
-            for link in extra_links:
-                if not _is_user_profile_url(link.get("url", "")):
-                    continue
-                key = _link_key(link)
-                if key in seen_link_keys:
-                    continue
-                seen_link_keys.add(key)
-                user_links.append(link)
-                added += 1
-
-            if added == 0:
-                no_growth_rounds += 1
-                logger.info(
-                    "Progressive scan round %d: no new links (%d/%d)",
-                    scan_round,
-                    no_growth_rounds,
-                    no_growth_threshold,
-                )
-            else:
-                no_growth_rounds = 0
-                logger.info(
-                    "Progressive scan round %d: +%d links (total=%d)",
-                    scan_round,
-                    added,
-                    len(user_links),
-                )
-
-            if len(user_links) >= max_results or no_growth_rounds >= no_growth_threshold:
-                break
 
     users_saved = 0
     # No deduplication by profile/user ID here — same user can have multiple posts.
@@ -1116,33 +1000,51 @@ async def scroll_and_process_posts(
             f"{link.get('text', '') or link['url'][:50]}"
         )
 
-        # 1) Capture canonical post URL via Share → Copy link
+        # 1) Capture canonical post URL via Share → Copy link (only if not already usable for permalink flow)
         extracted_post_url = link.get("post_url")
         logger.info(f"  [PostURL] JS-extracted post_url={extracted_post_url!r}")
-        try:
-            shared_post_url = await capture_post_url_via_share_button(page, link)
-            if shared_post_url:
-                link["post_url"] = shared_post_url
-                logger.info(f"  [PostURL] Captured via Share->CopyLink: {shared_post_url[:80]}")
-            else:
-                logger.info(f"  [PostURL] Share->CopyLink returned nothing; keeping: {extracted_post_url!r}")
-        except Exception as e:
-            logger.debug("  [PostURL] Share link capture error: %s", e)
+        if not is_usable_post_url_for_permalink_flow(link.get("post_url")):
+            await _ensure_on_search_posts_page(page, keyword, sleep_with_stop, should_stop)
+            try:
+                shared_post_url = await capture_post_url_via_share_button(page, link)
+                if shared_post_url:
+                    link["post_url"] = shared_post_url
+                    logger.info(f"  [PostURL] Captured via Share->CopyLink: {shared_post_url[:80]}")
+                else:
+                    logger.info(
+                        f"  [PostURL] Share->CopyLink returned nothing; keeping: {extracted_post_url!r}"
+                    )
+            except Exception as e:
+                logger.debug("  [PostURL] Share link capture error: %s", e)
 
-        # 2) Scrape comments from the search page dialog
+        use_permalink = is_usable_post_url_for_permalink_flow(link.get("post_url"))
+
+        # 2) Comments: permalink (goto post) when we have a stable URL; else search-feed dialog
         comments_data: List[Dict] = []
         try:
-            comments_data, dialog_post_url, dialog_post_date = await click_comments_and_extract_from_dialog(
-                page,
-                link["url"],
-                max_comments=0,
-                visible_index=link.get("visible_index"),
-            )
+            if use_permalink and link.get("post_url"):
+                logger.info("  [Comments] Using permalink flow (post URL first)")
+                comments_data, dialog_post_url, dialog_post_date = await extract_comments_from_post_permalink(
+                    page,
+                    link["post_url"],
+                    max_comments=0,
+                )
+            else:
+                await _ensure_on_search_posts_page(page, keyword, sleep_with_stop, should_stop)
+                comments_data, dialog_post_url, dialog_post_date = await click_comments_and_extract_from_dialog(
+                    page,
+                    link["url"],
+                    max_comments=0,
+                    visible_index=link.get("visible_index"),
+                )
+
             if dialog_post_url:
                 link["post_url"] = dialog_post_url
                 logger.info(f"  [PostURL] Set from dialog: {dialog_post_url}")
             elif not link.get("post_url"):
-                logger.info("  [PostURL] Dialog gave no URL and share button also failed — post_url will be None")
+                logger.info(
+                    "  [PostURL] Dialog gave no URL and share button also failed — post_url will be None"
+                )
             if dialog_post_date and not link.get("post_date"):
                 link["post_date"] = dialog_post_date
                 logger.info(f"  [PostDate] Set from dialog: {dialog_post_date}")
