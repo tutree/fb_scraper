@@ -53,6 +53,9 @@ const formatHour = (iso) => {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
+/** Enformion contact enrichment: billed per successful API response (matches enrich_done count). */
+const CONTACT_ENRICH_USD_PER_SUCCESS = 0.25
+
 function MiniBarChart({ data, color = '#6366f1', label = 'count' }) {
   if (!data || data.length === 0) return <p className="py-4 text-center text-xs text-slate-400">No activity in the last 24h</p>
   const max = Math.max(...data.map((d) => d.count), 1)
@@ -231,6 +234,15 @@ export default function JobsPage() {
         <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
           <h2 className="text-lg font-bold text-slate-900">Job Analytics</h2>
           <p className="mt-0.5 text-xs text-slate-500">Last 24 hours activity per background job</p>
+
+          <div className="mt-4 rounded-xl border border-amber-200 bg-gradient-to-r from-amber-50 to-amber-50/30 px-4 py-3">
+            <p className="text-sm font-medium text-amber-950">
+              Contact API cost ={' '}
+              <span className="font-bold tabular-nums">
+                ${(jobStats.enrich_done * CONTACT_ENRICH_USD_PER_SUCCESS).toFixed(2)}
+              </span>
+            </p>
+          </div>
 
           <div className="mt-5 grid gap-5 sm:grid-cols-2">
             {/* Scraper */}
