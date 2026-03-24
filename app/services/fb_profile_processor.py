@@ -20,6 +20,49 @@ from .fb_comment_handler import extract_comments
 logger = get_logger(__name__)
 
 
+def _update_existing_result(
+    existing: "SearchResult",
+    name: str,
+    location: str | None,
+    post_content: str | None,
+    post_date: str | None,
+    profile_url: str | None,
+    keyword: str,
+    db: "Session",
+) -> None:
+    """Update an existing SearchResult with freshly scraped attributes (skip comments)."""
+    changed = []
+    if name and name != "Unknown" and existing.name != name:
+        existing.name = name
+        changed.append("name")
+    if location and not existing.location:
+        existing.location = location
+        changed.append("location")
+    if post_content and (not existing.post_content or len(post_content) > len(existing.post_content or "")):
+        existing.post_content = post_content
+        changed.append("post_content")
+    if post_date and not existing.post_date:
+        existing.post_date = post_date
+        changed.append("post_date")
+    if profile_url and not existing.profile_url:
+        existing.profile_url = profile_url
+        changed.append("profile_url")
+
+    if changed:
+        try:
+            db.commit()
+            logger.info(
+                "  Duplicate post_url — updated existing (ID: %s, fields: %s)",
+                existing.id,
+                ", ".join(changed),
+            )
+        except Exception as e:
+            db.rollback()
+            logger.warning("  Failed to update existing record %s: %s", existing.id, e)
+    else:
+        logger.info("  Duplicate post_url — no new data to update (existing ID: %s)", existing.id)
+
+
 async def process_single_profile(
     page: Page,
     link: Dict,
@@ -198,7 +241,10 @@ async def process_single_profile(
                 if post_url:
                     existing = db.query(SearchResult).filter(SearchResult.post_url == post_url).first()
                     if existing:
-                        logger.info(f"  Duplicate post_url — skipping (existing ID: {existing.id})")
+                        _update_existing_result(
+                            existing, final_name, location_text, post_content,
+                            post_date, profile_url, keyword, db,
+                        )
                         search_result = existing
                         await page.close()
                         return True
@@ -222,7 +268,10 @@ async def process_single_profile(
                     if post_url:
                         existing = db.query(SearchResult).filter(SearchResult.post_url == post_url).first()
                         if existing:
-                            logger.info(f"  Duplicate post_url (race condition) — skipping (ID: {existing.id})")
+                            _update_existing_result(
+                                existing, final_name, location_text, post_content,
+                                post_date, profile_url, keyword, db,
+                            )
                             await page.close()
                             return True
                     raise
