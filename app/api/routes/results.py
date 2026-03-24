@@ -138,8 +138,8 @@ async def get_results(
         description="Filter by analysis status: true (analyzed) or false (not analyzed)",
     ),
     sort_by: Optional[str] = Query(
-        "scraped_at",
-        description="Sort field: scraped_at, post_date, confidence_score, analyzed_at, name, status",
+        "post_date_timestamp",
+        description="Sort field: post_date_timestamp, scraped_at, post_date, confidence_score, analyzed_at, name, status",
     ),
     sort_order: Optional[str] = Query(
         "desc",
@@ -177,7 +177,7 @@ async def get_results(
         "name": SearchResult.name,
         "status": SearchResult.status,
     }
-    sort_col = sort_map.get((sort_by or "scraped_at").strip().lower(), SearchResult.scraped_at)
+    sort_col = sort_map.get((sort_by or "post_date_timestamp").strip().lower(), SearchResult.post_date_timestamp)
     order = (sort_order or "desc").strip().lower()
     if order == "asc":
         query = query.order_by(sort_col.asc().nullslast())
