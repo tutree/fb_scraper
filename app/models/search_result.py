@@ -41,6 +41,10 @@ class SearchResult(Base):
     analysis_message = Column(Text, nullable=True)  # Reason text from AI (no raw JSON)
     analyzed_at = Column(DateTime(timezone=True), nullable=True)
 
+    # Geo-filter: True = US post (kept), False = non-US (to be removed), None = not yet checked
+    is_us = Column(Boolean, nullable=True, default=None)
+    geo_filtered_at = Column(DateTime(timezone=True), nullable=True)
+
     # Enrichment eligibility: True = has full name + US location, False = not enrichable, None = not yet checked
     enrichable = Column(Boolean, nullable=True, default=None)
 

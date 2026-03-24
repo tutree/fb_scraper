@@ -33,18 +33,26 @@ def _legacy_same_site(value: Optional[str]) -> Optional[str]:
     return None
 
 
+def _get_ci(cookie: Dict[str, Any], *keys: str, default=None):
+    """Case-insensitive dict lookup across multiple possible key names."""
+    lower_map = {k.lower(): v for k, v in cookie.items()}
+    for key in keys:
+        val = lower_map.get(key.lower())
+        if val is not None:
+            return val
+    return default
+
+
 def _normalize_cookie(cookie: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    name = cookie.get("name")
-    value = cookie.get("value")
-    domain = cookie.get("domain")
-    path = cookie.get("path") or "/"
+    name = _get_ci(cookie, "name")
+    value = _get_ci(cookie, "value")
+    domain = _get_ci(cookie, "domain", "host", "host_raw", "hostraw")
+    path = _get_ci(cookie, "path") or "/"
 
     if not name or value is None or not domain:
         return None
 
-    expires = cookie.get("expires")
-    if expires is None:
-        expires = cookie.get("expirationDate")
+    expires = _get_ci(cookie, "expires", "expirationdate", "expiry", "expiration")
     if expires is None:
         expires = -1
 
@@ -59,9 +67,9 @@ def _normalize_cookie(cookie: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "domain": str(domain),
         "path": str(path),
         "expires": expires,
-        "httpOnly": bool(cookie.get("httpOnly", False)),
-        "secure": bool(cookie.get("secure", True)),
-        "sameSite": _normalize_same_site(cookie.get("sameSite")),
+        "httpOnly": bool(_get_ci(cookie, "httponly", "httpOnly", "http_only", default=False)),
+        "secure": bool(_get_ci(cookie, "secure", "isSecure", default=True)),
+        "sameSite": _normalize_same_site(_get_ci(cookie, "samesite", "sameSite", "same_site")),
     }
 
 
@@ -91,27 +99,72 @@ def _to_saved_cookie(cookie: Dict[str, Any]) -> Dict[str, Any]:
     return saved_cookie
 
 
-def parse_cookie_json_text(cookie_json: str) -> Dict[str, Any]:
-    try:
-        raw_data = json.loads(cookie_json)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc.msg}") from exc
+def _parse_netscape_cookies(text: str) -> List[Dict[str, Any]]:
+    """Parse Netscape/Mozilla tab-separated cookie format.
+    Format: domain \\t includeSubdomains \\t path \\t isSecure \\t expiry \\t name \\t value
+    Some exports have extra fields; we handle 7+ fields.
+    """
+    cookies = []
+    for line in text.strip().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith("//"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 7:
+            continue
+        domain = parts[0]
+        path = parts[2]
+        secure = parts[3].upper() == "TRUE"
+        try:
+            expiry = float(parts[4])
+        except (ValueError, TypeError):
+            expiry = -1
+        name = parts[5]
+        value = parts[6]
+        if not name or not domain:
+            continue
+        cookies.append({
+            "name": name,
+            "value": value,
+            "domain": domain,
+            "path": path,
+            "secure": secure,
+            "expires": expiry,
+            "httpOnly": False,
+        })
+    return cookies
 
+
+def parse_cookie_json_text(cookie_json: str) -> Dict[str, Any]:
     cookies: List[Dict[str, Any]]
     origins: List[Dict[str, Any]] = []
+    raw_data = None
 
-    if isinstance(raw_data, dict) and isinstance(raw_data.get("cookies"), list):
-        cookies = raw_data.get("cookies", [])
-        maybe_origins = raw_data.get("origins")
-        if isinstance(maybe_origins, list):
-            origins = maybe_origins
-    elif isinstance(raw_data, list):
-        cookies = raw_data
+    try:
+        raw_data = json.loads(cookie_json)
+    except json.JSONDecodeError:
+        pass
+
+    if raw_data is not None:
+        if isinstance(raw_data, dict) and isinstance(raw_data.get("cookies"), list):
+            cookies = raw_data.get("cookies", [])
+            maybe_origins = raw_data.get("origins")
+            if isinstance(maybe_origins, list):
+                origins = maybe_origins
+        elif isinstance(raw_data, list):
+            cookies = raw_data
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Cookie JSON must be a raw cookie array or a Playwright storage_state object.",
+            )
     else:
-        raise HTTPException(
-            status_code=400,
-            detail="Cookie JSON must be a raw cookie array or a Playwright storage_state object.",
-        )
+        cookies = _parse_netscape_cookies(cookie_json)
+        if not cookies:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not parse cookies. Accepted formats: JSON cookie array, Playwright storage_state, or Netscape tab-separated.",
+            )
 
     normalized = []
     for cookie in cookies:

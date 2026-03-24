@@ -177,6 +177,90 @@ Return ONLY valid JSON, no markdown:
             logger.debug(f"Comment classification failed: {e}")
             return {"type": "UNKNOWN", "confidence": 0.0, "reason": str(e)[:200]}
 
+    async def classify_geo(
+        self,
+        location: str = "",
+        post_content: str = "",
+        user_name: str = "",
+    ) -> Dict:
+        """
+        Determine whether a Facebook post is from a US-based user.
+
+        Returns:
+            Dict with keys: is_us (bool), confidence (float), reason (str)
+        """
+        post_content = clean_facebook_post_content(post_content) or ""
+
+        if location and location.strip():
+            prompt = f"""You are a geographic classifier. Given a Facebook user's location string, determine whether they are located in the United States.
+
+Location: {location}
+User: {user_name or "Unknown"}
+
+Rules:
+- If the location clearly refers to a US city, state, or territory → is_us = true
+- If the location refers to a country outside the US (e.g. Philippines, Nigeria, India, UK, Canada, Pakistan, etc.) → is_us = false
+- If the location is ambiguous (e.g. just a city name that exists in multiple countries), look at any post content for language clues
+{f'Post content (for context): {post_content[:300]}' if post_content else ''}
+
+Return ONLY valid JSON (no markdown):
+{{"is_us": true, "confidence": 0.95, "reason": "Location is in Texas, USA"}}
+"""
+        elif post_content.strip():
+            prompt = f"""You are a language and geographic classifier. This Facebook post has NO location information. Determine whether this post is likely from a US-based English-speaking user.
+
+Post content: {post_content[:500]}
+User: {user_name or "Unknown"}
+
+Rules:
+- If the post is written in English → is_us = true (likely US-based)
+- If the post is written in a non-English language (Tagalog, Hindi, Urdu, French, Spanish from non-US context, Arabic, etc.) → is_us = false
+- If the post mixes English with another language but is predominantly English → is_us = true
+- If the post mentions non-US locations, currencies (PHP, INR, GBP, etc.), or clearly non-US context → is_us = false
+- Short English posts with no geographic clues → is_us = true (benefit of the doubt)
+
+Return ONLY valid JSON (no markdown):
+{{"is_us": true, "confidence": 0.8, "reason": "Post is in English with no non-US indicators"}}
+"""
+        else:
+            return {"is_us": True, "confidence": 0.3, "reason": "No location or content to classify"}
+
+        try:
+            if self.provider == "gemini":
+                response = self.model.generate_content(prompt)
+                response_text = response.text.strip()
+            else:
+                async with httpx.AsyncClient(timeout=120.0) as client:
+                    response = await client.post(
+                        f"{self.ollama_base_url}/api/generate",
+                        json={
+                            "model": self.ollama_model,
+                            "prompt": prompt,
+                            "stream": False,
+                            "format": "json",
+                        },
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    response_text = (data.get("response") or "").strip()
+
+            if response_text.startswith("```"):
+                response_text = response_text.split("```")[1]
+                if response_text.startswith("json"):
+                    response_text = response_text[4:]
+                response_text = response_text.strip()
+
+            result = json.loads(response_text)
+            return {
+                "is_us": bool(result.get("is_us", True)),
+                "confidence": max(0.0, min(1.0, float(result.get("confidence", 0.5)))),
+                "reason": str(result.get("reason", "")),
+            }
+
+        except Exception as e:
+            logger.warning("Geo classification failed: %s", e)
+            return {"is_us": True, "confidence": 0.0, "reason": f"Classification error: {e}"}
+
     async def batch_classify(self, posts: list) -> list:
         """
         Classify multiple posts in batch.

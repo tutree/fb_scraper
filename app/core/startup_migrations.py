@@ -56,6 +56,14 @@ def run_startup_migrations() -> None:
             "search_results.enriched_at",
             "ALTER TABLE search_results ADD COLUMN IF NOT EXISTS enriched_at TIMESTAMP WITH TIME ZONE NULL;",
         ),
+        (
+            "search_results.is_us",
+            "ALTER TABLE search_results ADD COLUMN IF NOT EXISTS is_us BOOLEAN NULL;",
+        ),
+        (
+            "search_results.geo_filtered_at",
+            "ALTER TABLE search_results ADD COLUMN IF NOT EXISTS geo_filtered_at TIMESTAMP WITH TIME ZONE NULL;",
+        ),
     ]
 
     try:

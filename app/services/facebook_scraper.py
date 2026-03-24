@@ -25,7 +25,7 @@ from ..core.config import settings
 from ..core.logging_config import get_logger
 from .fb_account_loader import load_accounts
 from .fb_auto_login import load_login_accounts, login_on_page
-from .fb_feed_scanner import enable_search_posts_seen_filter, scroll_and_process_posts
+from .fb_feed_scanner import enable_search_recent_posts_filter, scroll_and_process_posts
 from .fb_login_verify import page_has_logged_in_reel_tab_link
 
 logger = get_logger(__name__)
@@ -392,7 +392,7 @@ class FacebookScraper:
             else:
                 logger.info(f"Already on Facebook (URL: {current_url}), skipping navigation")
 
-            search_url = f"https://www.facebook.com/search/posts/?q={quote_plus(keyword)}"
+            search_url = f"https://www.facebook.com/search/top/?q={quote_plus(keyword)}"
             logger.info(f"Navigating to search URL: {search_url}")
             try:
                 await page.goto(search_url, wait_until="networkidle", timeout=120000)
@@ -437,14 +437,16 @@ class FacebookScraper:
                     logger.warning("Stop requested while waiting for post detection.")
                     return 0
 
-            if settings.FB_SEARCH_ENABLE_POSTS_SEEN_FILTER:
+            if settings.FB_SEARCH_RECENT_POSTS:
                 try:
-                    await enable_search_posts_seen_filter(page)
+                    toggled = await enable_search_recent_posts_filter(page)
+                    if toggled:
+                        logger.info("Waiting 5s for Recent Posts results to reload...")
+                        if await self._sleep_with_stop(5, should_stop=should_stop):
+                            logger.warning("Stop requested while waiting for recent posts reload.")
+                            return 0
                 except Exception as filt_exc:
-                    logger.debug("Posts You've Seen filter: %s", filt_exc)
-                if await self._sleep_with_stop(2, should_stop=should_stop):
-                    logger.warning("Stop requested after search filter toggle.")
-                    return 0
+                    logger.debug("Recent Posts filter: %s", filt_exc)
 
             posts_processed = await scroll_and_process_posts(
                 page,

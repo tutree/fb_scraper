@@ -281,14 +281,28 @@ EXTRACT_DIALOG_COMMENTS_JS = """
 
 POST_URL_FROM_DIALOG_JS = """
 () => {
-    const a = document.querySelector('a[href*="/posts/pfbid"], a[href*="/posts/"], a[href*="/permalink.php"]');
+    function isCommentDialog(d) {
+        if (d.querySelector('[aria-label^="Write a comment"], [placeholder*="comment" i]')) return true;
+        if (d.querySelectorAll('div[role="article"][aria-label^="Comment by"]').length > 0) return true;
+        const text = (d.innerText || d.textContent || '').toLowerCase();
+        return text.includes('write a comment') || text.includes('leave a comment');
+    }
+    const dialog = Array.from(document.querySelectorAll('[role="dialog"]')).find(isCommentDialog);
+    const root = dialog || document;
+    const a = root.querySelector('a[href*="/posts/pfbid"], a[href*="/posts/"], a[href*="/permalink.php"]');
     return a ? a.getAttribute('href').split('?')[0] : null;
 }
 """
 
 DATE_FROM_DIALOG_JS = """
 () => {
-    const dialog = document.querySelector('[role="dialog"]') || document;
+    function isCommentDialog(d) {
+        if (d.querySelector('[aria-label^="Write a comment"], [placeholder*="comment" i]')) return true;
+        if (d.querySelectorAll('div[role="article"][aria-label^="Comment by"]').length > 0) return true;
+        const text = (d.innerText || d.textContent || '').toLowerCase();
+        return text.includes('write a comment') || text.includes('leave a comment');
+    }
+    const dialog = Array.from(document.querySelectorAll('[role="dialog"]')).find(isCommentDialog) || document;
 
     function readFromAriaLabelledBy(node) {
         if (!node || !node.getAttribute) return null;

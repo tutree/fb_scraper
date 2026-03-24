@@ -170,6 +170,61 @@ async def enable_search_posts_seen_filter(page: Page) -> bool:
         return False
 
 
+async def enable_search_recent_posts_filter(page: Page) -> bool:
+    """
+    Turn ON the "Recent Posts" switch on the Facebook search results page.
+    When active, results are sorted by most recent instead of "Top Posts".
+    """
+    switch = None
+    try:
+        by_role = page.get_by_role(
+            "switch", name=_re.compile(r"recent\s+posts", _re.I)
+        )
+        if await by_role.count() > 0:
+            switch = by_role.first
+    except Exception:
+        pass
+    if switch is None:
+        for sel in (
+            'input[role="switch"][aria-label="Recent Posts"]',
+            'input[type="checkbox"][role="switch"][aria-label*="Recent"][aria-label*="Posts"]',
+        ):
+            loc = page.locator(sel).first
+            try:
+                if await loc.count() > 0:
+                    switch = loc
+                    break
+            except Exception:
+                continue
+    if switch is None:
+        logger.info("Recent Posts filter control not in DOM — skipping")
+        return False
+
+    try:
+        await switch.scroll_into_view_if_needed(timeout=10000)
+        await asyncio.sleep(0.4)
+        checked = (await switch.get_attribute("aria-checked") or "").strip().lower()
+        if checked == "true":
+            logger.info("Recent Posts filter already enabled (aria-checked=true)")
+            return True
+        await switch.click(timeout=10000, force=True)
+        await asyncio.sleep(1.5)
+        checked2 = (await switch.get_attribute("aria-checked") or "").strip().lower()
+        if checked2 != "true":
+            await switch.click(timeout=10000, force=True)
+            await asyncio.sleep(1.0)
+            checked2 = (await switch.get_attribute("aria-checked") or "").strip().lower()
+        logger.info(
+            "Recent Posts filter toggled (aria-checked was %r -> %r)",
+            checked,
+            checked2,
+        )
+        return True
+    except Exception as exc:
+        logger.warning("Could not toggle Recent Posts filter: %s", exc)
+        return False
+
+
 async def _screenshot(page, label: str) -> None:
     """Save a PNG to logs/screenshots/<label>_HHMMSS.png, silently skip on error."""
     import datetime
@@ -210,10 +265,11 @@ async def _ensure_on_search_posts_page(
     should_stop: Optional[Callable[[], bool]],
 ) -> None:
     """Navigate to keyword search results when Share / search-dialog fallback is needed."""
-    if "/search/posts" in (page.url or "").lower():
+    current = (page.url or "").lower()
+    if "/search/top" in current or "/search/posts" in current:
         return
-    target = f"https://www.facebook.com/search/posts/?q={quote_plus(keyword)}"
-    logger.info("  [Search] Navigating to search/posts for Share/dialog fallback (keyword=%r)", keyword)
+    target = f"https://www.facebook.com/search/top/?q={quote_plus(keyword)}"
+    logger.info("  [Search] Navigating to search/top for Share/dialog fallback (keyword=%r)", keyword)
     await page.goto(target, wait_until="domcontentloaded", timeout=90000)
     if await sleep_with_stop(random.uniform(2.0, 4.0), should_stop=should_stop):
         return

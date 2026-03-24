@@ -17,6 +17,7 @@ from ...services.background_jobs import (
     update_config,
     trigger_now,
     trigger_comment_analyze_now,
+    trigger_geo_filter_now,
     request_background_scraper_stop,
     clear_background_scraper_stop,
     pause_analyze_worker_job,
@@ -46,6 +47,7 @@ class JobsInfo(BaseModel):
     analyzer: JobInfo = JobInfo()
     enrichment: JobInfo = JobInfo()
     comment_analyzer: JobInfo = JobInfo()
+    geo_filter: JobInfo = JobInfo()
 
 
 class AutomationStatus(BaseModel):
@@ -139,6 +141,12 @@ async def trigger_comment_analyze():
     return {"message": "Comment analyzer triggered — running in background"}
 
 
+@router.post("/trigger-geo-filter")
+async def trigger_geo_filter():
+    trigger_geo_filter_now()
+    return {"message": "Geo-filter triggered — scanning for non-US posts in background"}
+
+
 @router.post("/stop-job", response_model=AutomationStatus)
 async def stop_background_job(body: JobControlBody):
     """Request cooperative stop (scraper) or pause queue processing (analyzer / enrichment)."""
@@ -199,6 +207,12 @@ class JobStats(BaseModel):
     enrich_pending: int = 0
     enrich_not_enrichable: int = 0
     enrich_hourly: List[HourlyStat] = []
+
+    # Geo-filter
+    geo_filter_us: int = 0
+    geo_filter_non_us: int = 0
+    geo_filter_pending: int = 0
+    geo_filter_hourly: List[HourlyStat] = []
 
 
 def _hourly_counts(db: Session, model, ts_column, hours: int = 24) -> List[HourlyStat]:
@@ -313,6 +327,24 @@ async def job_stats(db: Session = Depends(get_db)):
     )
     enrich_hourly = _hourly_counts(db, SearchResult, SearchResult.enriched_at)
 
+    # -- Geo-filter --
+    geo_filter_us = (
+        db.query(sa_func.count(SearchResult.id))
+        .filter(SearchResult.is_us == True)  # noqa: E712
+        .scalar() or 0
+    )
+    geo_filter_non_us = (
+        db.query(sa_func.count(SearchResult.id))
+        .filter(SearchResult.is_us == False)  # noqa: E712
+        .scalar() or 0
+    )
+    geo_filter_pending = (
+        db.query(sa_func.count(SearchResult.id))
+        .filter(SearchResult.geo_filtered_at.is_(None))
+        .scalar() or 0
+    )
+    geo_filter_hourly = _hourly_counts(db, SearchResult, SearchResult.geo_filtered_at)
+
     return JobStats(
         scraper_total=scraper_total,
         scraper_today=scraper_today,
@@ -333,4 +365,8 @@ async def job_stats(db: Session = Depends(get_db)):
         enrich_pending=enrich_pending,
         enrich_not_enrichable=enrich_not_enrichable,
         enrich_hourly=enrich_hourly,
+        geo_filter_us=geo_filter_us,
+        geo_filter_non_us=geo_filter_non_us,
+        geo_filter_pending=geo_filter_pending,
+        geo_filter_hourly=geo_filter_hourly,
     )

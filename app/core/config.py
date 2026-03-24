@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
 
     # Scraper Settings
-    MAX_RESULTS_PER_KEYWORD: int = 60
+    MAX_RESULTS_PER_KEYWORD: int = 15
     SCRAPE_DELAY_MIN: int = 3  # seconds
     SCRAPE_DELAY_MAX: int = 8
     MAX_RETRIES: int = 3
@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     FB_SEARCH_ENABLE_POSTS_SEEN_FILTER: bool = True
     # When False (default), only saved cookies are used; password/captcha login is never attempted.
     FB_TRY_CREDENTIAL_LOGIN: bool = False
+    # Sort search results by "Most Recent" instead of Facebook's default "Top Posts"
+    FB_SEARCH_RECENT_POSTS: bool = True
 
     # AI provider
     AI_PROVIDER: str = "ollama"
@@ -57,7 +59,7 @@ class Settings(BaseSettings):
     # Background automation (runs automatically on startup, uses config/keywords.json)
     AUTO_SCRAPE_ENABLED: bool = True
     AUTO_SCRAPE_INTERVAL_MINUTES: int = 180
-    AUTO_SCRAPE_MAX_RESULTS: int = 60
+    AUTO_SCRAPE_MAX_RESULTS: int = 15
     AUTO_ANALYZE_AFTER_SCRAPE: bool = True
     AUTO_ENRICH_AFTER_ANALYZE: bool = True
 
@@ -68,7 +70,7 @@ class Settings(BaseSettings):
         "math tutor needed",
     ]
 
-    HEADLESS: bool = True
+    HEADLESS: bool = False
 
     class Config:
         env_file = ".env"

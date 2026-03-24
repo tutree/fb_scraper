@@ -35,6 +35,7 @@ JOB_ID = "auto_scrape_job"
 JOB_ID_ANALYZE_ENRICH = "auto_analyze_enrich_job"
 JOB_ID_ENRICH = "auto_enrich_job"
 JOB_ID_COMMENT_ANALYZE = "auto_comment_analyze_job"
+JOB_ID_GEO_FILTER = "auto_geo_filter_job"
 REDIS_PREFIX = "autojob:"
 REDIS_KEY_STATUS = f"{REDIS_PREFIX}status"
 REDIS_KEY_LOCK = f"{REDIS_PREFIX}running_lock"
@@ -45,6 +46,7 @@ REDIS_KEY_ANALYZE_ENRICH_LOCK = f"{REDIS_PREFIX}analyze_enrich_lock"
 REDIS_KEY_ENRICH_QUEUE = f"{REDIS_PREFIX}enrich_queue"
 REDIS_KEY_ENRICH_LOCK = f"{REDIS_PREFIX}enrich_lock"
 REDIS_KEY_COMMENT_ANALYZE_LOCK = f"{REDIS_PREFIX}comment_analyze_lock"
+REDIS_KEY_GEO_FILTER_LOCK = f"{REDIS_PREFIX}geo_filter_lock"
 # Jobs page: stop in-flight scheduled scrape; pause queue workers without killing tasks
 REDIS_KEY_STOP_SCRAPE = f"{REDIS_PREFIX}stop_scrape_request"
 REDIS_KEY_PAUSE_ANALYZE = f"{REDIS_PREFIX}pause_analyze_worker"
@@ -54,6 +56,7 @@ ANALYZE_ENRICH_INTERVAL_MINUTES = 15
 ENRICH_INTERVAL_MINUTES = 30
 ENRICH_MAX_PER_MINUTE = 90
 COMMENT_ANALYZE_INTERVAL_MINUTES = 60
+GEO_FILTER_INTERVAL_MINUTES = 120
 
 _scheduler: Optional[AsyncIOScheduler] = None
 _redis: Optional[redis.Redis] = None
@@ -326,6 +329,7 @@ def get_status() -> dict:
     analyze_job = scheduler.get_job(JOB_ID_ANALYZE_ENRICH)
     enrich_job = scheduler.get_job(JOB_ID_ENRICH)
     comment_job = scheduler.get_job(JOB_ID_COMMENT_ANALYZE)
+    geo_filter_job = scheduler.get_job(JOB_ID_GEO_FILTER)
     analyze_worker_alive = _analyze_worker_task is not None and not _analyze_worker_task.done()
     enrich_worker_alive = _enrich_worker_task is not None and not _enrich_worker_task.done()
 
@@ -369,6 +373,11 @@ def get_status() -> dict:
                 "running": bool(comment_job),
                 "interval_minutes": COMMENT_ANALYZE_INTERVAL_MINUTES,
                 "next_run": str(comment_job.next_run_time) if comment_job and comment_job.next_run_time else None,
+            },
+            "geo_filter": {
+                "running": bool(_get_redis().exists(REDIS_KEY_GEO_FILTER_LOCK)) if _redis else False,
+                "interval_minutes": GEO_FILTER_INTERVAL_MINUTES,
+                "next_run": str(geo_filter_job.next_run_time) if geo_filter_job and geo_filter_job.next_run_time else None,
             },
         },
     }
@@ -810,6 +819,115 @@ async def run_scheduled_comment_analyze():
         logger.info("Comment analyzer job finished (lock released)")
 
 
+async def _auto_geo_filter_batch(db, batch_size: int = 50) -> dict:
+    """Classify a batch of un-filtered results as US/non-US. Returns counts."""
+    try:
+        classifier = GeminiClassifier()
+    except ValueError as exc:
+        logger.warning("Geo-filter skipped — classifier not available: %s", exc)
+        return {"checked": 0, "removed": 0}
+
+    results = (
+        db.query(SearchResult)
+        .filter(SearchResult.geo_filtered_at.is_(None))
+        .limit(batch_size)
+        .all()
+    )
+    if not results:
+        return {"checked": 0, "removed": 0}
+
+    checked = 0
+    removed = 0
+    for result in results:
+        try:
+            geo = await classifier.classify_geo(
+                location=result.location or "",
+                post_content=result.post_content or "",
+                user_name=result.name or "",
+            )
+            result.is_us = geo["is_us"]
+            result.geo_filtered_at = datetime.now(timezone.utc)
+            checked += 1
+
+            if not geo["is_us"] and geo["confidence"] >= 0.6:
+                removed += 1
+                logger.info(
+                    "Geo-filter: removing non-US result %s (location=%r, reason=%s, confidence=%.2f)",
+                    result.id, result.location, geo["reason"], geo["confidence"],
+                )
+
+        except Exception as exc:
+            logger.warning("Geo-filter failed for %s: %s", result.id, exc)
+
+    db.commit()
+    return {"checked": checked, "removed": removed}
+
+
+async def run_scheduled_geo_filter():
+    """Periodically scan un-filtered results, classify as US/non-US, and delete non-US posts."""
+    logger.info("Geo-filter job triggered")
+    try:
+        if not _get_redis().set(REDIS_KEY_GEO_FILTER_LOCK, "1", nx=True, ex=7200):
+            logger.warning("Geo-filter skipped — previous run still active (lock exists)")
+            return
+    except Exception as exc:
+        logger.warning("Geo-filter lock check failed: %s — proceeding anyway", exc)
+
+    logger.info("Geo-filter job started (lock acquired)")
+    try:
+        db = SessionLocal()
+        try:
+            pending = db.query(SearchResult).filter(SearchResult.geo_filtered_at.is_(None)).count()
+            logger.info("Geo-filter: %d un-filtered results in DB", pending)
+            if pending == 0:
+                return
+
+            total_checked = 0
+            total_removed = 0
+            while True:
+                counts = await _auto_geo_filter_batch(db, batch_size=50)
+                if counts["checked"] == 0:
+                    break
+                total_checked += counts["checked"]
+                total_removed += counts["removed"]
+                logger.info(
+                    "Geo-filter progress: %d/%d checked, %d flagged non-US",
+                    total_checked, pending, total_removed,
+                )
+
+            if total_removed > 0:
+                deleted = (
+                    db.query(SearchResult)
+                    .filter(
+                        SearchResult.is_us == False,  # noqa: E712
+                        SearchResult.geo_filtered_at.isnot(None),
+                    )
+                    .delete(synchronize_session="fetch")
+                )
+                db.commit()
+                logger.info("Geo-filter: deleted %d non-US results from database", deleted)
+
+            logger.info(
+                "Geo-filter complete: %d checked, %d removed",
+                total_checked, total_removed,
+            )
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.exception("Geo-filter job failed: %s", exc)
+    finally:
+        try:
+            _get_redis().delete(REDIS_KEY_GEO_FILTER_LOCK)
+        except Exception:
+            pass
+        logger.info("Geo-filter job finished (lock released)")
+
+
+def trigger_geo_filter_now():
+    """Manually trigger geo-filter."""
+    asyncio.ensure_future(_safe_run(run_scheduled_geo_filter(), "geo-filter-manual"))
+
+
 def _update_step(run_id: str, step: str, started_at: str):
     _save_json(REDIS_KEY_STATUS, {
         "last_run_at": started_at,
@@ -986,6 +1104,7 @@ def start_scheduler():
         r.delete(REDIS_KEY_ANALYZE_ENRICH_LOCK)
         r.delete(REDIS_KEY_ENRICH_LOCK)
         r.delete(REDIS_KEY_COMMENT_ANALYZE_LOCK)
+        r.delete(REDIS_KEY_GEO_FILTER_LOCK)
         stale_enrich = r.llen(REDIS_KEY_ENRICH_QUEUE) or 0
         r.delete(REDIS_KEY_ENRICH_QUEUE)
         if stale_enrich:
@@ -1051,9 +1170,23 @@ def start_scheduler():
         COMMENT_ANALYZE_INTERVAL_MINUTES,
     )
 
+    # Periodic job: remove non-US posts
+    scheduler.add_job(
+        run_scheduled_geo_filter,
+        trigger=IntervalTrigger(minutes=GEO_FILTER_INTERVAL_MINUTES),
+        id=JOB_ID_GEO_FILTER,
+        replace_existing=True,
+        max_instances=1,
+    )
+    logger.info(
+        "Auto geo-filter job scheduled: every %d minutes",
+        GEO_FILTER_INTERVAL_MINUTES,
+    )
+
     scheduler.start()
     trigger_analyze_enrich_now()
     asyncio.ensure_future(_safe_run(run_scheduled_comment_analyze(), "comment-analyze-startup"))
+    asyncio.ensure_future(_safe_run(run_scheduled_geo_filter(), "geo-filter-startup"))
     start_analyze_worker()
     start_enrich_worker()
     logger.info("Enrich feeder deferred — first run in %d minutes (scheduled)", ENRICH_INTERVAL_MINUTES)

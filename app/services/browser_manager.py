@@ -4,6 +4,7 @@ import random
 import json
 from pathlib import Path
 from tenacity import retry, stop_after_attempt, wait_exponential
+from ..core.config import settings
 from ..services.proxy_manager import ProxyManager
 from ..core.logging_config import get_logger
 
@@ -212,8 +213,8 @@ class BrowserManager:
         self.browser: Optional[Browser] = None
         self.playwright = None
 
-        # Hardcoded headed mode so hover tooltips (date extraction) work same as local; use Xvfb in Docker
-        self.headless = False
+        # Headed mode needed for hover tooltips (date extraction); Xvfb provides display in Docker
+        self.headless = settings.HEADLESS
 
         # Fixed desktop viewport so Facebook serves consistent desktop structure (no mobile/tablet layout)
         self.viewport = {"width": 1920, "height": 1080}
@@ -239,18 +240,26 @@ class BrowserManager:
             return "Strict"
         return "None"
 
+    @staticmethod
+    def _get_ci(cookie: Dict[str, Any], *keys: str, default=None):
+        """Case-insensitive dict lookup across multiple possible key names."""
+        lower_map = {k.lower(): v for k, v in cookie.items()}
+        for key in keys:
+            val = lower_map.get(key.lower())
+            if val is not None:
+                return val
+        return default
+
     def _normalize_cookie(self, cookie: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        name = cookie.get("name")
-        value = cookie.get("value")
-        domain = cookie.get("domain")
-        path = cookie.get("path") or "/"
+        name = self._get_ci(cookie, "name")
+        value = self._get_ci(cookie, "value")
+        domain = self._get_ci(cookie, "domain", "host", "host_raw", "hostraw")
+        path = self._get_ci(cookie, "path") or "/"
 
         if not name or value is None or not domain:
             return None
 
-        expires = cookie.get("expires")
-        if expires is None:
-            expires = cookie.get("expirationDate")
+        expires = self._get_ci(cookie, "expires", "expirationdate", "expiry", "expiration")
         if expires is None:
             expires = -1
 
@@ -265,9 +274,9 @@ class BrowserManager:
             "domain": str(domain),
             "path": str(path),
             "expires": expires,
-            "httpOnly": bool(cookie.get("httpOnly", False)),
-            "secure": bool(cookie.get("secure", True)),
-            "sameSite": self._normalize_same_site(cookie.get("sameSite")),
+            "httpOnly": bool(self._get_ci(cookie, "httponly", "httpOnly", "http_only", default=False)),
+            "secure": bool(self._get_ci(cookie, "secure", "isSecure", default=True)),
+            "sameSite": self._normalize_same_site(self._get_ci(cookie, "samesite", "sameSite", "same_site")),
         }
 
     def _parse_storage_state(self, data: Any) -> Optional[Dict[str, Any]]:
