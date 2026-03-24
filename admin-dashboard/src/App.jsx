@@ -64,7 +64,7 @@ function App() {
     userType: 'customer',
     status: '',
     analyzed: '',
-    sortBy: 'scraped_at',
+    sortBy: 'post_date_timestamp',
     sortOrder: 'desc',
     keyword: '',
     q: '',
@@ -91,6 +91,7 @@ function App() {
   const [savingResult, setSavingResult] = useState(false)
   const [savingComment, setSavingComment] = useState(false)
   const [exporting, setExporting] = useState(false)
+  const [scraperHealth, setScraperHealth] = useState(null)
   const selectAllRef = useRef(null)
 
   const getResultEditPayload = (r) => ({
@@ -170,6 +171,18 @@ function App() {
     const interval = setInterval(fetchData, 10000)
     return () => clearInterval(interval)
   }, [jobStatus?.is_running, filters, currentPage, itemsPerPage])
+
+  useEffect(() => {
+    const fetchHealth = async () => {
+      try {
+        const res = await api.get('/search/scraper-health')
+        setScraperHealth(res.data)
+      } catch { /* silent */ }
+    }
+    fetchHealth()
+    const interval = setInterval(fetchHealth, 30000)
+    return () => clearInterval(interval)
+  }, [])
 
   useEffect(() => {
     const isOpen = showDetailDialog || showCommentDialog || deleteConfirm.isOpen
@@ -514,6 +527,22 @@ function App() {
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-100 to-sky-50 px-4 py-8">
       <div className="mx-auto max-w-[1400px] space-y-6">
+        {scraperHealth && scraperHealth.level !== 'ok' && (
+          <div className={`flex items-center gap-3 rounded-xl border px-4 py-3 text-sm font-medium ${
+            scraperHealth.level === 'error'
+              ? 'border-rose-300 bg-rose-50 text-rose-800'
+              : 'border-amber-300 bg-amber-50 text-amber-800'
+          }`}>
+            <span className="text-lg">{scraperHealth.level === 'error' ? '\u26A0' : '\u26A0'}</span>
+            <span>{scraperHealth.message}</span>
+            {scraperHealth.last_cookie_ok_at && (
+              <span className="ml-auto text-xs font-normal opacity-70">
+                Last valid session: {formatRelativeTime(scraperHealth.last_cookie_ok_at)}
+              </span>
+            )}
+          </div>
+        )}
+
         {feedback && (
           <div className={`rounded-xl border px-4 py-3 text-sm ${feedback.type === 'error' ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
             {feedback.text}

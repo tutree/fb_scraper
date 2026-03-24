@@ -51,6 +51,21 @@ class CookieStatusResponse(BaseModel):
     cookie_count: int = 0
 
 
+class ScraperHealthResponse(BaseModel):
+    has_cookie_files: bool = False
+    cookie_count: int = 0
+    cookie_file_age_hours: Optional[float] = None
+    all_cookies_failed: bool = False
+    all_cookies_failed_at: Optional[str] = None
+    last_cookie_ok_uid: Optional[str] = None
+    last_cookie_ok_at: Optional[str] = None
+    last_cookie_fail_reason: Optional[str] = None
+    last_scrape_success: Optional[bool] = None
+    last_scrape_error: Optional[str] = None
+    level: str = "ok"
+    message: str = "Scraper healthy"
+
+
 class CookieUpdateRequest(BaseModel):
     cookie_json: str
 

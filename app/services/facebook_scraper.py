@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from ..core.config import settings
 from ..core.logging_config import get_logger
+from . import scraper_state
 from .fb_account_loader import load_accounts
 from .fb_auto_login import load_login_accounts, login_on_page
 from .fb_feed_scanner import enable_search_recent_posts_filter, scroll_and_process_posts
@@ -160,11 +161,13 @@ class FacebookScraper:
             auth = await self._inspect_auth_state(cookie_page)
             if auth["logged_in"]:
                 logger.info("Cookie session valid for %s -- skipping login", uid)
+                scraper_state.report_cookie_ok(uid)
                 self._current_page = cookie_page
                 self._current_account = account or {"uid": uid}
                 return True
 
             logger.warning("Cookie session invalid for %s -- removing stale file", uid)
+            scraper_state.report_cookie_fail(uid, "session invalid")
             if storage_path and storage_path.exists():
                 try:
                     storage_path.unlink()
@@ -173,6 +176,7 @@ class FacebookScraper:
                     logger.warning("Could not remove %s: %s", storage_path, exc)
         except Exception as exc:
             logger.warning("Cookie check failed for %s: %s", uid, exc)
+            scraper_state.report_cookie_fail(uid, str(exc))
         finally:
             if cookie_page is not None and self._current_page is not cookie_page:
                 await self.browser_manager.close_page_context(cookie_page)
@@ -221,6 +225,7 @@ class FacebookScraper:
             logger.warning(
                 "No valid cookie session — credential login is disabled (set FB_TRY_CREDENTIAL_LOGIN=true to enable)"
             )
+            scraper_state.report_all_cookies_failed()
             return False
 
         if not login_accounts:
@@ -253,6 +258,7 @@ class FacebookScraper:
         logger.error(
             "Auto-login exhausted all accounts and cookies — none could log in"
         )
+        scraper_state.report_all_cookies_failed()
         return False
 
     async def search_keyword(
@@ -359,6 +365,7 @@ class FacebookScraper:
                 raise NoActiveCookieError("no active cookie")
 
             logger.info("Cookie session verified (cookie-only mode)")
+            scraper_state.report_cookie_ok(account.get("uid", ""))
 
             logger.info("Skipping session warmup (using saved cookies)")
         else:

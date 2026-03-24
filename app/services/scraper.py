@@ -6,6 +6,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 
+from . import scraper_state
 from .browser_manager import BrowserManager
 from .facebook_scraper import FacebookScraper, NoActiveCookieError
 from .proxy_manager import ProxyManager
@@ -68,6 +69,7 @@ class ScraperService:
             }
 
         total_results_count = 0
+        scraper_state.report_scrape_start()
         logger.info(f"Will search {len(keywords)} keywords with max {max_results} results each")
 
         try:
@@ -98,6 +100,7 @@ class ScraperService:
                         "All auto-login attempts failed for keyword '%s' — skipping to next keyword",
                         keyword,
                     )
+                    scraper_state.report_all_cookies_failed()
                     continue
 
                 # Longer random delay between searches (10-30 seconds)
@@ -122,6 +125,7 @@ class ScraperService:
             logger.info(f"Keywords searched: {len(keywords)}")
             logger.info("=" * 80)
             
+            scraper_state.report_scrape_finish(success=True)
             return {
                 "success": True,
                 "stopped": False,
@@ -134,6 +138,7 @@ class ScraperService:
             logger.error("SCRAPER SERVICE FAILED")
             logger.error(f"Error: {e}", exc_info=True)
             logger.error("=" * 80)
+            scraper_state.report_scrape_finish(success=False, error=str(e))
             return {
                 "success": False,
                 "stopped": False,

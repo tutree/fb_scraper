@@ -17,12 +17,14 @@ from ...schemas.search import (
     CookieStatusResponse,
     CookieUpdateRequest,
     CookieUpdateResponse,
+    ScraperHealthResponse,
     SearchRequest,
     SearchResponse,
     SearchTaskDetail,
     SearchStopResponse,
     SearchLogsResponse,
 )
+from ...services.scraper_state import get_scraper_health
 
 router = APIRouter(prefix="/search", tags=["search"])
 logger = get_logger(__name__)
@@ -202,6 +204,53 @@ async def get_search_logs(
 async def get_saved_cookie_status() -> CookieStatusResponse:
     """Return current cookie-session metadata for the scraper UI."""
     return CookieStatusResponse(**get_cookie_status())
+
+
+@router.get("/scraper-health", response_model=ScraperHealthResponse)
+async def scraper_health() -> ScraperHealthResponse:
+    """Combined scraper health: cookie files + runtime session state."""
+    cookie = get_cookie_status()
+    health = get_scraper_health()
+
+    has_files = bool(cookie.get("cookie_file"))
+    count = int(cookie.get("cookie_count") or 0)
+
+    age_hours = None
+    if cookie.get("updated_at"):
+        try:
+            ts = datetime.fromisoformat(cookie["updated_at"])
+            age_hours = round((datetime.now(timezone.utc) - ts).total_seconds() / 3600, 1)
+        except Exception:
+            pass
+
+    all_failed = bool(health.get("all_cookies_failed"))
+    no_cookies = not has_files or count == 0
+
+    if all_failed:
+        level, message = "error", "All cookies expired — upload fresh cookies"
+    elif no_cookies:
+        level, message = "error", "No cookie files found — upload cookies to start scraping"
+    elif health.get("last_scrape_success") is False and health.get("last_scrape_error"):
+        level, message = "warning", f"Last scrape failed: {health['last_scrape_error'][:120]}"
+    elif age_hours is not None and age_hours > 72:
+        level, message = "warning", f"Cookie file is {age_hours:.0f}h old — may be stale"
+    else:
+        level, message = "ok", "Scraper healthy"
+
+    return ScraperHealthResponse(
+        has_cookie_files=has_files,
+        cookie_count=count,
+        cookie_file_age_hours=age_hours,
+        all_cookies_failed=all_failed,
+        all_cookies_failed_at=health.get("all_cookies_failed_at"),
+        last_cookie_ok_uid=health.get("last_cookie_ok_uid"),
+        last_cookie_ok_at=health.get("last_cookie_ok_at"),
+        last_cookie_fail_reason=health.get("last_cookie_fail_reason"),
+        last_scrape_success=health.get("last_scrape_success"),
+        last_scrape_error=health.get("last_scrape_error"),
+        level=level,
+        message=message,
+    )
 
 
 @router.post("/cookies", response_model=CookieUpdateResponse)
