@@ -16,6 +16,7 @@ from ..models.post_comment import PostComment
 from ..models.search_result import ResultStatus, SearchResult
 from ..utils.validators import clean_facebook_location, clean_facebook_name, clean_facebook_post_content
 from .fb_comment_handler import extract_comments
+from .fb_post_url import canonicalize_post_url
 
 logger = get_logger(__name__)
 
@@ -86,7 +87,7 @@ async def process_single_profile(
     logger.info(f"  URL: {link_url}")
 
     post_content = clean_facebook_post_content(link.get("post_content"))
-    post_url = link.get("post_url")
+    post_url = canonicalize_post_url(link.get("post_url"))
     post_date = link.get("post_date")
     if post_date is None or (isinstance(post_date, str) and not post_date.strip()):
         logger.info("Post has no date from feed (url=%s) — date extraction may have failed on this card", (link_url or "")[:80])
@@ -95,7 +96,7 @@ async def process_single_profile(
         if link_type == "group":
             logger.info("  Processing group post author...")
             await page.goto(link_url, wait_until="domcontentloaded", timeout=90000)
-            await asyncio.sleep(random.uniform(2, 4))
+            await asyncio.sleep(random.uniform(1.5, 2.5))
 
             view_profile_link = await page.query_selector('a[aria-label="View profile"]')
             if not view_profile_link:
@@ -106,49 +107,81 @@ async def process_single_profile(
             profile_url = await view_profile_link.get_attribute("href")
             logger.info(f"  Found profile URL: {profile_url}")
             await page.goto(profile_url, wait_until="domcontentloaded", timeout=90000)
-            await asyncio.sleep(random.uniform(2, 4))
+            await asyncio.sleep(random.uniform(1.5, 2.5))
         else:
             profile_url = link_url
             await page.goto(profile_url, wait_until="domcontentloaded", timeout=90000)
-            await asyncio.sleep(random.uniform(2, 4))
+            await asyncio.sleep(random.uniform(1.5, 2.5))
 
         # -- Name extraction --
-        # Prefer semantic container used in search results/profile cards:
-        # div[data-ad-rendering-role="profile_name"].
+        # Priority order:
+        #   1. div[data-ad-rendering-role="profile_name"] → link or h3  (search-result cards)
+        #   2. Profile cover h1 (direct profile page visit)
+        #   3. og:title meta tag (most reliable on direct visits; strip "| Facebook")
+        #   4. document.title (same strip)
+        #   5. First h1/h2/h3 on page
         name_pick = await page.evaluate(
             """
             () => {
                 const clean = (s) => (s || '').replace(/\\u00a0/g, ' ').replace(/\\s+/g, ' ').trim();
-                const badExact = new Set([
-                    'Follow', 'Add friend', 'Add Friend', 'Message', 'See options'
-                ]);
+                const UI_NOISE = /^(Follow|Add friend|Add Friend|Message|See options|Like|Comment|Share|Reels|Photos|Videos|About|Friends|More)$/i;
+                const FB_SUFFIX = /\\s*[|·]\\s*(Facebook|FB)\\s*$/i;
 
                 const normalizeCandidate = (text) => {
-                    const t = clean(text);
-                    if (!t || badExact.has(t)) return null;
-                    if (/^(Follow|Add friend|Add Friend|Message|See options)$/i.test(t)) return null;
+                    const t = clean(text).replace(FB_SUFFIX, '').trim();
+                    if (!t || UI_NOISE.test(t)) return null;
                     return t;
                 };
 
+                // 1. Search-result card block
                 const profileNameRoot = document.querySelector('div[data-ad-rendering-role="profile_name"]');
                 if (profileNameRoot) {
                     const link = profileNameRoot.querySelector('a[href*="facebook.com"]');
-                    const linkText = normalizeCandidate(link?.textContent);
-                    if (linkText) {
-                        return { name: linkText, source: 'profile_name_link' };
-                    }
+                    const lt = normalizeCandidate(link?.textContent);
+                    if (lt) return { name: lt, source: 'profile_name_link' };
+
                     const h3 = profileNameRoot.querySelector('h3');
-                    const h3Text = normalizeCandidate(h3?.textContent);
-                    if (h3Text) {
-                        return { name: h3Text.split(' · ')[0].trim(), source: 'profile_name_h3' };
-                    }
+                    const h3t = normalizeCandidate(h3?.textContent);
+                    if (h3t) return { name: h3t.split(/\\s+[·|]\\s+/)[0].trim(), source: 'profile_name_h3' };
                 }
 
-                const heading = document.querySelector('h1, h2, h3');
-                const headingText = normalizeCandidate(heading?.textContent);
-                if (headingText) {
-                    return { name: headingText.split(' · ')[0].trim(), source: 'page_heading' };
+                // 2. Cover/intro h1 on a direct profile page.
+                //    The actual name is often inside h1 > span > div[role="button"] as a text node,
+                //    NOT spread across inner decorative divs like div[role="none"].
+                //    Extract only the raw text-node content from the name button, then fall back to
+                //    the full h1 textContent as a last resort.
+                const h1 = document.querySelector('h1');
+                if (h1) {
+                    // Preferred: grab every text node directly inside div[role="button"] in h1.
+                    const nameBtn = h1.querySelector('div[role="button"]') || h1;
+                    let rawText = '';
+                    nameBtn.childNodes.forEach(node => {
+                        // Only real text nodes and non-decorative spans (not role="none" divs)
+                        if (node.nodeType === Node.TEXT_NODE) {
+                            rawText += node.textContent;
+                        } else if (node.nodeName === 'SPAN' && !node.getAttribute('role') && !node.getAttribute('data-visualcompletion')) {
+                            rawText += node.textContent;
+                        }
+                    });
+                    const t = normalizeCandidate(rawText) || normalizeCandidate(h1.textContent);
+                    if (t) return { name: t, source: 'profile_h1' };
                 }
+
+                // 3. og:title meta tag — most stable across profile page variants
+                const ogTitle = document.querySelector('meta[property="og:title"]');
+                if (ogTitle) {
+                    const t = normalizeCandidate(ogTitle.getAttribute('content'));
+                    if (t) return { name: t, source: 'og_title' };
+                }
+
+                // 4. <title> tag (format: "Name | Facebook")
+                const titleTag = normalizeCandidate(document.title);
+                if (titleTag) return { name: titleTag, source: 'title_tag' };
+
+                // 5. First h2/h3
+                const heading = document.querySelector('h2, h3');
+                const ht = normalizeCandidate(heading?.textContent);
+                if (ht) return { name: ht.split(/\\s+[·|]\\s+/)[0].trim(), source: 'page_heading' };
 
                 return { name: null, source: null };
             }
@@ -290,6 +323,13 @@ async def process_single_profile(
                             post_date, profile_url, keyword, db,
                         )
                         search_result = existing
+                        # Run Groq analysis even on updated duplicate rows
+                        if (settings.GROQ_API_KEY or "").strip() and existing.analyzed_at is None:
+                            try:
+                                from .groq_analyzer import apply_immediate_groq_analysis
+                                await apply_immediate_groq_analysis(db, existing.id)
+                            except Exception as groq_exc:
+                                logger.warning("  Immediate Groq analysis failed (dup update): %s", groq_exc)
                         await page.close()
                         return True
 
@@ -323,6 +363,13 @@ async def process_single_profile(
                                 existing, final_name, location_text, post_content,
                                 post_date, profile_url, keyword, db,
                             )
+                            # Run Groq on the recovered row too
+                            if (settings.GROQ_API_KEY or "").strip() and existing.analyzed_at is None:
+                                try:
+                                    from .groq_analyzer import apply_immediate_groq_analysis
+                                    await apply_immediate_groq_analysis(db, existing.id)
+                                except Exception as groq_exc:
+                                    logger.warning("  Immediate Groq analysis failed (integrity dup): %s", groq_exc)
                             await page.close()
                             return True
                     raise
@@ -370,12 +417,12 @@ async def process_single_profile(
                             try:
                                 logger.info(f"  Visiting post: {post_link[:80]}...")
                                 await page.goto(post_link, wait_until="commit", timeout=30000)
-                                await asyncio.sleep(random.uniform(2, 3))
+                                await asyncio.sleep(random.uniform(1, 2))
                                 count = await extract_comments(page, search_result.id, db, max_comments=0)
                                 total_comments += count
                                 if count > 0:
                                     logger.info(f"  Extracted {count} comments from this post")
-                                await asyncio.sleep(random.uniform(1, 2))
+                                await asyncio.sleep(random.uniform(0.5, 1))
                             except Exception as e:
                                 logger.warning(f"  Could not extract comments from post: {e}")
 
@@ -387,6 +434,17 @@ async def process_single_profile(
                         logger.info("  No recent posts found on profile")
                 except Exception as e:
                     logger.warning(f"  Could not extract comments from profile: {e}")
+
+                # Run Groq combined post+comments analysis immediately after all comments are saved
+                if (settings.GROQ_API_KEY or "").strip():
+                    try:
+                        from .groq_analyzer import apply_immediate_groq_analysis
+                        logger.info("  Running immediate Groq analysis for %s...", search_result.id)
+                        await apply_immediate_groq_analysis(db, search_result.id)
+                    except Exception as groq_exc:
+                        logger.warning("  Immediate Groq analysis failed: %s", groq_exc)
+                else:
+                    logger.info("  Skipping immediate Groq analysis — GROQ_API_KEY not set")
 
                 await page.close()
                 return True
@@ -438,6 +496,13 @@ async def process_single_profile(
                         db.add(pc)
                     db.commit()
                     logger.info(f"  Saved {len(comments_data)} comments")
+                    if (settings.GROQ_API_KEY or "").strip():
+                        try:
+                            from .groq_analyzer import apply_immediate_groq_analysis
+
+                            await apply_immediate_groq_analysis(db, search_result.id)
+                        except Exception as groq_exc:
+                            logger.warning("  Immediate Groq analysis failed: %s", groq_exc)
                 except Exception as e:
                     logger.warning(f"  Failed to save skipped profile + comments: {e}")
                     db.rollback()

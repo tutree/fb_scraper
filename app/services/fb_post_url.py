@@ -4,6 +4,7 @@ Helpers for capturing a canonical post URL via the Share → Copy link flow.
 import asyncio
 import random
 from typing import Dict, Optional
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 from playwright.async_api import Page
 
@@ -11,6 +12,82 @@ from ..core.logging_config import get_logger
 from .fb_search_feed_scroll import scroll_search_page_until_profile_card_visible
 
 logger = get_logger(__name__)
+
+# Tracking / session params that change every request and should be stripped
+# so the same post always has the same canonical URL in the DB.
+_TRACKING_PARAMS = frozenset({
+    "__cft__[0]", "__tn__", "fbclid", "ref", "refid",
+    "hoisted_section_header_type", "_rdc", "_rdr",
+})
+
+
+def canonicalize_post_url(url: Optional[str]) -> Optional[str]:
+    """
+    Strip Facebook tracking/session params and return a stable canonical URL
+    suitable for duplicate detection.
+
+    Patterns handled:
+      • /{user}/posts/{pfbid}?...        → strip all query params
+      • /photo/?fbid=X&set=Y&...        → keep only fbid + set
+      • /groups/{id}/?multi_permalinks=P → keep only multi_permalinks
+      • /permalink/...                   → strip all query params
+      • /share/p/...                     → strip all query params
+      • Any other post URL               → strip _TRACKING_PARAMS, keep rest
+    """
+    if not url or not isinstance(url, str):
+        return url
+    url = url.strip()
+    if not url.startswith("http"):
+        return url
+    try:
+        parsed = urlparse(url)
+        path_low = parsed.path.lower()
+
+        # /posts/ or /permalink/ or /share/ → no query params needed
+        if (
+            "/posts/" in path_low
+            or "/permalink/" in path_low
+            or "/share/p/" in path_low
+            or "facebook.com/share/" in (parsed.netloc + path_low)
+        ):
+            return urlunparse(parsed._replace(query="", fragment=""))
+
+        # /photo/ → keep fbid + set only
+        if path_low.startswith("/photo"):
+            qs = parse_qs(parsed.query, keep_blank_values=False)
+            keep = {k: v for k, v in qs.items() if k in ("fbid", "set")}
+            return urlunparse(parsed._replace(
+                query=urlencode(keep, doseq=True),
+                fragment="",
+            ))
+
+        # /groups/...?multi_permalinks=... → keep multi_permalinks only
+        if path_low.startswith("/groups/") and "multi_permalinks" in parsed.query:
+            qs = parse_qs(parsed.query, keep_blank_values=False)
+            keep = {k: v for k, v in qs.items() if k == "multi_permalinks"}
+            return urlunparse(parsed._replace(
+                query=urlencode(keep, doseq=True),
+                fragment="",
+            ))
+
+        # story_fbid / story.php → keep story_fbid + id, strip tracking
+        if "story_fbid" in parsed.query or "story.php" in path_low:
+            qs = parse_qs(parsed.query, keep_blank_values=False)
+            keep = {k: v for k, v in qs.items() if k in ("story_fbid", "id", "v")}
+            return urlunparse(parsed._replace(
+                query=urlencode(keep, doseq=True),
+                fragment="",
+            ))
+
+        # General: strip only known tracking params
+        qs = parse_qs(parsed.query, keep_blank_values=False)
+        clean = {k: v for k, v in qs.items() if k not in _TRACKING_PARAMS}
+        return urlunparse(parsed._replace(
+            query=urlencode(clean, doseq=True),
+            fragment="",
+        ))
+    except Exception:
+        return url
 
 
 def is_usable_post_url_for_permalink_flow(url: Optional[str]) -> bool:
@@ -28,6 +105,9 @@ def is_usable_post_url_for_permalink_flow(url: Optional[str]) -> bool:
     if "/posts/" in low or "/permalink/" in low:
         return True
     if "facebook.com/share/" in low or "/share/p/" in low:
+        return True
+    # Group posts linked via multi_permalinks are navigable
+    if "/groups/" in low and "multi_permalinks=" in u.lower():
         return True
     return False
 

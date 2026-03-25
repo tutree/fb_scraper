@@ -108,7 +108,7 @@ async def expand_inline_comments(
             no_progress_cycles += 1
 
         await page.evaluate("window.scrollBy(0, 900)")
-        await asyncio.sleep(7)
+        await asyncio.sleep(3)
 
         if no_progress_cycles >= stall_limit:
             break
@@ -130,7 +130,7 @@ async def extract_comments(
         limit = resolve_comment_limit(max_comments)
         logger.info(f"  Extracting comments (limit={limit if max_comments > 0 else 'ALL'})...")
 
-        await asyncio.sleep(random.uniform(1.2, 2.2))
+        await asyncio.sleep(random.uniform(0.5, 1.0))
 
         comment_button_clicked = False
         try:
@@ -142,7 +142,7 @@ async def extract_comments(
             else:
                 comment_button_clicked = bool(click_result)
             if comment_button_clicked:
-                await asyncio.sleep(10)
+                await asyncio.sleep(5)
         except Exception as exc:
             logger.debug(f"  Could not click Comment button: {exc}")
 
@@ -244,7 +244,7 @@ async def extract_comments_from_post_permalink(
             comment_button_clicked = bool(click_result)
 
         if comment_button_clicked:
-            await asyncio.sleep(8)
+            await asyncio.sleep(5)
 
         if comment_button_clicked:
             try:
@@ -381,9 +381,7 @@ async def click_comments_and_extract_from_dialog(
             return comments_data, post_url_from_dialog, post_date_from_dialog
 
         logger.info("  [Comments click] SUCCESS - waiting for dialog to open...")
-        # await _screenshot(page, f"03_after_click_{profile_path.split('/')[-1][:20]}")
-
-        await asyncio.sleep(10)
+        await asyncio.sleep(5)
         dialog_opened = False
         try:
             await page.wait_for_selector('[role="dialog"]', timeout=10000)

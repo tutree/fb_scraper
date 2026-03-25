@@ -1,6 +1,8 @@
 """
-EnformionGO Contact Enrichment API integration.
-Docs: https://enformiongo.readme.io/reference/contact-enrichment
+EnformionGO Contact Enrichment + Person Search API integration.
+Docs:
+  Contact Enrichment: https://enformiongo.readme.io/reference/contact-enrichment
+  Person Search:      https://enformiongo.readme.io/reference/person-search
 """
 import asyncio
 import json
@@ -16,13 +18,17 @@ logger = get_logger(__name__)
 MAX_RETRIES = 1
 RETRY_BACKOFF_SECONDS = [5]
 
-ENFORMION_URL = "https://devapi.enformion.com/contact/enrich"
+ENFORMION_ENRICH_URL = "https://devapi.enformion.com/contact/enrich"
+ENFORMION_PERSON_SEARCH_URL = "https://devapi.enformion.com/person/search"
 
 # Headers must match working curl: Content-Type, Accept, galaxy-* only (no User-Agent)
 _HTTP_HEADERS_BASE = {
     "Content-Type": "application/json",
     "Accept": "application/json",
 }
+
+# Keep old name as alias so nothing else breaks
+ENFORMION_URL = ENFORMION_ENRICH_URL
 
 
 class EnformionService:
@@ -77,26 +83,30 @@ class EnformionService:
             },
         }
 
-    async def enrich(self, name: str, location: str) -> Dict:
-        """
-        Call EnformionGO Contact Enrichment and return the parsed person data.
-        Raises on HTTP/network errors.
-        """
-        payload = self._build_request(name, location)
+    def _build_person_search_request(self, name: str, location: str) -> Dict:
+        """Build Person Search payload: Addresses is an array with AddressLine2."""
+        first, middle, last = self.split_name(name)
+        cleaned_location = clean_facebook_location(location) or location.strip()
+        payload: Dict = {
+            "FirstName": first,
+            "LastName": last,
+            "Addresses": [{"AddressLine2": cleaned_location}],
+            "Includes": ["Addresses", "PhoneNumbers", "EmailAddresses"],
+            "Page": 1,
+            "ResultsPerPage": 5,
+        }
+        if middle:
+            payload["MiddleName"] = middle
+        return payload
+
+    async def _call(self, url: str, payload: Dict, search_type: str) -> Dict:
+        """Low-level HTTP call with 429 retry logic. Returns parsed JSON body."""
         headers = {
             **_HTTP_HEADERS_BASE,
             "galaxy-ap-name": self.ap_name,
             "galaxy-ap-password": self.ap_password,
-            "galaxy-search-type": "DevAPIContactEnrich",
+            "galaxy-search-type": search_type,
         }
-
-        logger.info(
-            "EnformionGO enrichment request: name=%r location=%r payload=%s",
-            name,
-            location,
-            payload,
-        )
-
         body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
         data = None
@@ -107,11 +117,7 @@ class EnformionService:
                 http2=False,
                 follow_redirects=True,
             ) as client:
-                resp = await client.post(
-                    ENFORMION_URL,
-                    content=body,
-                    headers=headers,
-                )
+                resp = await client.post(url, content=body, headers=headers)
 
             if resp.status_code == 429:
                 if attempt < MAX_RETRIES:
@@ -123,13 +129,13 @@ class EnformionService:
                         except (ValueError, TypeError):
                             pass
                     logger.warning(
-                        "EnformionGO 429 rate-limited (attempt %d/%d). Sleeping %ds before retry...",
+                        "EnformionGO 429 rate-limited (attempt %d/%d). Sleeping %ds...",
                         attempt + 1, MAX_RETRIES + 1, wait,
                     )
                     await asyncio.sleep(wait)
                     continue
                 else:
-                    logger.error("EnformionGO 429 after %d retries — giving up for this request", MAX_RETRIES + 1)
+                    logger.error("EnformionGO 429 after %d retries — giving up", MAX_RETRIES + 1)
                     resp.raise_for_status()
 
             if resp.status_code >= 400:
@@ -145,6 +151,48 @@ class EnformionService:
             data = resp.json()
             break
 
+        return data or {}
+
+    async def enrich(self, name: str, location: str) -> Dict:
+        """
+        Call EnformionGO Contact Enrichment (primary, cheaper).
+        Returns parsed person data dict or {"matched": False}.
+        Raises on HTTP/network errors.
+        """
+        payload = self._build_request(name, location)
+        logger.info(
+            "EnformionGO ContactEnrich request: name=%r location=%r payload=%s",
+            name, location, payload,
+        )
+        data = await self._call(ENFORMION_ENRICH_URL, payload, "DevAPIContactEnrich")
+        return self._parse_single_person(data, name)
+
+    async def person_search(self, name: str, location: str) -> Dict:
+        """
+        Call EnformionGO Person Search (fallback, more powerful).
+        Returns the best-matching person data dict or {"matched": False}.
+        Raises on HTTP/network errors.
+        """
+        payload = self._build_person_search_request(name, location)
+        logger.info(
+            "EnformionGO PersonSearch fallback request: name=%r location=%r",
+            name, location,
+        )
+        data = await self._call(ENFORMION_PERSON_SEARCH_URL, payload, "Person")
+
+        # Person Search returns a list under "persons" (or "person" for single-result mode).
+        persons = data.get("persons") or []
+        if not persons and data.get("person"):
+            persons = [data["person"]]
+        if not persons:
+            logger.info("EnformionGO PersonSearch: no match for %r", name)
+            return {"matched": False}
+
+        # Take first result (most-relevant match).
+        return self._parse_single_person({"person": persons[0]}, name)
+
+    def _parse_single_person(self, data: Dict, name: str) -> Dict:
+        """Map a {person: ...} envelope to our standard enrichment dict."""
         person = data.get("person")
         if not person:
             logger.info("EnformionGO returned no match for %r", name)

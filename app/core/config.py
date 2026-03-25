@@ -39,15 +39,15 @@ class Settings(BaseSettings):
     # Sort search results by "Most Recent" instead of Facebook's default "Top Posts"
     FB_SEARCH_RECENT_POSTS: bool = True
 
-    # AI provider
-    AI_PROVIDER: str = "ollama"
+    # AI provider: groq (default) or gemini
+    AI_PROVIDER: str = "groq"
 
     # Gemini API
     GEMINI_API_KEY: str = ""
 
-    # Ollama
-    OLLAMA_BASE_URL: str = "http://ollama:11434"
-    OLLAMA_MODEL: str = "gemma3:4b"
+    # Groq (OpenAI-compatible API): queue/API classification and immediate on-save analysis when key is set.
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
 
     # EnformionGO Contact Enrichment
     ENFORMION_AP_NAME: str = ""

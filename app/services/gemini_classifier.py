@@ -2,8 +2,6 @@ import google.generativeai as genai
 import json
 from typing import Dict, Optional
 
-import httpx
-
 from ..core.config import settings
 from ..core.logging_config import get_logger
 from ..utils.validators import clean_facebook_post_content
@@ -18,10 +16,13 @@ class GeminiClassifier:
     """
     
     def __init__(self, api_key: Optional[str] = None):
-        self.provider = (settings.AI_PROVIDER or "gemini").strip().lower()
+        self.provider = (settings.AI_PROVIDER or "groq").strip().lower()
         self.api_key = api_key or settings.GEMINI_API_KEY
-        self.ollama_base_url = settings.OLLAMA_BASE_URL.rstrip("/")
-        self.ollama_model = settings.OLLAMA_MODEL
+        if self.provider == "ollama":
+            raise ValueError(
+                "Ollama is no longer supported — set AI_PROVIDER=groq and GROQ_API_KEY "
+                "(or AI_PROVIDER=gemini with GEMINI_API_KEY)."
+            )
 
         if self.provider == "gemini":
             if not self.api_key:
@@ -29,34 +30,34 @@ class GeminiClassifier:
             genai.configure(api_key=self.api_key)
             self.model = genai.GenerativeModel("gemini-2.5-flash")
             logger.info("AI classifier using provider=gemini model=gemini-2.5-flash")
-        elif self.provider == "ollama":
+        elif self.provider == "groq":
             self.model = None
+            if not (settings.GROQ_API_KEY or "").strip():
+                raise ValueError("GROQ_API_KEY not configured")
             logger.info(
-                "AI classifier using provider=ollama model=%s base_url=%s",
-                self.ollama_model,
-                self.ollama_base_url,
+                "AI classifier using provider=groq model=%s",
+                settings.GROQ_MODEL,
             )
         else:
-            raise ValueError(f"Unsupported AI_PROVIDER: {self.provider}")
+            raise ValueError(
+                f"Unsupported AI_PROVIDER: {self.provider}. Use groq or gemini."
+            )
 
     async def _generate_json(self, prompt: str) -> Dict:
         if self.provider == "gemini":
             response = self.model.generate_content(prompt)
             response_text = response.text.strip()
+        elif self.provider == "groq":
+            from .groq_client import groq_chat_json
+
+            result = await groq_chat_json(prompt)
+            if "type" not in result or "confidence" not in result:
+                raise ValueError("Invalid response structure")
+            result["type"] = str(result["type"]).upper()
+            result["confidence"] = max(0.0, min(1.0, float(result["confidence"])))
+            return result
         else:
-            async with httpx.AsyncClient(timeout=600.0) as client:
-                response = await client.post(
-                    f"{self.ollama_base_url}/api/generate",
-                    json={
-                        "model": self.ollama_model,
-                        "prompt": prompt,
-                        "stream": False,
-                        "format": "json",
-                    },
-                )
-                response.raise_for_status()
-                data = response.json()
-                response_text = (data.get("response") or "").strip()
+            raise ValueError(f"Unsupported AI_PROVIDER for classification: {self.provider}")
 
         if response_text.startswith("```"):
             response_text = response_text.split("```")[1]
@@ -229,20 +230,17 @@ Return ONLY valid JSON (no markdown):
             if self.provider == "gemini":
                 response = self.model.generate_content(prompt)
                 response_text = response.text.strip()
+            elif self.provider == "groq":
+                from .groq_client import groq_chat_json
+
+                result = await groq_chat_json(prompt)
+                return {
+                    "is_us": bool(result.get("is_us", True)),
+                    "confidence": max(0.0, min(1.0, float(result.get("confidence", 0.5)))),
+                    "reason": str(result.get("reason", "")),
+                }
             else:
-                async with httpx.AsyncClient(timeout=120.0) as client:
-                    response = await client.post(
-                        f"{self.ollama_base_url}/api/generate",
-                        json={
-                            "model": self.ollama_model,
-                            "prompt": prompt,
-                            "stream": False,
-                            "format": "json",
-                        },
-                    )
-                    response.raise_for_status()
-                    data = response.json()
-                    response_text = (data.get("response") or "").strip()
+                raise ValueError(f"Unsupported AI_PROVIDER for geo: {self.provider}")
 
             if response_text.startswith("```"):
                 response_text = response_text.split("```")[1]

@@ -83,7 +83,7 @@ _JS_DATE_LINK_HOVER_ORDER = """
             h.includes('story_fbid') || h.includes('pfbid') ||
             h.includes('/photo/') || h.includes('/share/') || h.includes('/watch') ||
             h.includes('/reel/') || h.includes('/videos/') || h.includes('story.php') ||
-            h.includes('watch?v=')
+            h.includes('watch?v=') || h.includes('multi_permalinks=')
         );
     }
     function score(i) {
@@ -632,7 +632,8 @@ async def scroll_and_process_posts(
                     h.includes('/reel/') ||
                     h.includes('/videos/') ||
                     h.includes('story.php') ||
-                    h.includes('watch?v=')
+                    h.includes('watch?v=') ||
+                    h.includes('multi_permalinks=')
                 );
             }
 
@@ -1126,7 +1127,7 @@ async def scroll_and_process_posts(
             logger.error(f"  Error processing profile: {e}")
 
         if i < len(filtered_links) - 1 and users_saved < max_results:
-            delay = random.uniform(3, 7)
+            delay = random.uniform(2, 4)
             logger.info(f"Waiting {delay:.1f}s before next profile...")
             remaining = delay
             while remaining > 0:

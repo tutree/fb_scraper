@@ -700,6 +700,14 @@ async def _auto_enrich_results(db, result_ids: list) -> int:
         await _enrich_rate_limit_wait()
         try:
             data = await service.enrich(result.name, result.location)
+            if not data.get("matched"):
+                # Fallback: Person Search (more powerful but costlier)
+                logger.info(
+                    "ContactEnrich no match for %s — trying PersonSearch fallback", result.id
+                )
+                await _enrich_rate_limit_wait()
+                data = await service.person_search(result.name, result.location)
+
             result.enriched_at = datetime.now(timezone.utc)
             if data.get("matched"):
                 result.enriched_phones = data.get("phones")
@@ -710,7 +718,7 @@ async def _auto_enrich_results(db, result_ids: list) -> int:
                 logger.info("Enriched %s — match found", result.id)
                 donor_map[(result.name or "").strip().lower()] = result
             else:
-                logger.info("Enriched %s — no match from API, marked as attempted", result.id)
+                logger.info("Enriched %s — no match from API or PersonSearch, marked as attempted", result.id)
                 donor_map[(result.name or "").strip().lower()] = result
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 429:
