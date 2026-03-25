@@ -66,7 +66,7 @@ REMOTE_SHA="$(git rev-parse "origin/$DEPLOY_BRANCH")"
 
 if [[ "$LOCAL_SHA" != "$REMOTE_SHA" ]]; then
     log "Updating repository"
-    git pull --ff-only origin "$DEPLOY_BRANCH"
+    git reset --hard "origin/$DEPLOY_BRANCH"
 else
     log "Repository already matches origin/$DEPLOY_BRANCH"
 fi
