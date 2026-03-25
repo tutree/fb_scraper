@@ -29,6 +29,9 @@ from ...services.enformion_service import EnformionService
 
 router = APIRouter(prefix="/automation", tags=["automation"])
 
+_SR_ACTIVE = SearchResult.archived.is_(False)
+_PC_ACTIVE = PostComment.archived.is_(False)
+
 
 class EnrichQueueItem(BaseModel):
     id: str
@@ -215,7 +218,13 @@ class JobStats(BaseModel):
     geo_filter_hourly: List[HourlyStat] = []
 
 
-def _hourly_counts(db: Session, model, ts_column, hours: int = 24) -> List[HourlyStat]:
+def _hourly_counts(
+    db: Session,
+    model,
+    ts_column,
+    hours: int = 24,
+    extra_filters: tuple = (),
+) -> List[HourlyStat]:
     """Return per-hour counts for the last N hours."""
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     rows = (
@@ -223,7 +232,29 @@ def _hourly_counts(db: Session, model, ts_column, hours: int = 24) -> List[Hourl
             sa_func.date_trunc("hour", ts_column).label("h"),
             sa_func.count().label("c"),
         )
-        .filter(ts_column >= cutoff)
+        .select_from(model)
+        .filter(ts_column >= cutoff, *extra_filters)
+        .group_by("h")
+        .order_by("h")
+        .all()
+    )
+    return [HourlyStat(hour=r.h.isoformat(), count=r.c) for r in rows]
+
+
+def _hourly_counts_comments_active(db: Session, hours: int = 24) -> List[HourlyStat]:
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    rows = (
+        db.query(
+            sa_func.date_trunc("hour", PostComment.analyzed_at).label("h"),
+            sa_func.count().label("c"),
+        )
+        .select_from(PostComment)
+        .join(SearchResult, PostComment.search_result_id == SearchResult.id)
+        .filter(
+            _SR_ACTIVE,
+            _PC_ACTIVE,
+            PostComment.analyzed_at >= cutoff,
+        )
         .group_by("h")
         .order_by("h")
         .all()
@@ -236,80 +267,84 @@ async def job_stats(db: Session = Depends(get_db)):
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # -- Scraper --
-    scraper_total = db.query(sa_func.count(SearchResult.id)).scalar() or 0
+    # -- Scraper (non-archived only) --
+    scraper_total = (
+        db.query(sa_func.count(SearchResult.id)).filter(_SR_ACTIVE).scalar() or 0
+    )
     scraper_today = (
         db.query(sa_func.count(SearchResult.id))
-        .filter(SearchResult.scraped_at >= today_start)
+        .filter(_SR_ACTIVE, SearchResult.scraped_at >= today_start)
         .scalar() or 0
     )
-    scraper_hourly = _hourly_counts(db, SearchResult, SearchResult.scraped_at)
+    scraper_hourly = _hourly_counts(
+        db, SearchResult, SearchResult.scraped_at, extra_filters=(_SR_ACTIVE,)
+    )
 
     # -- Post analyzer --
     post_analyze_done = (
         db.query(sa_func.count(SearchResult.id))
-        .filter(SearchResult.analyzed_at.isnot(None))
+        .filter(_SR_ACTIVE, SearchResult.analyzed_at.isnot(None))
         .scalar() or 0
     )
     post_analyze_pending = (
         db.query(sa_func.count(SearchResult.id))
-        .filter(SearchResult.analyzed_at.is_(None))
+        .filter(_SR_ACTIVE, SearchResult.analyzed_at.is_(None))
         .scalar() or 0
     )
     post_analyze_customer = (
         db.query(sa_func.count(SearchResult.id))
-        .filter(SearchResult.user_type == UserType.CUSTOMER)
+        .filter(_SR_ACTIVE, SearchResult.user_type == UserType.CUSTOMER)
         .scalar() or 0
     )
     post_analyze_tutor = (
         db.query(sa_func.count(SearchResult.id))
-        .filter(SearchResult.user_type == UserType.TUTOR)
+        .filter(_SR_ACTIVE, SearchResult.user_type == UserType.TUTOR)
         .scalar() or 0
     )
     post_analyze_unknown = (
         db.query(sa_func.count(SearchResult.id))
-        .filter(SearchResult.user_type == UserType.UNKNOWN)
+        .filter(_SR_ACTIVE, SearchResult.user_type == UserType.UNKNOWN)
         .scalar() or 0
     )
-    post_analyze_hourly = _hourly_counts(db, SearchResult, SearchResult.analyzed_at)
+    post_analyze_hourly = _hourly_counts(
+        db, SearchResult, SearchResult.analyzed_at, extra_filters=(_SR_ACTIVE,)
+    )
 
-    # -- Comment analyzer --
+    # -- Comment analyzer (active posts + active comments) --
+    def _comment_count_q():
+        return (
+            db.query(sa_func.count(PostComment.id))
+            .join(SearchResult, PostComment.search_result_id == SearchResult.id)
+            .filter(_SR_ACTIVE, _PC_ACTIVE)
+        )
+
     comment_analyze_done = (
-        db.query(sa_func.count(PostComment.id))
-        .filter(PostComment.analyzed_at.isnot(None))
-        .scalar() or 0
+        _comment_count_q().filter(PostComment.analyzed_at.isnot(None)).scalar() or 0
     )
     comment_analyze_pending = (
-        db.query(sa_func.count(PostComment.id))
-        .filter(PostComment.analyzed_at.is_(None))
-        .scalar() or 0
+        _comment_count_q().filter(PostComment.analyzed_at.is_(None)).scalar() or 0
     )
     comment_analyze_customer = (
-        db.query(sa_func.count(PostComment.id))
-        .filter(PostComment.user_type == UserType.CUSTOMER)
-        .scalar() or 0
+        _comment_count_q().filter(PostComment.user_type == UserType.CUSTOMER).scalar() or 0
     )
     comment_analyze_tutor = (
-        db.query(sa_func.count(PostComment.id))
-        .filter(PostComment.user_type == UserType.TUTOR)
-        .scalar() or 0
+        _comment_count_q().filter(PostComment.user_type == UserType.TUTOR).scalar() or 0
     )
     comment_analyze_unknown = (
-        db.query(sa_func.count(PostComment.id))
-        .filter(PostComment.user_type == UserType.UNKNOWN)
-        .scalar() or 0
+        _comment_count_q().filter(PostComment.user_type == UserType.UNKNOWN).scalar() or 0
     )
-    comment_analyze_hourly = _hourly_counts(db, PostComment, PostComment.analyzed_at)
+    comment_analyze_hourly = _hourly_counts_comments_active(db)
 
     # -- Enrichment --
     enrich_done = (
         db.query(sa_func.count(SearchResult.id))
-        .filter(SearchResult.enriched_at.isnot(None))
+        .filter(_SR_ACTIVE, SearchResult.enriched_at.isnot(None))
         .scalar() or 0
     )
     enrich_pending = (
         db.query(sa_func.count(SearchResult.id))
         .filter(
+            _SR_ACTIVE,
             SearchResult.analyzed_at.isnot(None),
             SearchResult.enriched_at.is_(None),
             SearchResult.enrichable == True,  # noqa: E712
@@ -319,31 +354,36 @@ async def job_stats(db: Session = Depends(get_db)):
     enrich_not_enrichable = (
         db.query(sa_func.count(SearchResult.id))
         .filter(
+            _SR_ACTIVE,
             SearchResult.analyzed_at.isnot(None),
             SearchResult.enriched_at.is_(None),
             SearchResult.enrichable == False,  # noqa: E712
         )
         .scalar() or 0
     )
-    enrich_hourly = _hourly_counts(db, SearchResult, SearchResult.enriched_at)
+    enrich_hourly = _hourly_counts(
+        db, SearchResult, SearchResult.enriched_at, extra_filters=(_SR_ACTIVE,)
+    )
 
     # -- Geo-filter --
     geo_filter_us = (
         db.query(sa_func.count(SearchResult.id))
-        .filter(SearchResult.is_us == True)  # noqa: E712
+        .filter(_SR_ACTIVE, SearchResult.is_us == True)  # noqa: E712
         .scalar() or 0
     )
     geo_filter_non_us = (
         db.query(sa_func.count(SearchResult.id))
-        .filter(SearchResult.is_us == False)  # noqa: E712
+        .filter(_SR_ACTIVE, SearchResult.is_us == False)  # noqa: E712
         .scalar() or 0
     )
     geo_filter_pending = (
         db.query(sa_func.count(SearchResult.id))
-        .filter(SearchResult.geo_filtered_at.is_(None))
+        .filter(_SR_ACTIVE, SearchResult.geo_filtered_at.is_(None))
         .scalar() or 0
     )
-    geo_filter_hourly = _hourly_counts(db, SearchResult, SearchResult.geo_filtered_at)
+    geo_filter_hourly = _hourly_counts(
+        db, SearchResult, SearchResult.geo_filtered_at, extra_filters=(_SR_ACTIVE,)
+    )
 
     return JobStats(
         scraper_total=scraper_total,

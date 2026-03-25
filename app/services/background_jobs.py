@@ -285,9 +285,13 @@ def get_enrich_queue() -> dict:
                     uuids.append(uuid.UUID(i))
                 except (ValueError, TypeError, AttributeError):
                     pass
-            rows = db.query(SearchResult.id, SearchResult.name, SearchResult.location).filter(
-                SearchResult.id.in_(uuids)
-            ).all() if uuids else []
+            rows = (
+                db.query(SearchResult.id, SearchResult.name, SearchResult.location)
+                .filter(SearchResult.id.in_(uuids), SearchResult.archived.is_(False))
+                .all()
+                if uuids
+                else []
+            )
             id_to_row = {str(row.id): {"fullname": row.name or "—", "location": row.location or "—"} for row in rows}
             pending_items = [
                 {"id": i, "fullname": id_to_row.get(i, {}).get("fullname", "—"), "location": id_to_row.get(i, {}).get("location", "—")}
@@ -306,11 +310,16 @@ def get_enrich_not_enrichable_count() -> int:
     try:
         db = SessionLocal()
         try:
-            return db.query(SearchResult.id).filter(
-                SearchResult.analyzed_at.isnot(None),
-                SearchResult.enriched_at.is_(None),
-                SearchResult.enrichable == False,  # noqa: E712
-            ).count()
+            return (
+                db.query(SearchResult.id)
+                .filter(
+                    SearchResult.archived.is_(False),
+                    SearchResult.analyzed_at.isnot(None),
+                    SearchResult.enriched_at.is_(None),
+                    SearchResult.enrichable == False,  # noqa: E712
+                )
+                .count()
+            )
         finally:
             db.close()
     except Exception as exc:
@@ -393,7 +402,11 @@ async def _auto_analyze_results(db, result_ids: list) -> int:
 
     analyzed = 0
     for rid in result_ids:
-        result = db.query(SearchResult).filter(SearchResult.id == rid).first()
+        result = (
+            db.query(SearchResult)
+            .filter(SearchResult.id == rid, SearchResult.archived.is_(False))
+            .first()
+        )
         if not result or result.user_type is not None:
             continue
 
@@ -442,7 +455,14 @@ async def _auto_analyze_results(db, result_ids: list) -> int:
             analyzed += 1
 
             if result.user_type == UserType.CUSTOMER:
-                deleted = db.query(PostComment).filter(PostComment.search_result_id == result.id).delete()
+                deleted = (
+                    db.query(PostComment)
+                    .filter(
+                        PostComment.search_result_id == result.id,
+                        PostComment.archived.is_(False),
+                    )
+                    .delete()
+                )
                 if deleted:
                     logger.info("Deleted %d tutor comments from CUSTOMER post %s", deleted, rid)
 
@@ -630,7 +650,11 @@ async def _auto_enrich_results(db, result_ids: list) -> int:
         logger.warning("Auto-enrich skipped — EnformionGO not configured: %s", exc)
         return 0
 
-    results = db.query(SearchResult).filter(SearchResult.id.in_(result_ids)).all()
+    results = (
+        db.query(SearchResult)
+        .filter(SearchResult.id.in_(result_ids), SearchResult.archived.is_(False))
+        .all()
+    )
     pending = [r for r in results if r.enriched_at is None and r.enrichable]
     if not pending:
         return 0
@@ -638,7 +662,10 @@ async def _auto_enrich_results(db, result_ids: list) -> int:
     # Phase 1: one query to build a name→donor map from all already-enriched records
     enriched_donors = (
         db.query(SearchResult)
-        .filter(SearchResult.enriched_at.isnot(None))
+        .filter(
+            SearchResult.archived.is_(False),
+            SearchResult.enriched_at.isnot(None),
+        )
         .all()
     )
     donor_map: dict = {}
@@ -708,7 +735,12 @@ async def _auto_analyze_comments(db, batch_size: int = 50) -> int:
 
     comments = (
         db.query(PostComment)
-        .filter(PostComment.analyzed_at.is_(None))
+        .join(SearchResult, PostComment.search_result_id == SearchResult.id)
+        .filter(
+            SearchResult.archived.is_(False),
+            PostComment.archived.is_(False),
+            PostComment.analyzed_at.is_(None),
+        )
         .limit(batch_size)
         .all()
     )
@@ -720,7 +752,9 @@ async def _auto_analyze_comments(db, batch_size: int = 50) -> int:
     result_ids = list({c.search_result_id for c in comments})
     parents = {
         r.id: r
-        for r in db.query(SearchResult).filter(SearchResult.id.in_(result_ids)).all()
+        for r in db.query(SearchResult)
+        .filter(SearchResult.id.in_(result_ids), SearchResult.archived.is_(False))
+        .all()
     }
 
     analyzed = 0
@@ -829,7 +863,10 @@ async def _auto_geo_filter_batch(db, batch_size: int = 50) -> dict:
 
     results = (
         db.query(SearchResult)
-        .filter(SearchResult.geo_filtered_at.is_(None))
+        .filter(
+            SearchResult.archived.is_(False),
+            SearchResult.geo_filtered_at.is_(None),
+        )
         .limit(batch_size)
         .all()
     )
@@ -877,7 +914,14 @@ async def run_scheduled_geo_filter():
     try:
         db = SessionLocal()
         try:
-            pending = db.query(SearchResult).filter(SearchResult.geo_filtered_at.is_(None)).count()
+            pending = (
+                db.query(SearchResult)
+                .filter(
+                    SearchResult.archived.is_(False),
+                    SearchResult.geo_filtered_at.is_(None),
+                )
+                .count()
+            )
             logger.info("Geo-filter: %d un-filtered results in DB", pending)
             if pending == 0:
                 return
@@ -899,6 +943,7 @@ async def run_scheduled_geo_filter():
                 deleted = (
                     db.query(SearchResult)
                     .filter(
+                        SearchResult.archived.is_(False),
                         SearchResult.is_us == False,  # noqa: E712
                         SearchResult.geo_filtered_at.isnot(None),
                     )
@@ -1281,7 +1326,14 @@ async def run_scheduled_analyze_enrich():
         try:
             if not settings.AUTO_ANALYZE_AFTER_SCRAPE:
                 return
-            unanalyzed = db.query(SearchResult.id).filter(SearchResult.analyzed_at.is_(None)).all()
+            unanalyzed = (
+                db.query(SearchResult.id)
+                .filter(
+                    SearchResult.archived.is_(False),
+                    SearchResult.analyzed_at.is_(None),
+                )
+                .all()
+            )
             to_push = [r.id for r in unanalyzed]
             if not to_push:
                 logger.info("Scheduled analyze feeder: no un-analyzed entries in DB")
@@ -1314,6 +1366,7 @@ async def run_scheduled_enrich():
                 return
 
             unchecked = db.query(SearchResult).filter(
+                SearchResult.archived.is_(False),
                 SearchResult.analyzed_at.isnot(None),
                 SearchResult.enrichable.is_(None),
             ).all()
@@ -1324,6 +1377,7 @@ async def run_scheduled_enrich():
                 logger.info("Enrich feeder: evaluated %d records with NULL enrichable flag", len(unchecked))
 
             enrichable_ids = db.query(SearchResult.id).filter(
+                SearchResult.archived.is_(False),
                 SearchResult.analyzed_at.isnot(None),
                 SearchResult.enrichable == True,  # noqa: E712
                 SearchResult.enriched_at.is_(None),

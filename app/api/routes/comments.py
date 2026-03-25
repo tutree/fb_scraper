@@ -21,6 +21,9 @@ from ...services.gemini_classifier import GeminiClassifier
 
 router = APIRouter(prefix="/comments", tags=["comments"])
 
+_NOT_ARCHIVED_RESULT = SearchResult.archived.is_(False)
+_NOT_ARCHIVED_COMMENT = PostComment.archived.is_(False)
+
 
 def _format_comment_item(
     comment: PostComment,
@@ -88,7 +91,11 @@ async def list_comments(
     db: Session = Depends(get_db),
 ):
     """List all comments with pagination and optional filters."""
-    query = db.query(PostComment)
+    query = (
+        db.query(PostComment)
+        .join(SearchResult, PostComment.search_result_id == SearchResult.id)
+        .filter(_NOT_ARCHIVED_RESULT, _NOT_ARCHIVED_COMMENT)
+    )
     if user_type:
         query = query.filter(cast(PostComment.user_type, String) == user_type)
     if search_result_id:
@@ -113,7 +120,16 @@ async def list_comments(
 @router.get("/{comment_id}", response_model=PostCommentResponse)
 async def get_comment(comment_id: UUID, db: Session = Depends(get_db)):
     """Get a single comment by ID."""
-    comment = db.query(PostComment).filter(PostComment.id == comment_id).first()
+    comment = (
+        db.query(PostComment)
+        .join(SearchResult, PostComment.search_result_id == SearchResult.id)
+        .filter(
+            PostComment.id == comment_id,
+            _NOT_ARCHIVED_RESULT,
+            _NOT_ARCHIVED_COMMENT,
+        )
+        .first()
+    )
     if not comment:
         raise HTTPException(status_code=404, detail="Comment not found")
     return PostCommentResponse.model_validate(comment)
@@ -126,7 +142,16 @@ async def update_comment(
     db: Session = Depends(get_db),
 ):
     """Update a comment (any editable field)."""
-    comment = db.query(PostComment).filter(PostComment.id == comment_id).first()
+    comment = (
+        db.query(PostComment)
+        .join(SearchResult, PostComment.search_result_id == SearchResult.id)
+        .filter(
+            PostComment.id == comment_id,
+            _NOT_ARCHIVED_RESULT,
+            _NOT_ARCHIVED_COMMENT,
+        )
+        .first()
+    )
     if not comment:
         raise HTTPException(status_code=404, detail="Comment not found")
 
@@ -153,7 +178,16 @@ async def analyze_single_comment(
     db: Session = Depends(get_db),
 ):
     """Analyze a single comment author with Gemini and persist classification."""
-    comment = db.query(PostComment).filter(PostComment.id == comment_id).first()
+    comment = (
+        db.query(PostComment)
+        .join(SearchResult, PostComment.search_result_id == SearchResult.id)
+        .filter(
+            PostComment.id == comment_id,
+            _NOT_ARCHIVED_RESULT,
+            _NOT_ARCHIVED_COMMENT,
+        )
+        .first()
+    )
     if not comment:
         raise HTTPException(status_code=404, detail="Comment not found")
 
@@ -162,7 +196,7 @@ async def analyze_single_comment(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    post = db.query(SearchResult).filter(SearchResult.id == comment.search_result_id).first()
+    post = db.query(SearchResult).filter(SearchResult.id == comment.search_result_id, _NOT_ARCHIVED_RESULT).first()
     post_context = post.post_content if post and post.post_content else ""
     search_keyword = post.search_keyword if post and post.search_keyword else ""
 
@@ -200,13 +234,20 @@ async def analyze_batch_comments(
     comment_map = {
         item.id: item
         for item in db.query(PostComment)
-        .filter(PostComment.id.in_(request.comment_ids))
+        .join(SearchResult, PostComment.search_result_id == SearchResult.id)
+        .filter(
+            PostComment.id.in_(request.comment_ids),
+            _NOT_ARCHIVED_RESULT,
+            _NOT_ARCHIVED_COMMENT,
+        )
         .all()
     }
     search_result_ids = {c.search_result_id for c in comment_map.values()}
     result_map = {
         r.id: r
-        for r in db.query(SearchResult).filter(SearchResult.id.in_(search_result_ids)).all()
+        for r in db.query(SearchResult)
+        .filter(SearchResult.id.in_(search_result_ids), _NOT_ARCHIVED_RESULT)
+        .all()
     }
 
     items: List[AnalyzeCommentItem] = []

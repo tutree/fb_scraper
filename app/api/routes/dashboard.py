@@ -8,41 +8,52 @@ from ...models.search_result import SearchResult, ResultStatus, UserType
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
 
+_NOT_ARCHIVED = SearchResult.archived.is_(False)
+
+
 @router.get("/stats")
 async def get_stats(db: Session = Depends(get_db)):
-    """Get dashboard statistics."""
-    total = db.query(SearchResult).count()
-    
+    """Get dashboard statistics (non-archived leads only)."""
+    total = db.query(SearchResult).filter(_NOT_ARCHIVED).count()
+
     customers = db.query(SearchResult).filter(
-        cast(SearchResult.user_type, String) == "customer"
+        _NOT_ARCHIVED,
+        cast(SearchResult.user_type, String) == "customer",
     ).count()
-    
+
     tutors = db.query(SearchResult).filter(
-        cast(SearchResult.user_type, String) == "tutor"
+        _NOT_ARCHIVED,
+        cast(SearchResult.user_type, String) == "tutor",
     ).count()
-    
+
     unknown = db.query(SearchResult).filter(
-        cast(SearchResult.user_type, String) == "unknown"
+        _NOT_ARCHIVED,
+        cast(SearchResult.user_type, String) == "unknown",
     ).count()
-    
+
     not_analyzed = db.query(SearchResult).filter(
-        SearchResult.user_type.is_(None)
+        _NOT_ARCHIVED,
+        SearchResult.user_type.is_(None),
     ).count()
-    
+
     pending = db.query(SearchResult).filter(
-        SearchResult.status == ResultStatus.PENDING
+        _NOT_ARCHIVED,
+        SearchResult.status == ResultStatus.PENDING,
     ).count()
-    
+
     contacted = db.query(SearchResult).filter(
-        SearchResult.status == ResultStatus.CONTACTED
+        _NOT_ARCHIVED,
+        SearchResult.status == ResultStatus.CONTACTED,
     ).count()
-    
+
     not_interested = db.query(SearchResult).filter(
-        SearchResult.status == ResultStatus.NOT_INTERESTED
+        _NOT_ARCHIVED,
+        SearchResult.status == ResultStatus.NOT_INTERESTED,
     ).count()
-    
+
     invalid = db.query(SearchResult).filter(
-        SearchResult.status == ResultStatus.INVALID
+        _NOT_ARCHIVED,
+        SearchResult.status == ResultStatus.INVALID,
     ).count()
     
     return {

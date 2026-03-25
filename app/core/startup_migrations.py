@@ -64,6 +64,14 @@ def run_startup_migrations() -> None:
             "search_results.geo_filtered_at",
             "ALTER TABLE search_results ADD COLUMN IF NOT EXISTS geo_filtered_at TIMESTAMP WITH TIME ZONE NULL;",
         ),
+        (
+            "search_results.archived",
+            "ALTER TABLE search_results ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT false;",
+        ),
+        (
+            "post_comments.archived",
+            "ALTER TABLE post_comments ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT false;",
+        ),
     ]
 
     try:

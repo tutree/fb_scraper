@@ -113,20 +113,46 @@ async def process_single_profile(
             await asyncio.sleep(random.uniform(2, 4))
 
         # -- Name extraction --
-        name_selector = (
-            "div.x1i10hfl.x1qjc9v5.xjbqb8w.xjqpnuy.xc5r6h4.xqeqjp1.x1phubyo"
-            ".x13fuv20.x18b5jzi.x1q0q8m5.x1t7ytsu.x972fbf.x10w94by.x1qhh985"
-            ".x14e42zd.x9f619.x1ypdohk.xdl72j9.x2lah0s.x3ct3a4.xdj266r.x14z9mp"
-            ".xat24cr.x1lziwak.x2lwn1j.xeuugli.xexx8yu.xyri2b.x18d9i69.x1c1uobl"
-            ".x1n2onr6.x16tdsg8.x1hl2dhg.xggy1nq.x1ja2u2z.x1t137rt.x1fmog5m"
-            ".xu25z0z.x140muxe.xo1y3bh.x3nfvp2.x1q0g3np.x87ps6o.x1lku1pv.x1a2a7pz"
+        # Prefer semantic container used in search results/profile cards:
+        # div[data-ad-rendering-role="profile_name"].
+        actual_name = await page.evaluate(
+            """
+            () => {
+                const clean = (s) => (s || '').replace(/\\u00a0/g, ' ').replace(/\\s+/g, ' ').trim();
+                const badExact = new Set([
+                    'Follow', 'Add friend', 'Add Friend', 'Message', 'See options'
+                ]);
+
+                const normalizeCandidate = (text) => {
+                    const t = clean(text);
+                    if (!t || badExact.has(t)) return null;
+                    // Filter common UI/action fragments that can leak from broad innerText grabs.
+                    if (/^(Follow|Add friend|Add Friend|Message|See options)$/i.test(t)) return null;
+                    return t;
+                };
+
+                const profileNameRoot = document.querySelector('div[data-ad-rendering-role="profile_name"]');
+                if (profileNameRoot) {
+                    // Best signal: first link text inside profile_name block.
+                    const link = profileNameRoot.querySelector('a[href*="facebook.com"]');
+                    const linkText = normalizeCandidate(link?.textContent);
+                    if (linkText) return linkText;
+
+                    // Fallback within same block.
+                    const h3 = profileNameRoot.querySelector('h3');
+                    const h3Text = normalizeCandidate(h3?.textContent);
+                    if (h3Text) return h3Text.split(' · ')[0].trim();
+                }
+
+                // Broader fallback: first heading-like element on profile.
+                const heading = document.querySelector('h1, h2, h3');
+                const headingText = normalizeCandidate(heading?.textContent);
+                if (headingText) return headingText.split(' · ')[0].trim();
+
+                return null;
+            }
+            """
         )
-        name_element = await page.query_selector(name_selector)
-        actual_name = None
-        if name_element:
-            raw = await name_element.inner_text()
-            if raw:
-                actual_name = raw.replace("\xa0", " ").strip()
 
         if actual_name and actual_name.strip():
             final_name = actual_name
@@ -239,7 +265,14 @@ async def process_single_profile(
 
             try:
                 if post_url:
-                    existing = db.query(SearchResult).filter(SearchResult.post_url == post_url).first()
+                    existing = (
+                        db.query(SearchResult)
+                        .filter(
+                            SearchResult.post_url == post_url,
+                            SearchResult.archived.is_(False),
+                        )
+                        .first()
+                    )
                     if existing:
                         _update_existing_result(
                             existing, final_name, location_text, post_content,
@@ -266,7 +299,14 @@ async def process_single_profile(
                 except IntegrityError:
                     db.rollback()
                     if post_url:
-                        existing = db.query(SearchResult).filter(SearchResult.post_url == post_url).first()
+                        existing = (
+                            db.query(SearchResult)
+                            .filter(
+                                SearchResult.post_url == post_url,
+                                SearchResult.archived.is_(False),
+                            )
+                            .first()
+                        )
                         if existing:
                             _update_existing_result(
                                 existing, final_name, location_text, post_content,
@@ -347,7 +387,14 @@ async def process_single_profile(
         else:
             logger.info("  Not a personal profile (group/page) — skipping")
             if post_url:
-                existing = db.query(SearchResult).filter(SearchResult.post_url == post_url).first()
+                existing = (
+                    db.query(SearchResult)
+                    .filter(
+                        SearchResult.post_url == post_url,
+                        SearchResult.archived.is_(False),
+                    )
+                    .first()
+                )
                 if existing:
                     logger.info(f"  Duplicate post_url for non-personal — skipping (ID: {existing.id})")
                     await page.close()

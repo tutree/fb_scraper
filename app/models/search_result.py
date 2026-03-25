@@ -58,6 +58,9 @@ class SearchResult(Base):
     scraped_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
+    # Soft-delete for duplicate cleanup: hidden from API and dashboard stats
+    archived = Column(Boolean, nullable=False, default=False, server_default="false")
+
     # Relationship to comments
     comments = relationship("PostComment", back_populates="search_result", cascade="all, delete-orphan")
 

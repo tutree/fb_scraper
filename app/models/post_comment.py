@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, Text, ForeignKey, Index, Enum, Float
+from sqlalchemy import Column, String, DateTime, Text, ForeignKey, Index, Enum, Float, Boolean
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -25,6 +25,8 @@ class PostComment(Base):
     analyzed_at = Column(DateTime(timezone=True), nullable=True)
     
     scraped_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    archived = Column(Boolean, nullable=False, default=False, server_default="false")
 
     # Relationship back to search result
     search_result = relationship("SearchResult", back_populates="comments")

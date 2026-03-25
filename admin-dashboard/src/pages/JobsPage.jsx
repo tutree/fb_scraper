@@ -113,6 +113,8 @@ export default function JobsPage() {
   const [recentProcessed, setRecentProcessed] = useState([])
   const [recentLoading, setRecentLoading] = useState(false)
   const [jobStats, setJobStats] = useState(null)
+  const [duplicateModalOpen, setDuplicateModalOpen] = useState(false)
+  const [duplicateArchiving, setDuplicateArchiving] = useState(false)
 
   const fetchAll = async () => {
     try {
@@ -177,6 +179,33 @@ export default function JobsPage() {
       setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to trigger') })
     }
   }
+
+  const confirmArchiveDuplicates = async () => {
+    setDuplicateArchiving(true)
+    setFeedback(null)
+    try {
+      const res = await api.post('/results/archive-duplicates')
+      setDuplicateModalOpen(false)
+      setFeedback({
+        type: 'success',
+        text: res?.data?.message || 'Duplicate cleanup completed.',
+      })
+      setTimeout(fetchAll, 1000)
+    } catch (err) {
+      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to remove duplicates') })
+    } finally {
+      setDuplicateArchiving(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!duplicateModalOpen) return
+    const onKey = (e) => {
+      if (e.key === 'Escape' && !duplicateArchiving) setDuplicateModalOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [duplicateModalOpen, duplicateArchiving])
 
   const stopJob = async (job) => {
     setFeedback(null)
@@ -532,6 +561,64 @@ export default function JobsPage() {
           </button>
         </div>
       </section>
+
+      <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+        <h3 className="text-sm font-bold text-slate-900">Data maintenance</h3>
+        <p className="mt-1 text-sm text-slate-600">
+          Remove duplicate entries from the database. Keeps one result per person name + location and archives older duplicates (including comments).
+        </p>
+        <div className="mt-4">
+          <button
+            type="button"
+            onClick={() => setDuplicateModalOpen(true)}
+            disabled={updating || duplicateArchiving}
+            className="rounded-lg bg-rose-600 px-4 py-2 text-sm font-medium text-white hover:bg-rose-700 disabled:cursor-not-allowed disabled:bg-slate-400"
+          >
+            Remove Duplicates
+          </button>
+        </div>
+      </section>
+
+      {duplicateModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
+          role="presentation"
+            onClick={() => !duplicateArchiving && setDuplicateModalOpen(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="duplicate-modal-title"
+            className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id="duplicate-modal-title" className="text-lg font-bold text-slate-900">
+              Remove duplicate entries?
+            </h3>
+            <p className="mt-3 text-sm text-slate-600">
+              This keeps one row per person name + location (earliest scrape wins) and archives the extra rows and their comments. Archived leads no longer appear in the dashboard.
+            </p>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                disabled={duplicateArchiving}
+                onClick={() => setDuplicateModalOpen(false)}
+                className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={duplicateArchiving}
+                onClick={confirmArchiveDuplicates}
+                className="rounded-lg bg-rose-600 px-4 py-2 text-sm font-medium text-white hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {duplicateArchiving ? 'Working…' : 'Archive duplicates'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Job History */}
       <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">

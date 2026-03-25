@@ -34,6 +34,8 @@ from ...utils.validators import clean_facebook_location, clean_facebook_name, pa
 
 router = APIRouter(prefix="/results", tags=["results"])
 
+_NOT_ARCHIVED = SearchResult.archived.is_(False)
+
 
 def _format_analyze_item(
     result: SearchResult,
@@ -148,8 +150,8 @@ async def get_results(
     db: Session = Depends(get_db),
 ):
     """Get search results with filters."""
-    query = db.query(SearchResult)
-    
+    query = db.query(SearchResult).filter(_NOT_ARCHIVED)
+
     if status:
         query = query.filter(SearchResult.status == status)
     if keyword:
@@ -202,23 +204,33 @@ async def get_recent_processed(
     """Last processed entries for Jobs page: scraped, analyzed, or enriched."""
     process_type = (process_type or "scraped").strip().lower()
     if process_type == "scraped":
-        query = db.query(SearchResult).order_by(SearchResult.scraped_at.desc().nullslast()).limit(limit)
+        query = (
+            db.query(SearchResult)
+            .filter(_NOT_ARCHIVED)
+            .order_by(SearchResult.scraped_at.desc().nullslast())
+            .limit(limit)
+        )
     elif process_type == "analyzed":
         query = (
             db.query(SearchResult)
-            .filter(SearchResult.analyzed_at.isnot(None))
+            .filter(_NOT_ARCHIVED, SearchResult.analyzed_at.isnot(None))
             .order_by(SearchResult.analyzed_at.desc())
             .limit(limit)
         )
     elif process_type == "enriched":
         query = (
             db.query(SearchResult)
-            .filter(SearchResult.enriched_at.isnot(None))
+            .filter(_NOT_ARCHIVED, SearchResult.enriched_at.isnot(None))
             .order_by(SearchResult.enriched_at.desc())
             .limit(limit)
         )
     else:
-        query = db.query(SearchResult).order_by(SearchResult.scraped_at.desc().nullslast()).limit(limit)
+        query = (
+            db.query(SearchResult)
+            .filter(_NOT_ARCHIVED)
+            .order_by(SearchResult.scraped_at.desc().nullslast())
+            .limit(limit)
+        )
     results = query.all()
     return [
         RecentProcessedItem(
@@ -243,6 +255,7 @@ async def export_enriched_xlsx(db: Session = Depends(get_db)):
     rows = (
         db.query(SearchResult)
         .filter(
+            _NOT_ARCHIVED,
             SearchResult.enriched_at.isnot(None),
             SearchResult.enriched_phones.isnot(None),
             SearchResult.location.isnot(None),
@@ -346,10 +359,18 @@ async def export_enriched_xlsx(db: Session = Depends(get_db)):
 @router.get("/{result_id}/comments", response_model=List[PostCommentResponse])
 async def get_result_comments(result_id: str, db: Session = Depends(get_db)):
     """Get comments for a specific search result."""
-    result = db.query(SearchResult).filter(SearchResult.id == result_id).first()
+    result = db.query(SearchResult).filter(SearchResult.id == result_id, _NOT_ARCHIVED).first()
     if not result:
         raise HTTPException(status_code=404, detail="Result not found")
-    comments = db.query(PostComment).filter(PostComment.search_result_id == result_id).order_by(PostComment.scraped_at.desc()).all()
+    comments = (
+        db.query(PostComment)
+        .filter(
+            PostComment.search_result_id == result_id,
+            PostComment.archived.is_(False),
+        )
+        .order_by(PostComment.scraped_at.desc())
+        .all()
+    )
     return [PostCommentResponse.model_validate(c) for c in comments]
 
 
@@ -358,7 +379,7 @@ async def get_result(result_id: str, db: Session = Depends(get_db)):
     """Get a specific search result."""
     result = (
         db.query(SearchResult)
-        .filter(SearchResult.id == result_id)
+        .filter(SearchResult.id == result_id, _NOT_ARCHIVED)
         .first()
     )
     if not result:
@@ -375,7 +396,7 @@ async def update_result(
     """Update a search result (any editable field)."""
     result = (
         db.query(SearchResult)
-        .filter(SearchResult.id == result_id)
+        .filter(SearchResult.id == result_id, _NOT_ARCHIVED)
         .first()
     )
     if not result:
@@ -411,7 +432,7 @@ async def analyze_single_result(
     db: Session = Depends(get_db),
 ):
     """Analyze a single result using Gemini and persist the classification."""
-    result = db.query(SearchResult).filter(SearchResult.id == result_id).first()
+    result = db.query(SearchResult).filter(SearchResult.id == result_id, _NOT_ARCHIVED).first()
     if not result:
         raise HTTPException(status_code=404, detail="Result not found")
 
@@ -457,7 +478,7 @@ async def analyze_batch_results(
     result_map = {
         item.id: item
         for item in db.query(SearchResult)
-        .filter(SearchResult.id.in_(request.result_ids))
+        .filter(SearchResult.id.in_(request.result_ids), _NOT_ARCHIVED)
         .all()
     }
 
@@ -522,6 +543,69 @@ from pydantic import BaseModel
 
 class BulkDeleteRequest(BaseModel):
     ids: List[str]
+
+
+class ArchiveDuplicatesResponse(BaseModel):
+    archived_results: int
+    archived_comments: int
+    message: str
+
+
+@router.post("/archive-duplicates", response_model=ArchiveDuplicatesResponse)
+async def archive_duplicate_results(db: Session = Depends(get_db)):
+    """
+    Mark duplicate search_results as archived (by trimmed name + normalized location).
+    NULL or blank location is treated as empty string, so duplicates with no location
+    still match. Keeps the earliest row per pair (by scraped_at, then id). Archives
+    linked comments. Archived rows are never returned by the API.
+    """
+    from sqlalchemy import text
+
+    dup_sql = """
+        SELECT id FROM (
+            SELECT id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY TRIM(name), TRIM(COALESCE(location, ''))
+                    ORDER BY scraped_at ASC NULLS LAST, id
+                ) AS rn
+            FROM search_results
+            WHERE archived = false
+              AND name IS NOT NULL AND TRIM(name) != ''
+        ) t WHERE rn > 1
+    """
+    try:
+        ids_rows = db.execute(text(dup_sql)).fetchall()
+        dup_ids = [row[0] for row in ids_rows]
+        if not dup_ids:
+            return ArchiveDuplicatesResponse(
+                archived_results=0,
+                archived_comments=0,
+                message="No duplicate name+location pairs to archive.",
+            )
+
+        n_comments = (
+            db.query(PostComment)
+            .filter(
+                PostComment.search_result_id.in_(dup_ids),
+                PostComment.archived.is_(False),
+            )
+            .update({PostComment.archived: True}, synchronize_session=False)
+        )
+        n_results = (
+            db.query(SearchResult)
+            .filter(SearchResult.id.in_(dup_ids))
+            .update({SearchResult.archived: True}, synchronize_session=False)
+        )
+        db.commit()
+        return ArchiveDuplicatesResponse(
+            archived_results=int(n_results or 0),
+            archived_comments=int(n_comments or 0),
+            message=f"Archived {n_results} duplicate lead(s) and {n_comments} comment row(s).",
+        )
+    except Exception:
+        db.rollback()
+        raise
+
 
 @router.post("/bulk-delete")
 async def bulk_delete_results(request: BulkDeleteRequest, db: Session = Depends(get_db)):
@@ -608,7 +692,7 @@ async def enrich_single_result(
     Enrich a single result with contact data from EnformionGO.
     Requires both name and location; returns a warning if location is missing.
     """
-    result = db.query(SearchResult).filter(SearchResult.id == result_id).first()
+    result = db.query(SearchResult).filter(SearchResult.id == result_id, _NOT_ARCHIVED).first()
     if not result:
         raise HTTPException(status_code=404, detail="Result not found")
 
@@ -649,7 +733,7 @@ async def enrich_batch_results(
     result_map = {
         r.id: r
         for r in db.query(SearchResult)
-        .filter(SearchResult.id.in_(request.result_ids))
+        .filter(SearchResult.id.in_(request.result_ids), _NOT_ARCHIVED)
         .all()
     }
 
