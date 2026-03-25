@@ -115,7 +115,7 @@ async def process_single_profile(
         # -- Name extraction --
         # Prefer semantic container used in search results/profile cards:
         # div[data-ad-rendering-role="profile_name"].
-        actual_name = await page.evaluate(
+        name_pick = await page.evaluate(
             """
             () => {
                 const clean = (s) => (s || '').replace(/\\u00a0/g, ' ').replace(/\\s+/g, ' ').trim();
@@ -126,37 +126,48 @@ async def process_single_profile(
                 const normalizeCandidate = (text) => {
                     const t = clean(text);
                     if (!t || badExact.has(t)) return null;
-                    // Filter common UI/action fragments that can leak from broad innerText grabs.
                     if (/^(Follow|Add friend|Add Friend|Message|See options)$/i.test(t)) return null;
                     return t;
                 };
 
                 const profileNameRoot = document.querySelector('div[data-ad-rendering-role="profile_name"]');
                 if (profileNameRoot) {
-                    // Best signal: first link text inside profile_name block.
                     const link = profileNameRoot.querySelector('a[href*="facebook.com"]');
                     const linkText = normalizeCandidate(link?.textContent);
-                    if (linkText) return linkText;
-
-                    // Fallback within same block.
+                    if (linkText) {
+                        return { name: linkText, source: 'profile_name_link' };
+                    }
                     const h3 = profileNameRoot.querySelector('h3');
                     const h3Text = normalizeCandidate(h3?.textContent);
-                    if (h3Text) return h3Text.split(' · ')[0].trim();
+                    if (h3Text) {
+                        return { name: h3Text.split(' · ')[0].trim(), source: 'profile_name_h3' };
+                    }
                 }
 
-                // Broader fallback: first heading-like element on profile.
                 const heading = document.querySelector('h1, h2, h3');
                 const headingText = normalizeCandidate(heading?.textContent);
-                if (headingText) return headingText.split(' · ')[0].trim();
+                if (headingText) {
+                    return { name: headingText.split(' · ')[0].trim(), source: 'page_heading' };
+                }
 
-                return null;
+                return { name: null, source: null };
             }
             """
         )
 
-        if actual_name and actual_name.strip():
-            final_name = actual_name
-            logger.info(f"  Extracted name from profile: {final_name}")
+        actual_name = None
+        name_source = None
+        if isinstance(name_pick, dict):
+            actual_name = name_pick.get("name")
+            name_source = name_pick.get("source")
+
+        if actual_name and str(actual_name).strip():
+            final_name = str(actual_name).strip()
+            logger.info(
+                "  Extracted name from profile (source=%s): %s",
+                name_source or "?",
+                final_name,
+            )
         elif link_type == "group" and name and name.strip():
             final_name = name
             logger.info(f"  Using name from group post: {final_name}")
