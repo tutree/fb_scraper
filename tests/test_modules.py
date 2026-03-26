@@ -31,6 +31,7 @@ from app.services.fb_feed_scanner import (
     _link_key,
 )
 from app.services.fb_account_loader import _extract_c_user_from_cookie_json
+from app.utils.facebook_urls import profile_url_from_group_member_url
 from app.services.facebook_selectors import (
     COMMENT_TRIGGER_FROM_PAGE_JS,
     EXTRACT_DIALOG_COMMENTS_JS,
@@ -137,6 +138,16 @@ class TestGroupMemberAuthorUrl:
             "https://www.facebook.com/groups/111/user/222/"
         ) is True
         assert _is_acceptable_feed_author_url("https://www.facebook.com/jane.doe") is True
+
+
+class TestProfileUrlFromGroupMember:
+    def test_builds_profile_php_from_group_user_path(self):
+        assert profile_url_from_group_member_url(
+            "https://www.facebook.com/groups/1862904957817977/user/100022648454679/?__cft__[0]=x"
+        ) == "https://www.facebook.com/profile.php?id=100022648454679"
+
+    def test_no_match_without_user_segment(self):
+        assert profile_url_from_group_member_url("https://www.facebook.com/groups/123/") is None
 
 
 class TestLinkKey:

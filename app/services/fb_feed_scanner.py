@@ -202,17 +202,17 @@ async def enable_search_recent_posts_filter(page: Page) -> bool:
 
     try:
         await switch.scroll_into_view_if_needed(timeout=10000)
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.4)
         checked = (await switch.get_attribute("aria-checked") or "").strip().lower()
         if checked == "true":
             logger.info("Recent Posts filter already enabled (aria-checked=true)")
             return True
         await switch.click(timeout=10000, force=True)
-        await asyncio.sleep(0.75)
+        await asyncio.sleep(1.5)
         checked2 = (await switch.get_attribute("aria-checked") or "").strip().lower()
         if checked2 != "true":
             await switch.click(timeout=10000, force=True)
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.0)
             checked2 = (await switch.get_attribute("aria-checked") or "").strip().lower()
         logger.info(
             "Recent Posts filter toggled (aria-checked was %r -> %r)",
@@ -895,15 +895,25 @@ async def scroll_and_process_posts(
             }
 
             function findAuthorLink(article) {
-                const anchors = article.querySelectorAll('a[href]');
-                for (const a of anchors) {
-                    if (isProfileHref(a.href)) {
-                        return { href: a.href, text: (a.textContent || '').trim(), type: 'direct' };
+                // Group posts: two links are common — group home (/groups/id/) vs member (/groups/id/user/uid/).
+                // Prefer the member link, especially inside the profile_name header (matches real author).
+                const profileNameRoot = article.querySelector('div[data-ad-rendering-role="profile_name"]');
+                if (profileNameRoot) {
+                    for (const a of profileNameRoot.querySelectorAll('a[href]')) {
+                        if (isGroupMemberAuthorHref(a.href)) {
+                            return { href: a.href, text: (a.textContent || '').trim(), type: 'group' };
+                        }
                     }
                 }
+                const anchors = article.querySelectorAll('a[href]');
                 for (const a of anchors) {
                     if (isGroupMemberAuthorHref(a.href)) {
                         return { href: a.href, text: (a.textContent || '').trim(), type: 'group' };
+                    }
+                }
+                for (const a of anchors) {
+                    if (isProfileHref(a.href)) {
+                        return { href: a.href, text: (a.textContent || '').trim(), type: 'direct' };
                     }
                 }
                 return null;

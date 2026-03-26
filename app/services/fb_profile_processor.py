@@ -15,6 +15,7 @@ from ..core.config import settings
 from ..core.logging_config import get_logger
 from ..models.post_comment import PostComment
 from ..models.search_result import ResultStatus, SearchResult
+from ..utils.facebook_urls import profile_url_from_group_member_url
 from ..utils.validators import clean_facebook_location, clean_facebook_name, clean_facebook_post_content
 from .fb_comment_handler import extract_comments
 from .fb_post_url import canonicalize_post_url
@@ -99,14 +100,25 @@ async def process_single_profile(
             await page.goto(link_url, wait_until="domcontentloaded", timeout=90000)
             await asyncio.sleep(random.uniform(1.5, 2.5))
 
+            profile_url = None
             view_profile_link = await page.query_selector('a[aria-label="View profile"]')
-            if not view_profile_link:
-                logger.info("  'View profile' link not found, skipping")
+            if view_profile_link:
+                profile_url = await view_profile_link.get_attribute("href")
+                if profile_url:
+                    logger.info("  Found profile URL from View profile: %s", profile_url)
+            if not profile_url:
+                fallback = profile_url_from_group_member_url(link_url)
+                if fallback:
+                    logger.info(
+                        "  'View profile' not in DOM — navigating via user id from URL: %s",
+                        fallback,
+                    )
+                    profile_url = fallback
+            if not profile_url:
+                logger.info("  No profile URL (no View profile, no /user/<id> in link) — skipping")
                 await page.close()
                 return False
 
-            profile_url = await view_profile_link.get_attribute("href")
-            logger.info(f"  Found profile URL: {profile_url}")
             await page.goto(profile_url, wait_until="domcontentloaded", timeout=90000)
             await asyncio.sleep(random.uniform(1.5, 2.5))
         else:

@@ -286,14 +286,12 @@ EXTRACT_FROM_DIALOG_JS = """
 async def expand_all_comments_in_dialog(
     page: Page,
     root_selector: str = '[role="dialog"]',
-    max_cycles: int = 80,
-    stall_limit: int = 4,
+    max_cycles: int = 160,
+    stall_limit: int = 12,
 ) -> None:
     """
     Expand visible "more comments/replies" controls and wait for lazy loading.
     Stops after *stall_limit* consecutive cycles with no new comments and no expand clicks.
-    Uses a short wait after idle cycles so we exit quickly when done; longer when we clicked
-    expanders so lazy-loaded content can appear.
     """
     no_progress_cycles = 0
     best_count = 0
@@ -369,8 +367,7 @@ async def expand_all_comments_in_dialog(
             """,
             root_selector,
         )
-        # After clicking "view more", FB needs a moment to paint; when nothing to click, exit faster.
-        await asyncio.sleep(2.6 if clicked > 0 else 1.15)
+        await asyncio.sleep(7)
 
         if no_progress_cycles >= stall_limit:
             break

@@ -407,7 +407,7 @@ class FacebookScraper:
                 logger.warning(f"networkidle wait failed, trying domcontentloaded: {e}")
                 await page.goto(search_url, wait_until="domcontentloaded", timeout=120000)
 
-            wait_time = 5
+            wait_time = 10
             logger.info(f"Waiting {wait_time}s for results to load...")
             if await self._sleep_with_stop(wait_time, should_stop=should_stop):
                 logger.warning("Stop requested while waiting for results load.")
@@ -435,12 +435,12 @@ class FacebookScraper:
             try:
                 await page.wait_for_selector(
                     'blockquote.html-blockquote, div[data-ad-rendering-role="story_message"], div[role="article"]',
-                    timeout=5000,
+                    timeout=10000,
                 )
                 logger.info("Post elements found, starting extraction...")
             except Exception as e:
                 logger.warning(f"Standard selectors not found, trying anyway: {e}")
-                if await self._sleep_with_stop(5, should_stop=should_stop):
+                if await self._sleep_with_stop(10, should_stop=should_stop):
                     logger.warning("Stop requested while waiting for post detection.")
                     return 0
 
@@ -448,8 +448,8 @@ class FacebookScraper:
                 try:
                     toggled = await enable_search_recent_posts_filter(page)
                     if toggled:
-                        logger.info("Waiting 2.5s for Recent Posts results to reload...")
-                        if await self._sleep_with_stop(2.5, should_stop=should_stop):
+                        logger.info("Waiting 5s for Recent Posts results to reload...")
+                        if await self._sleep_with_stop(5, should_stop=should_stop):
                             logger.warning("Stop requested while waiting for recent posts reload.")
                             return 0
                 except Exception as filt_exc:
