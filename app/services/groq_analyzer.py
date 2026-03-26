@@ -73,8 +73,10 @@ Rules:
 - Ambiguous city name that exists in multiple countries: use post content for clues if provided
 {f'Post content (context only): {post_content[:300]}' if post_content else ''}
 
+Also: if the location or post content explicitly mentions a more specific US location (e.g. city + state), set extracted_location to that. Otherwise set extracted_location to null.
+
 Return ONLY valid JSON (no markdown):
-{{"is_us": true, "confidence": 0.95, "reason": "Location is in Texas, USA"}}"""
+{{"is_us": true, "confidence": 0.95, "reason": "Location is in Texas, USA", "extracted_location": null}}"""
 
     elif post_content.strip():
         prompt = f"""You are a language and geographic classifier. This Facebook post has NO location. Determine if it is from a US-based English-speaking user based on language and content signals.
@@ -89,8 +91,10 @@ Rules:
 - Mentions non-US currencies (PHP, INR, GBP, AED, etc.) or clearly non-US locations → is_us = false
 - Short English post with no geographic clues → is_us = true (benefit of the doubt)
 
+Also: if the post explicitly mentions a US city, state, or region (e.g. "in Austin TX", "near Dallas", "Los Angeles area"), extract it as extracted_location. Otherwise set extracted_location to null.
+
 Return ONLY valid JSON (no markdown):
-{{"is_us": true, "confidence": 0.8, "reason": "Post is in English with no non-US indicators"}}"""
+{{"is_us": true, "confidence": 0.8, "reason": "Post is in English with no non-US indicators", "extracted_location": "Austin, TX"}}"""
 
     else:
         return {"is_us": True, "confidence": 0.3, "reason": "No location or content to classify"}
@@ -101,10 +105,11 @@ Return ONLY valid JSON (no markdown):
             "is_us": bool(data.get("is_us", True)),
             "confidence": _clamp_confidence(data.get("confidence", 0.5)),
             "reason": str(data.get("reason") or ""),
+            "extracted_location": data.get("extracted_location") or None,
         }
     except Exception as exc:
         logger.warning("Geo classification (Groq) failed: %s", exc)
-        return {"is_us": True, "confidence": 0.0, "reason": f"Geo error: {exc}"}
+        return {"is_us": True, "confidence": 0.0, "reason": f"Geo error: {exc}", "extracted_location": None}
 
 
 async def _classify_post_groq(post_content: str, user_name: str) -> Dict[str, Any]:
@@ -305,6 +310,17 @@ async def apply_immediate_groq_analysis(db: Session, search_result_id: UUID) -> 
     # Mark geo as checked so the background geo-filter job skips this row
     result.is_us = True
     result.geo_filtered_at = datetime.now(timezone.utc)
+
+    # If the profile has no location but the post text reveals a US one, use it
+    extracted_loc = geo.get("extracted_location")
+    if extracted_loc and isinstance(extracted_loc, str) and extracted_loc.strip():
+        if not (result.location or "").strip():
+            result.location = extracted_loc.strip()
+            logger.info(
+                "Groq geo: extracted location from post — id=%s location=%r",
+                short_id,
+                result.location,
+            )
 
     # ── Step 2: Load comments ─────────────────────────────────────────────────
     rows = (

@@ -590,6 +590,12 @@ async def scroll_and_process_posts(
             }
 
             function extractPostContent(article) {
+                // Expand truncated post text before reading it
+                const seeMoreBtn = Array.from(
+                    article.querySelectorAll('div[role="button"], span[role="button"]')
+                ).find(el => (el.innerText || el.textContent || '').trim() === 'See more');
+                if (seeMoreBtn) seeMoreBtn.click();
+
                 const contentSelectors = [
                     'div[data-ad-rendering-role="story_message"]',
                     'div[data-ad-comet-preview="message"]',
