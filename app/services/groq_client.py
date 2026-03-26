@@ -40,6 +40,26 @@ def _strip_json_fences(text: str) -> str:
     return t
 
 
+def _parse_assistant_json(content: str) -> Dict[str, Any]:
+    """Parse model output as JSON; tolerate leading/trailing prose via JSONDecoder.raw_decode."""
+    text = _strip_json_fences(content)
+    if not text:
+        raise ValueError("empty assistant message")
+    try:
+        out = json.loads(text)
+    except json.JSONDecodeError:
+        idx = text.find("{")
+        if idx < 0:
+            raise ValueError("no JSON object in assistant message") from None
+        try:
+            out, _end = json.JSONDecoder().raw_decode(text, idx)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"invalid JSON in assistant message: {e}") from e
+    if not isinstance(out, dict):
+        raise ValueError("JSON root must be an object")
+    return out
+
+
 async def groq_chat_json(
     user_prompt: str,
     *,
@@ -47,6 +67,7 @@ async def groq_chat_json(
     model: Optional[str] = None,
     api_key: Optional[str] = None,
     temperature: float = 0.2,
+    use_json_object_mode: bool = True,
 ) -> Dict[str, Any]:
     """Call Groq chat completions and parse the assistant message as JSON.
 
@@ -65,7 +86,7 @@ async def groq_chat_json(
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": user_prompt})
 
-    payload: Dict[str, Any] = {
+    base_payload: Dict[str, Any] = {
         "model": m,
         "messages": messages,
         "temperature": temperature,
@@ -84,6 +105,9 @@ async def groq_chat_json(
 
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
+                payload = dict(base_payload)
+                if use_json_object_mode:
+                    payload["response_format"] = {"type": "json_object"}
                 resp = await client.post(
                     GROQ_CHAT_URL,
                     headers={
@@ -92,6 +116,21 @@ async def groq_chat_json(
                     },
                     json=payload,
                 )
+                if resp.status_code == 400 and use_json_object_mode:
+                    body = (resp.text or "")[:800]
+                    logger.warning(
+                        "Groq rejected json_object mode — retrying without (attempt %d): %s",
+                        attempt + 1,
+                        body,
+                    )
+                    resp = await client.post(
+                        GROQ_CHAT_URL,
+                        headers={
+                            "Authorization": f"Bearer {key}",
+                            "Content-Type": "application/json",
+                        },
+                        json=base_payload,
+                    )
 
             if resp.status_code == 429:
                 retry_after = float(resp.headers.get("retry-after", _BASE_BACKOFF * (2 ** attempt)))
@@ -114,9 +153,32 @@ async def groq_chat_json(
                 raise
 
             data = resp.json()
-            content = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
-            text = _strip_json_fences(content)
-            return json.loads(text)
+            choice0 = (data.get("choices") or [{}])[0]
+            msg = choice0.get("message") or {}
+            content = msg.get("content") or ""
+            finish_reason = choice0.get("finish_reason")
+            if not str(content).strip():
+                logger.warning(
+                    "Groq empty assistant content (finish_reason=%s, attempt %d/%d)",
+                    finish_reason,
+                    attempt + 1,
+                    _MAX_RETRIES,
+                )
+                last_exc = ValueError("empty assistant content from Groq")
+                await asyncio.sleep(min(2.0 * (attempt + 1), 8.0))
+                continue
+            try:
+                return _parse_assistant_json(content)
+            except ValueError as ve:
+                preview = (content or "")[:400].replace("\n", "\\n")
+                logger.warning(
+                    "Groq JSON parse failed (%s) preview=%r — retrying",
+                    ve,
+                    preview,
+                )
+                last_exc = ve
+                await asyncio.sleep(min(1.5 * (attempt + 1), 6.0))
+                continue
 
         except httpx.HTTPStatusError:
             raise

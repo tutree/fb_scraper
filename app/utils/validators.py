@@ -404,6 +404,26 @@ def is_us_location(location: Optional[str]) -> bool:
     return False
 
 
+def coerce_is_us_boolean(value) -> bool:
+    """
+    Normalize LLM/API ``is_us`` to bool. True = US-based.
+    Missing or ambiguous values default to True (conservative: do not delete).
+    String \"false\" / \"0\" must become False (``bool(\"false\")`` is True in Python).
+    """
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    s = str(value).strip().lower()
+    if s in ("false", "0", "no", "n"):
+        return False
+    if s in ("true", "1", "yes", "y"):
+        return True
+    return True
+
+
 def is_enrichable(name: Optional[str], location: Optional[str]) -> bool:
     """Check if a result has a full name (2+ parts) and a US location."""
     if not name or not name.strip():

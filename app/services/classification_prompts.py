@@ -4,6 +4,22 @@ and GeminiClassifier (queue/API). Single source of truth so behavior stays align
 """
 from typing import Any, Dict
 
+# Groq / OpenAI JSON mode: system message must stress JSON-only output.
+JSON_OBJECT_SYSTEM_CLASSIFICATION = """You are a machine-readable JSON API, not a chat assistant.
+Your entire output must be ONE JSON object. No other characters.
+
+Hard rules:
+1) The first character you output must be { and the last must be }.
+2) Do not use markdown. Do not use ``` or code fences. Do not write "Here is the JSON" or any prose.
+3) Use double quotes for all keys and string values. No trailing commas.
+4) Include every key the user message asks for (same names, correct types)."""
+
+JSON_OBJECT_SYSTEM_GEO = """You are a machine-readable JSON API. Output exactly one JSON object.
+First character {, last character }. No markdown, no explanation, no code fences."""
+
+JSON_OBJECT_SYSTEM_COMMENTS = """You are a machine-readable JSON API. Output exactly one JSON object with a top-level key "comments" (array). 
+First character {, last character }. No markdown, no prose outside the JSON."""
+
 # What “we” care about: leads who need tutoring vs providers who sell tutoring.
 
 BUSINESS_CONTEXT = """Context: We run a tutoring business. We need accurate labels:

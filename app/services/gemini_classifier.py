@@ -4,9 +4,11 @@ from typing import Dict, Optional
 
 from ..core.config import settings
 from ..core.logging_config import get_logger
-from ..utils.validators import clean_facebook_post_content
+from ..utils.validators import clean_facebook_post_content, coerce_is_us_boolean
 from .classification_prompts import (
     COMMENT_AUTHOR_STRICT_RULES,
+    JSON_OBJECT_SYSTEM_CLASSIFICATION,
+    JSON_OBJECT_SYSTEM_GEO,
     POST_AUTHOR_STRICT_RULES,
     normalize_post_classification_fields,
 )
@@ -55,7 +57,10 @@ class GeminiClassifier:
         elif self.provider == "groq":
             from .groq_client import groq_chat_json
 
-            result = await groq_chat_json(prompt)
+            result = await groq_chat_json(
+                prompt,
+                system_prompt=JSON_OBJECT_SYSTEM_CLASSIFICATION,
+            )
             if "type" not in result or "confidence" not in result:
                 raise ValueError("Invalid response structure")
             result["type"] = str(result["type"]).upper()
@@ -103,6 +108,8 @@ Raw scraped text: {post_content}
 
 Return ONLY valid JSON in this exact format (no markdown, no extra text). Include tutoring_related (boolean). Use type CUSTOMER, TUTOR, or UNKNOWN; confidence 0.0–1.0; reason must cite which rule above was met or why UNKNOWN:
 {{"type": "UNKNOWN", "tutoring_related": false, "confidence": 0.55, "reason": "Brief justification"}}
+
+Your entire reply must be that JSON object alone: first character {{, last character }}. No markdown fences, no commentary.
 """
 
         try:
@@ -116,6 +123,13 @@ Return ONLY valid JSON in this exact format (no markdown, no extra text). Includ
 
         except json.JSONDecodeError as e:
             logger.error("Failed to parse AI response as JSON: %s", e)
+            return {
+                "type": "UNKNOWN",
+                "confidence": 0.0,
+                "reason": f"Failed to parse AI response: {str(e)}",
+            }
+        except (ValueError, RuntimeError) as e:
+            logger.error("AI classification returned unusable JSON: %s", e)
             return {
                 "type": "UNKNOWN",
                 "confidence": 0.0,
@@ -163,6 +177,8 @@ Comment: {comment_text}
 
 Return ONLY valid JSON, no markdown. type is CUSTOMER, TUTOR, or UNKNOWN; confidence 0.0–1.0; reason must justify using the definitions above:
 {{"type": "UNKNOWN", "confidence": 0.5, "reason": "Short explanation"}}
+
+Your entire reply must be that JSON object alone: first character {{, last character }}.
 """
         try:
             result = await self._generate_json(prompt)
@@ -226,9 +242,12 @@ Return ONLY valid JSON (no markdown):
             elif self.provider == "groq":
                 from .groq_client import groq_chat_json
 
-                result = await groq_chat_json(prompt)
+                result = await groq_chat_json(
+                    prompt,
+                    system_prompt=JSON_OBJECT_SYSTEM_GEO,
+                )
                 return {
-                    "is_us": bool(result.get("is_us", True)),
+                    "is_us": coerce_is_us_boolean(result.get("is_us")),
                     "confidence": max(0.0, min(1.0, float(result.get("confidence", 0.5)))),
                     "reason": str(result.get("reason", "")),
                 }
@@ -243,7 +262,7 @@ Return ONLY valid JSON (no markdown):
 
             result = json.loads(response_text)
             return {
-                "is_us": bool(result.get("is_us", True)),
+                "is_us": coerce_is_us_boolean(result.get("is_us")),
                 "confidence": max(0.0, min(1.0, float(result.get("confidence", 0.5)))),
                 "reason": str(result.get("reason", "")),
             }

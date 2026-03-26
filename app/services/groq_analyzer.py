@@ -18,11 +18,15 @@ from ..utils.validators import (
     clean_facebook_location,
     clean_facebook_name,
     clean_facebook_post_content,
+    coerce_is_us_boolean,
     is_enrichable,
     parse_facebook_date,
 )
 from .classification_prompts import (
     COMMENT_AUTHOR_STRICT_RULES,
+    JSON_OBJECT_SYSTEM_CLASSIFICATION,
+    JSON_OBJECT_SYSTEM_COMMENTS,
+    JSON_OBJECT_SYSTEM_GEO,
     POST_AUTHOR_STRICT_RULES,
     normalize_post_classification_fields,
     should_remove_not_tutoring_related,
@@ -106,9 +110,12 @@ Return ONLY valid JSON (no markdown):
     else:
         return {"is_us": True, "confidence": 0.3, "reason": "No location or content to classify"}
 
-    data = await groq_chat_json(prompt)
+    data = await groq_chat_json(
+        prompt,
+        system_prompt=JSON_OBJECT_SYSTEM_GEO,
+    )
     return {
-        "is_us": bool(data.get("is_us", True)),
+        "is_us": coerce_is_us_boolean(data.get("is_us")),
         "confidence": _clamp_confidence(data.get("confidence", 0.5)),
         "reason": str(data.get("reason") or ""),
         "extracted_location": data.get("extracted_location") or None,
@@ -134,9 +141,14 @@ Classify the POST AUTHOR using these rules:
 {POST_AUTHOR_STRICT_RULES}
 
 Return ONLY valid JSON (no markdown). Keys: type, tutoring_related (boolean), confidence, reason.
-{{"type": "UNKNOWN", "tutoring_related": false, "confidence": 0.6, "reason": "..."}}"""
+{{"type": "UNKNOWN", "tutoring_related": false, "confidence": 0.6, "reason": "..."}}
 
-    data = await groq_chat_json(prompt)
+Your entire reply must be that JSON object alone: first character {{, last character }}."""
+
+    data = await groq_chat_json(
+        prompt,
+        system_prompt=JSON_OBJECT_SYSTEM_CLASSIFICATION,
+    )
     data["type"] = str(data.get("type", "UNKNOWN")).upper()
     data["confidence"] = _clamp_confidence(data.get("confidence"))
     data["reason"] = str(data.get("reason") or "")
@@ -178,9 +190,14 @@ For EACH comment, classify the COMMENT AUTHOR using the rules below.
 Return ONLY valid JSON (no markdown):
 {{"comments": [{{"index": 0, "type": "UNKNOWN", "confidence": 0.5, "reason": "brief"}}, ...]}}
 
-You MUST include exactly {len(comments)} objects with index 0 through {len(comments) - 1}."""
+You MUST include exactly {len(comments)} objects with index 0 through {len(comments) - 1}.
 
-    data = await groq_chat_json(prompt)
+Your entire reply must be one JSON object starting with {{ and ending with }} — no markdown, no prose."""
+
+    data = await groq_chat_json(
+        prompt,
+        system_prompt=JSON_OBJECT_SYSTEM_COMMENTS,
+    )
     raw_list = data.get("comments")
     if not isinstance(raw_list, list):
         return []

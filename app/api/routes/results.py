@@ -31,7 +31,13 @@ from ...schemas.search_result import (
 from ...schemas.post_comment import PostCommentResponse
 from ...models.search_result import SearchResult, ResultStatus, UserType
 from ...models.post_comment import PostComment
-from ...utils.validators import clean_facebook_location, clean_facebook_name, parse_facebook_date, is_enrichable
+from ...utils.validators import (
+    clean_facebook_location,
+    clean_facebook_name,
+    coerce_is_us_boolean,
+    parse_facebook_date,
+    is_enrichable,
+)
 from ...services.classification_prompts import should_remove_not_tutoring_related
 from ...services.search_result_cleanup import delete_search_result_and_comments
 
@@ -42,7 +48,7 @@ _NOT_ARCHIVED = SearchResult.archived.is_(False)
 
 def _geo_raw_to_out(g: dict) -> GeoClassificationOut:
     return GeoClassificationOut(
-        is_us=bool(g.get("is_us", True)),
+        is_us=coerce_is_us_boolean(g.get("is_us")),
         confidence=float(g.get("confidence", 0.0)),
         reason=str(g.get("reason", "")),
     )
@@ -110,7 +116,7 @@ async def _analyze_search_result(
         )
         geo_out = _geo_raw_to_out(geo_raw)
 
-        if not geo_raw.get("is_us", True):
+        if not coerce_is_us_boolean(geo_raw.get("is_us")):
             rid = result.id
             delete_search_result_and_comments(db, result)
             return AnalyzeResultItem(
@@ -507,13 +513,17 @@ async def analyze_single_result(
 
     if analyzed_item.success:
         db.commit()
-        if not analyzed_item.message.startswith("Removed:"):
+        if analyzed_item.message.startswith("Removed:"):
+            # Row deleted in DB; response already has geo / removed / removal_reason — do not overwrite.
+            pass
+        else:
             db.refresh(result)
-        analyzed_item = _format_analyze_item(
-            result=result,
-            success=True,
-            message=analyzed_item.message,
-        )
+            analyzed_item = _format_analyze_item(
+                result=result,
+                success=True,
+                message=analyzed_item.message,
+                geo=analyzed_item.geo,
+            )
     else:
         db.rollback()
 
@@ -586,6 +596,7 @@ async def analyze_batch_results(
                     result=result,
                     success=item.success,
                     message=item.message,
+                    geo=item.geo,
                 )
             )
         else:
