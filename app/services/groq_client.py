@@ -69,7 +69,6 @@ async def groq_chat_json(
         "model": m,
         "messages": messages,
         "temperature": temperature,
-        "response_format": {"type": "json_object"},
     }
 
     last_exc: Exception | None = None
