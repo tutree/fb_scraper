@@ -2,6 +2,7 @@
 Shared, strict definitions for CUSTOMER vs TUTOR used by Groq (immediate analysis)
 and GeminiClassifier (queue/API). Single source of truth so behavior stays aligned.
 """
+from typing import Any, Dict
 
 # What “we” care about: leads who need tutoring vs providers who sell tutoring.
 
@@ -26,7 +27,13 @@ UNKNOWN — Use when:
 
 Do NOT label CUSTOMER just because the post mentions education, kids, or stress. Do NOT label TUTOR just because someone sounds knowledgeable — they must clearly offer tutoring services.
 
-Prefer UNKNOWN over a wrong CUSTOMER/TUTOR when evidence is weak."""
+Prefer UNKNOWN over a wrong CUSTOMER/TUTOR when evidence is weak.
+
+TUTORING RELEVANCE (required JSON field tutoring_related):
+• tutoring_related = true — The post is substantively about tutoring or private one-on-one academic help: seeking a tutor, offering tutoring, asking for/recommending tutors, or clearly discussing hiring or providing tutoring.
+• tutoring_related = false — The post is NOT about tutoring: unrelated topics, spam, politics, selling non-tutoring goods, pure venting, generic school memes, job posts unrelated to tutoring, or noise with no real tutoring intent.
+
+If the post is not about tutoring at all, set tutoring_related to false (type will usually be UNKNOWN). You MUST include tutoring_related in every JSON response alongside type, confidence, and reason."""
 
 COMMENT_AUTHOR_STRICT_RULES = f"""{BUSINESS_CONTEXT}
 
@@ -39,3 +46,26 @@ TUTOR — The commenter promotes their own tutoring/teaching services in the thr
 UNKNOWN — Generic (“thanks”, “lol”), unrelated, unclear, two people chatting without a clear seek/offer role, or you cannot tell if they need tutoring vs are just engaging. When the post context is not clearly a tutoring offer, do not infer CUSTOMER from vague short replies — use UNKNOWN.
 
 Do NOT treat every friendly or vague comment as CUSTOMER. Be strict."""
+
+
+def normalize_post_classification_fields(data: Dict[str, Any]) -> None:
+    """
+    Ensure tutoring_related is a bool. If the model omits it, default True (keep row)
+    so we only remove rows when the model explicitly sets tutoring_related to false.
+    Mutates data in place.
+    """
+    tr = data.get("tutoring_related")
+    if tr is None:
+        data["tutoring_related"] = True
+    elif isinstance(tr, str):
+        data["tutoring_related"] = tr.strip().lower() in ("true", "yes", "1")
+    else:
+        data["tutoring_related"] = bool(tr)
+
+
+def should_remove_not_tutoring_related(data: Dict[str, Any]) -> bool:
+    """True if analysis explicitly marks this post as not tutoring-related (delete row)."""
+    if not isinstance(data, dict):
+        return False
+    normalize_post_classification_fields(data)
+    return data.get("tutoring_related") is False

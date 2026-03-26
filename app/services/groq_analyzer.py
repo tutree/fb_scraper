@@ -24,8 +24,11 @@ from ..utils.validators import (
 from .classification_prompts import (
     COMMENT_AUTHOR_STRICT_RULES,
     POST_AUTHOR_STRICT_RULES,
+    normalize_post_classification_fields,
+    should_remove_not_tutoring_related,
 )
 from .groq_client import groq_chat_json
+from .search_result_cleanup import delete_search_result_and_comments
 
 logger = get_logger(__name__)
 
@@ -130,13 +133,14 @@ Classify the POST AUTHOR using these rules:
 
 {POST_AUTHOR_STRICT_RULES}
 
-Return ONLY valid JSON (no markdown). type must be CUSTOMER, TUTOR, or UNKNOWN. confidence 0.0–1.0. reason must cite explicit evidence from the post or explain why UNKNOWN:
-{{"type": "UNKNOWN", "confidence": 0.6, "reason": "..."}}"""
+Return ONLY valid JSON (no markdown). Keys: type, tutoring_related (boolean), confidence, reason.
+{{"type": "UNKNOWN", "tutoring_related": false, "confidence": 0.6, "reason": "..."}}"""
 
     data = await groq_chat_json(prompt)
     data["type"] = str(data.get("type", "UNKNOWN")).upper()
     data["confidence"] = _clamp_confidence(data.get("confidence"))
     data["reason"] = str(data.get("reason") or "")
+    normalize_post_classification_fields(data)
     return data
 
 
@@ -219,6 +223,10 @@ async def analyze_post_then_comments(
     """
     cleaned = clean_facebook_post_content(post_content) or ""
     post_result = await _classify_post_groq(post_content, user_name)
+
+    # Not about tutoring — skip comment calls; caller deletes row + comments
+    if post_result.get("tutoring_related") is False:
+        return {"post": post_result, "comments": []}
 
     if post_result.get("type") == "CUSTOMER":
         return {"post": post_result, "comments": []}
@@ -339,6 +347,18 @@ async def apply_immediate_groq_analysis(db: Session, search_result_id: UUID) -> 
             triples,
         )
 
+        pr = bundle.get("post") or {}
+        if should_remove_not_tutoring_related(pr):
+            deleted_n = delete_search_result_and_comments(db, result)
+            db.commit()
+            logger.info(
+                "Groq: not tutoring-related — deleted result + %d comments — id=%s reason=%r",
+                deleted_n,
+                short_id,
+                pr.get("reason", ""),
+            )
+            return
+
     except Exception as exc:
         # Any Groq failure (rate-limit, network, parse error) — leave analyzed_at
         # and geo_filtered_at as NULL so the background jobs will retry this row.
@@ -350,7 +370,6 @@ async def apply_immediate_groq_analysis(db: Session, search_result_id: UUID) -> 
         db.rollback()
         return
 
-    pr = bundle.get("post") or {}
     result.user_type = _norm_user_type(pr.get("type"))
     result.confidence_score = _clamp_confidence(pr.get("confidence"))
     result.analysis_message = str(pr.get("reason") or "")

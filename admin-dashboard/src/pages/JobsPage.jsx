@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { toast } from 'sonner'
 import api from '../api'
 
 const STATUS_COLORS = {
@@ -106,7 +107,6 @@ function BreakdownBar({ items }) {
 export default function JobsPage() {
   const [status, setStatus] = useState(null)
   const [history, setHistory] = useState([])
-  const [feedback, setFeedback] = useState(null)
   const [loading, setLoading] = useState(true)
   const [updating, setUpdating] = useState(false)
   const [processTab, setProcessTab] = useState('scraped')
@@ -127,7 +127,7 @@ export default function JobsPage() {
       setHistory(Array.isArray(h.data) ? h.data : [])
       setJobStats(js.data)
     } catch (err) {
-      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to load job status') })
+      toast.error(getErrorMessage(err, 'Failed to load job status'))
     } finally {
       setLoading(false)
     }
@@ -157,42 +157,36 @@ export default function JobsPage() {
 
   const update = async (patch) => {
     setUpdating(true)
-    setFeedback(null)
     try {
       const res = await api.post('/automation/update', patch)
       setStatus(res.data)
-      setFeedback({ type: 'success', text: 'Settings updated.' })
+      toast.success('Settings updated.')
     } catch (err) {
-      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to update') })
+      toast.error(getErrorMessage(err, 'Failed to update'))
     } finally {
       setUpdating(false)
     }
   }
 
   const triggerNow = async () => {
-    setFeedback(null)
     try {
       await api.post('/automation/trigger')
-      setFeedback({ type: 'success', text: 'Scrape triggered — running in background.' })
+      toast.success('Scrape triggered — running in background.')
       setTimeout(fetchAll, 2000)
     } catch (err) {
-      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to trigger') })
+      toast.error(getErrorMessage(err, 'Failed to trigger'))
     }
   }
 
   const confirmArchiveDuplicates = async () => {
     setDuplicateArchiving(true)
-    setFeedback(null)
     try {
       const res = await api.post('/results/archive-duplicates')
       setDuplicateModalOpen(false)
-      setFeedback({
-        type: 'success',
-        text: res?.data?.message || 'Duplicate cleanup completed.',
-      })
+      toast.success(res?.data?.message || 'Duplicate cleanup completed.')
       setTimeout(fetchAll, 1000)
     } catch (err) {
-      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to remove duplicates') })
+      toast.error(getErrorMessage(err, 'Failed to remove duplicates'))
     } finally {
       setDuplicateArchiving(false)
     }
@@ -208,24 +202,22 @@ export default function JobsPage() {
   }, [duplicateModalOpen, duplicateArchiving])
 
   const stopJob = async (job) => {
-    setFeedback(null)
     try {
       await api.post('/automation/stop-job', { job })
-      setFeedback({ type: 'success', text: 'Stop / pause requested.' })
+      toast.success('Stop / pause requested.')
       fetchAll()
     } catch (err) {
-      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed') })
+      toast.error(getErrorMessage(err, 'Failed'))
     }
   }
 
   const resumeJob = async (job) => {
-    setFeedback(null)
     try {
       await api.post('/automation/resume-job', { job })
-      setFeedback({ type: 'success', text: 'Resumed / cleared.' })
+      toast.success('Resumed / cleared.')
       fetchAll()
     } catch (err) {
-      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed') })
+      toast.error(getErrorMessage(err, 'Failed'))
     }
   }
 
@@ -252,12 +244,6 @@ export default function JobsPage() {
 
   return (
     <div className="mx-auto max-w-[1200px] space-y-6">
-      {feedback && (
-        <div className={`rounded-xl border px-4 py-3 text-sm ${feedback.type === 'error' ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
-          {feedback.text}
-        </div>
-      )}
-
       {/* Job Analytics */}
       {jobStats && (
         <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -321,7 +307,7 @@ export default function JobsPage() {
                 <div className="flex items-center gap-2">
                   <h3 className="text-sm font-bold text-violet-900">Comment Analyzer</h3>
                   <button
-                    onClick={async () => { try { await api.post('/automation/trigger-comment-analyze'); alert('Comment analyzer triggered!'); } catch (e) { alert(getErrorMessage(e, 'Failed to trigger')); } }}
+                    onClick={async () => { try { await api.post('/automation/trigger-comment-analyze'); toast.success('Comment analyzer triggered'); } catch (e) { toast.error(getErrorMessage(e, 'Failed to trigger')); } }}
                     className="rounded bg-violet-600 px-2 py-0.5 text-[10px] font-semibold text-white hover:bg-violet-700 transition"
                   >Run Now</button>
                 </div>

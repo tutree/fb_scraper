@@ -1,5 +1,6 @@
 // Settings.jsx
 import { useState } from 'react';
+import { toast } from 'sonner';
 import api from '../api';
 import { useAuth } from '../contexts/AuthContext';
 import { useNavigate } from 'react-router-dom';
@@ -8,7 +9,6 @@ function Settings() {
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [message, setMessage] = useState({ type: '', text: '' });
   const [isLoading, setIsLoading] = useState(false);
   const { logout } = useAuth();
   const navigate = useNavigate();
@@ -16,19 +16,18 @@ function Settings() {
   const handleUpdatePassword = async (e) => {
     e.preventDefault();
     if (newPassword !== confirmPassword) {
-      setMessage({ type: 'error', text: 'New passwords do not match' });
+      toast.error('New passwords do not match');
       return;
     }
 
     setIsLoading(true);
-    setMessage({ type: '', text: '' });
 
     try {
       await api.post('/auth/update-password', {
         current_password: currentPassword,
         new_password: newPassword,
       });
-      setMessage({ type: 'success', text: 'Password updated successfully. Please login again.' });
+      toast.success('Password updated successfully. Please login again.');
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
@@ -39,10 +38,7 @@ function Settings() {
       }, 2000);
       
     } catch (err) {
-      setMessage({
-        type: 'error',
-        text: err?.response?.data?.detail ?? 'Failed to update password',
-      });
+      toast.error(err?.response?.data?.detail ?? 'Failed to update password');
     } finally {
       setIsLoading(false);
     }
@@ -53,12 +49,6 @@ function Settings() {
       <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
         <h2 className="text-2xl font-bold text-slate-900 mb-6">Settings</h2>
         
-        {message.text && (
-          <div className={`mb-4 rounded-md p-4 text-sm font-medium ${message.type === 'error' ? 'bg-rose-50 text-rose-700 border border-rose-200' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'}`}>
-            {message.text}
-          </div>
-        )}
-
         <form onSubmit={handleUpdatePassword} className="space-y-4">
           <div>
             <label className="block text-sm font-medium text-slate-700">Current Password</label>

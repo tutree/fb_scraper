@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { toast } from 'sonner'
 
 import api from './api'
 import { useAuth } from './contexts/AuthContext'
@@ -78,7 +79,6 @@ function App() {
   const [enrichingId, setEnrichingId] = useState(null)
   const [enrichingBatch, setEnrichingBatch] = useState(false)
   const [deleteConfirm, setDeleteConfirm] = useState({ isOpen: false, ids: [], type: '', isDeleting: false })
-  const [feedback, setFeedback] = useState(null)
   const [comments, setComments] = useState([])
   const [commentsLoading, setCommentsLoading] = useState(false)
   const [commentsError, setCommentsError] = useState(null)
@@ -195,25 +195,50 @@ function App() {
       await api.patch(`/results/${id}`, { status: newStatus })
       await fetchData()
     } catch (err) {
-      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to update status') })
+      toast.error(getErrorMessage(err, 'Failed to update status'))
     }
   }
 
   const analyzeSingle = async (id) => {
     setAnalyzingId(id)
-    setFeedback(null)
     try {
       const res = await api.post(`/results/${id}/analyze`, null, {
         params: { force_reanalyze: true },
       })
-      setFeedback({ type: 'success', text: `Lead analyzed: ${res.data?.item?.message || 'Done'}` })
+      const item = res.data?.item
+      const stagger = item?.geo ? 450 : 0
+      if (item?.geo) {
+        const g = item.geo
+        toast.message('Geo classification', {
+          description: `${g.is_us ? 'US' : 'Non-US'} · ${Math.round((Number(g.confidence) || 0) * 100)}% confidence — ${g.reason || ''}`,
+          duration: 9000,
+        })
+      }
+      if (item?.removed) {
+        setTimeout(() => {
+          toast.warning(
+            item.removal_reason === 'non_us' ? 'Lead removed (non-US)' : 'Lead removed (not tutoring-related)',
+            { description: item.message, duration: 8000 },
+          )
+        }, stagger)
+      } else if (item?.success) {
+        setTimeout(() => {
+          toast.success('Lead analyzed', { description: item.message || 'Done', duration: 5000 })
+        }, stagger)
+      }
       await fetchData()
-      if (selectedResult?.id === id) {
-        const refreshed = await api.get(`/results/${id}`)
-        setSelectedResult(refreshed.data)
+      if (item?.removed && selectedResult?.id === id) {
+        closeDetail()
+      } else if (selectedResult?.id === id && !item?.removed) {
+        try {
+          const refreshed = await api.get(`/results/${id}`)
+          setSelectedResult(refreshed.data)
+        } catch {
+          /* row missing */
+        }
       }
     } catch (err) {
-      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to run Gemini analysis') })
+      toast.error(getErrorMessage(err, 'Failed to run analysis'))
     } finally {
       setAnalyzingId(null)
     }
@@ -226,20 +251,19 @@ function App() {
       const missing = []
       if (!row.name) missing.push('name')
       if (!row.location) missing.push('location')
-      setFeedback({ type: 'error', text: `Skipped "${row.name || 'Unknown'}": ${missing.join(' and ')} required for enrichment.` })
+      toast.error(`Skipped "${row.name || 'Unknown'}": ${missing.join(' and ')} required for enrichment.`)
       return
     }
     setEnrichingId(id)
-    setFeedback(null)
     try {
       const res = await api.post(`/results/${id}/enrich`, null, {
         params: { force: true },
       })
       const item = res.data?.item
       if (item?.success) {
-        setFeedback({ type: 'success', text: `Enriched: ${item.message}` })
+        toast.success(`Enriched: ${item.message}`)
       } else {
-        setFeedback({ type: 'error', text: item?.message || 'Enrichment failed' })
+        toast.error(item?.message || 'Enrichment failed')
       }
       await fetchData()
       if (selectedResult?.id === id) {
@@ -247,7 +271,7 @@ function App() {
         setSelectedResult(refreshed.data)
       }
     } catch (err) {
-      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to enrich contact') })
+      toast.error(getErrorMessage(err, 'Failed to enrich contact'))
     } finally {
       setEnrichingId(null)
     }
@@ -269,12 +293,11 @@ function App() {
     }
 
     if (eligible.length === 0) {
-      setFeedback({ type: 'error', text: `All ${ids.length} selected leads skipped — name + location required. Missing for: ${skippedNames.join(', ')}` })
+      toast.error(`All ${ids.length} selected leads skipped — name + location required. Missing for: ${skippedNames.join(', ')}`)
       return
     }
 
     setEnrichingBatch(true)
-    setFeedback(null)
     try {
       const res = await api.post(`/results/enrich/batch`, {
         result_ids: eligible,
@@ -285,14 +308,12 @@ function App() {
       if (skipped > 0) parts.push(`${skipped} skipped`)
       if (failed > 0) parts.push(`${failed} failed`)
       if (skippedNames.length > 0) parts.push(`${skippedNames.length} skipped (no location): ${skippedNames.join(', ')}`)
-      setFeedback({
-        type: (failed > 0 || skippedNames.length > 0) && succeeded === 0 ? 'error' : 'success',
-        text: `Enrichment: ${parts.join(' · ')}`,
-      })
+      const bad = (failed > 0 || skippedNames.length > 0) && succeeded === 0
+      ;(bad ? toast.error : toast.success)(`Enrichment: ${parts.join(' · ')}`)
       setSelectedIds(new Set())
       await fetchData()
     } catch (err) {
-      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to run batch enrichment') })
+      toast.error(getErrorMessage(err, 'Failed to run batch enrichment'))
     } finally {
       setEnrichingBatch(false)
     }
@@ -311,16 +332,15 @@ function App() {
 
   const executeDelete = async () => {
     setDeleteConfirm(prev => ({ ...prev, isDeleting: true }))
-    setFeedback(null)
     try {
       if (deleteConfirm.type === 'bulk') {
         const res = await api.post(`/results/bulk-delete`, { ids: deleteConfirm.ids })
-        setFeedback({ type: 'success', text: res.data?.message || 'Deleted successfully' })
+        toast.success(res.data?.message || 'Deleted successfully')
         setSelectedIds(new Set())
       } else {
         const id = deleteConfirm.ids[0];
         const res = await api.delete(`/results/${id}`)
-        setFeedback({ type: 'success', text: res.data?.message || 'Deleted successfully' })
+        toast.success(res.data?.message || 'Deleted successfully')
         setSelectedIds((prev) => {
           const next = new Set(prev)
           next.delete(id)
@@ -333,7 +353,7 @@ function App() {
 
       await fetchData()
     } catch (err) {
-      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to delete') })
+      toast.error(getErrorMessage(err, 'Failed to delete'))
     } finally {
       setDeleteConfirm({ isOpen: false, ids: [], type: '', isDeleting: false })
     }
@@ -343,21 +363,19 @@ function App() {
     const ids = [...selectedIds]
     if (ids.length === 0) return
     setAnalyzingBatch(true)
-    setFeedback(null)
     try {
       const res = await api.post(`/results/analyze/batch`, {
         result_ids: ids,
         force_reanalyze: true,
       })
       const { succeeded = 0, skipped = 0, failed = 0 } = res.data || {}
-      setFeedback({
-        type: failed > 0 ? 'error' : 'success',
-        text: `Gemini batch complete: ${succeeded} analyzed, ${skipped} skipped, ${failed} failed.`,
-      })
+      const msg = `Analysis batch: ${succeeded} analyzed, ${skipped} skipped, ${failed} failed.`
+      if (failed > 0) toast.warning(msg)
+      else toast.success(msg)
       setSelectedIds(new Set())
       await fetchData()
     } catch (err) {
-      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to run batch analysis') })
+      toast.error(getErrorMessage(err, 'Failed to run batch analysis'))
     } finally {
       setAnalyzingBatch(false)
     }
@@ -401,7 +419,6 @@ function App() {
   const saveResultEdit = async () => {
     if (!selectedResult || !editResultValues) return
     setSavingResult(true)
-    setFeedback(null)
     try {
       const payload = { ...editResultValues }
       if (payload.confidence_score === '' || payload.confidence_score == null) payload.confidence_score = null
@@ -410,9 +427,9 @@ function App() {
       setSelectedResult(res.data)
       setResults((prev) => prev.map((r) => (r.id === res.data.id ? res.data : r)))
       setEditResultValues(null)
-      setFeedback({ type: 'success', text: 'Lead updated.' })
+      toast.success('Lead updated.')
     } catch (err) {
-      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to update lead') })
+      toast.error(getErrorMessage(err, 'Failed to update lead'))
     } finally {
       setSavingResult(false)
     }
@@ -421,7 +438,6 @@ function App() {
   const saveCommentEdit = async () => {
     if (!selectedComment || !editCommentValues) return
     setSavingComment(true)
-    setFeedback(null)
     try {
       const payload = { ...editCommentValues }
       if (payload.confidence_score === '' || payload.confidence_score == null) payload.confidence_score = null
@@ -430,9 +446,9 @@ function App() {
       setSelectedComment(res.data)
       setComments((prev) => prev.map((c) => (c.id === res.data.id ? res.data : c)))
       setEditCommentValues(null)
-      setFeedback({ type: 'success', text: 'Comment updated.' })
+      toast.success('Comment updated.')
     } catch (err) {
-      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to update comment') })
+      toast.error(getErrorMessage(err, 'Failed to update comment'))
     } finally {
       setSavingComment(false)
     }
@@ -459,7 +475,6 @@ function App() {
 
   const exportEnriched = async () => {
     setExporting(true)
-    setFeedback(null)
     try {
       const res = await api.get('/results/export/enriched', { responseType: 'blob' })
       const disposition = res.headers['content-disposition'] || ''
@@ -473,9 +488,9 @@ function App() {
       a.click()
       a.remove()
       window.URL.revokeObjectURL(url)
-      setFeedback({ type: 'success', text: 'Enriched leads exported successfully.' })
+      toast.success('Enriched leads exported successfully.')
     } catch (err) {
-      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to export enriched leads') })
+      toast.error(getErrorMessage(err, 'Failed to export enriched leads'))
     } finally {
       setExporting(false)
     }
@@ -540,12 +555,6 @@ function App() {
                 Last valid session: {formatRelativeTime(scraperHealth.last_cookie_ok_at)}
               </span>
             )}
-          </div>
-        )}
-
-        {feedback && (
-          <div className={`rounded-xl border px-4 py-3 text-sm ${feedback.type === 'error' ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
-            {feedback.text}
           </div>
         )}
 

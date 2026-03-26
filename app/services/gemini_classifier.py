@@ -8,6 +8,7 @@ from ..utils.validators import clean_facebook_post_content
 from .classification_prompts import (
     COMMENT_AUTHOR_STRICT_RULES,
     POST_AUTHOR_STRICT_RULES,
+    normalize_post_classification_fields,
 )
 
 logger = get_logger(__name__)
@@ -59,6 +60,7 @@ class GeminiClassifier:
                 raise ValueError("Invalid response structure")
             result["type"] = str(result["type"]).upper()
             result["confidence"] = max(0.0, min(1.0, float(result["confidence"])))
+            normalize_post_classification_fields(result)
             return result
         else:
             raise ValueError(f"Unsupported AI_PROVIDER for classification: {self.provider}")
@@ -74,6 +76,7 @@ class GeminiClassifier:
             raise ValueError("Invalid response structure")
         result["type"] = result["type"].upper()
         result["confidence"] = max(0.0, min(1.0, float(result["confidence"])))
+        normalize_post_classification_fields(result)
         return result
     
     async def classify_user(self, post_content: str, user_name: str = "") -> Dict:
@@ -98,8 +101,8 @@ Raw scraped text: {post_content}
 
 {POST_AUTHOR_STRICT_RULES}
 
-Return ONLY valid JSON in this exact format (no markdown, no extra text). Use type CUSTOMER, TUTOR, or UNKNOWN; confidence 0.0–1.0; reason must cite which rule above was met or why UNKNOWN:
-{{"type": "UNKNOWN", "confidence": 0.55, "reason": "Brief justification"}}
+Return ONLY valid JSON in this exact format (no markdown, no extra text). Include tutoring_related (boolean). Use type CUSTOMER, TUTOR, or UNKNOWN; confidence 0.0–1.0; reason must cite which rule above was met or why UNKNOWN:
+{{"type": "UNKNOWN", "tutoring_related": false, "confidence": 0.55, "reason": "Brief justification"}}
 """
 
         try:

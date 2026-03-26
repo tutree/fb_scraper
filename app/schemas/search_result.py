@@ -76,6 +76,14 @@ class RecentProcessedItem(BaseModel):
 
 # --- Analysis schemas ---
 
+class GeoClassificationOut(BaseModel):
+    """Geo classification shown in API before a lead is removed for non-US."""
+
+    is_us: bool
+    confidence: float
+    reason: str
+
+
 class AnalyzeResultItem(BaseModel):
     id: UUID
     success: bool
@@ -83,6 +91,9 @@ class AnalyzeResultItem(BaseModel):
     user_type: Optional[str] = None
     confidence_score: Optional[float] = None
     analyzed_at: Optional[datetime] = None
+    geo: Optional[GeoClassificationOut] = None
+    removed: bool = False
+    removal_reason: Optional[str] = None  # non_us | not_tutoring
 
 
 class AnalyzeSingleResponse(BaseModel):

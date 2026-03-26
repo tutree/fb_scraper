@@ -22,6 +22,7 @@ from ...schemas.search_result import (
     AnalyzeBatchResponse,
     AnalyzeSingleResponse,
     AnalyzeResultItem,
+    GeoClassificationOut,
     EnrichResultItem,
     EnrichSingleResponse,
     EnrichBatchRequest,
@@ -31,16 +32,27 @@ from ...schemas.post_comment import PostCommentResponse
 from ...models.search_result import SearchResult, ResultStatus, UserType
 from ...models.post_comment import PostComment
 from ...utils.validators import clean_facebook_location, clean_facebook_name, parse_facebook_date, is_enrichable
+from ...services.classification_prompts import should_remove_not_tutoring_related
+from ...services.search_result_cleanup import delete_search_result_and_comments
 
 router = APIRouter(prefix="/results", tags=["results"])
 
 _NOT_ARCHIVED = SearchResult.archived.is_(False)
 
 
+def _geo_raw_to_out(g: dict) -> GeoClassificationOut:
+    return GeoClassificationOut(
+        is_us=bool(g.get("is_us", True)),
+        confidence=float(g.get("confidence", 0.0)),
+        reason=str(g.get("reason", "")),
+    )
+
+
 def _format_analyze_item(
     result: SearchResult,
     success: bool,
     message: str,
+    geo: Optional[GeoClassificationOut] = None,
 ) -> AnalyzeResultItem:
     return AnalyzeResultItem(
         id=result.id,
@@ -49,6 +61,9 @@ def _format_analyze_item(
         user_type=result.user_type.value if result.user_type else None,
         confidence_score=result.confidence_score,
         analyzed_at=result.analyzed_at,
+        geo=geo,
+        removed=False,
+        removal_reason=None,
     )
 
 
@@ -56,6 +71,7 @@ async def _analyze_search_result(
     result: SearchResult,
     classifier: GeminiClassifier,
     force_reanalyze: bool,
+    db: Session,
 ) -> AnalyzeResultItem:
     if result.name:
         cleaned_name = clean_facebook_name(result.name)
@@ -87,10 +103,47 @@ async def _analyze_search_result(
         )
 
     try:
+        geo_raw = await classifier.classify_geo(
+            location=result.location or "",
+            post_content=result.post_content or "",
+            user_name=result.name or "",
+        )
+        geo_out = _geo_raw_to_out(geo_raw)
+
+        if not geo_raw.get("is_us", True):
+            rid = result.id
+            delete_search_result_and_comments(db, result)
+            return AnalyzeResultItem(
+                id=rid,
+                success=True,
+                message="Removed: non-US (geo)",
+                user_type=None,
+                confidence_score=None,
+                analyzed_at=None,
+                geo=geo_out,
+                removed=True,
+                removal_reason="non_us",
+            )
+
         analysis = await classifier.classify_user(
             post_content=result.post_content,
             user_name=result.name or "",
         )
+
+        if should_remove_not_tutoring_related(analysis):
+            rid = result.id
+            delete_search_result_and_comments(db, result)
+            return AnalyzeResultItem(
+                id=rid,
+                success=True,
+                message="Removed: not tutoring-related",
+                user_type=None,
+                confidence_score=None,
+                analyzed_at=None,
+                geo=geo_out,
+                removed=True,
+                removal_reason="not_tutoring",
+            )
 
         user_type_map = {
             "CUSTOMER": UserType.CUSTOMER,
@@ -118,12 +171,16 @@ async def _analyze_search_result(
             result=result,
             success=True,
             message="Analyzed successfully",
+            geo=geo_out,
         )
     except Exception as exc:
-        return _format_analyze_item(
-            result=result,
+        return AnalyzeResultItem(
+            id=result.id,
             success=False,
             message=f"Analysis failed: {exc}",
+            user_type=result.user_type.value if result.user_type else None,
+            confidence_score=result.confidence_score,
+            analyzed_at=result.analyzed_at,
         )
 
 
@@ -445,11 +502,13 @@ async def analyze_single_result(
         result=result,
         classifier=classifier,
         force_reanalyze=force_reanalyze,
+        db=db,
     )
 
     if analyzed_item.success:
         db.commit()
-        db.refresh(result)
+        if not analyzed_item.message.startswith("Removed:"):
+            db.refresh(result)
         analyzed_item = _format_analyze_item(
             result=result,
             success=True,
@@ -500,12 +559,15 @@ async def analyze_batch_results(
             result=result,
             classifier=classifier,
             force_reanalyze=request.force_reanalyze,
+            db=db,
         )
         items.append(analyzed_item)
 
     if any(item.success for item in items):
         db.commit()
         for item in items:
+            if item.success and item.message.startswith("Removed:"):
+                continue
             refreshed = result_map.get(item.id)
             if refreshed:
                 db.refresh(refreshed)
@@ -514,6 +576,9 @@ async def analyze_batch_results(
 
     normalized_items: List[AnalyzeResultItem] = []
     for item in items:
+        if item.success and item.message.startswith("Removed:"):
+            normalized_items.append(item)
+            continue
         result = result_map.get(item.id)
         if result:
             normalized_items.append(

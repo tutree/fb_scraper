@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { toast } from 'sonner'
 
 import api from '../api'
 
@@ -26,7 +27,6 @@ export default function CommentsPage() {
   const [analyzingId, setAnalyzingId] = useState(null)
   const [analyzingBatch, setAnalyzingBatch] = useState(false)
   const [deleteConfirm, setDeleteConfirm] = useState({ isOpen: false, ids: [], type: '', isDeleting: false })
-  const [feedback, setFeedback] = useState(null)
   const [selectedComment, setSelectedComment] = useState(null)
   const [showCommentDialog, setShowCommentDialog] = useState(false)
   const selectAllRef = useRef(null)
@@ -66,15 +66,14 @@ export default function CommentsPage() {
 
   const analyzeSingle = async (commentId) => {
     setAnalyzingId(commentId)
-    setFeedback(null)
     try {
       const res = await api.post(`/comments/${commentId}/analyze`, null, {
         params: { force_reanalyze: true },
       })
-      setFeedback({ type: 'success', text: `Comment analyzed: ${res.data?.item?.message || 'Done'}` })
+      toast.success(`Comment analyzed: ${res.data?.item?.message || 'Done'}`)
       await fetchComments()
     } catch (err) {
-      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to analyze comment') })
+      toast.error(getErrorMessage(err, 'Failed to analyze comment'))
     } finally {
       setAnalyzingId(null)
     }
@@ -94,16 +93,15 @@ export default function CommentsPage() {
 
   const executeDelete = async () => {
     setDeleteConfirm(prev => ({ ...prev, isDeleting: true }))
-    setFeedback(null)
     try {
       if (deleteConfirm.type === 'bulk') {
         const res = await api.post(`/comments/bulk-delete`, { ids: deleteConfirm.ids })
-        setFeedback({ type: 'success', text: res.data?.message || 'Deleted successfully' })
+        toast.success(res.data?.message || 'Deleted successfully')
         setSelectedIds(new Set())
       } else {
         const id = deleteConfirm.ids[0];
         const res = await api.delete(`/comments/${id}`)
-        setFeedback({ type: 'success', text: res.data?.message || 'Deleted successfully' })
+        toast.success(res.data?.message || 'Deleted successfully')
         setSelectedIds((prev) => {
           const next = new Set(prev)
           next.delete(id)
@@ -116,7 +114,7 @@ export default function CommentsPage() {
 
       await fetchComments()
     } catch (err) {
-      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to delete') })
+      toast.error(getErrorMessage(err, 'Failed to delete'))
     } finally {
       setDeleteConfirm({ isOpen: false, ids: [], type: '', isDeleting: false })
     }
@@ -126,21 +124,19 @@ export default function CommentsPage() {
     const ids = [...selectedIds]
     if (ids.length === 0) return
     setAnalyzingBatch(true)
-    setFeedback(null)
     try {
       const res = await api.post(`/comments/analyze/batch`, {
         comment_ids: ids,
         force_reanalyze: true,
       })
       const { succeeded = 0, skipped = 0, failed = 0 } = res.data || {}
-      setFeedback({
-        type: failed > 0 ? 'error' : 'success',
-        text: `Comment batch complete: ${succeeded} analyzed, ${skipped} skipped, ${failed} failed.`,
-      })
+      const msg = `Comment batch: ${succeeded} analyzed, ${skipped} skipped, ${failed} failed.`
+      if (failed > 0) toast.warning(msg)
+      else toast.success(msg)
       setSelectedIds(new Set())
       await fetchComments()
     } catch (err) {
-      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to analyze selected comments') })
+      toast.error(getErrorMessage(err, 'Failed to analyze selected comments'))
     } finally {
       setAnalyzingBatch(false)
     }
@@ -188,12 +184,6 @@ export default function CommentsPage() {
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-100 to-sky-50 px-4 py-8">
       <div className="mx-auto max-w-[1400px] space-y-6">
-        {feedback && (
-          <div className={`rounded-xl border px-4 py-3 text-sm ${feedback.type === 'error' ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
-            {feedback.text}
-          </div>
-        )}
-
         <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="flex flex-wrap items-center gap-3">
             <label className="flex items-center gap-2 text-sm text-slate-700">

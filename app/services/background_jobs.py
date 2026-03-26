@@ -28,6 +28,8 @@ from ..services.enformion_service import EnformionService
 from ..services.scraper import ScraperService
 from ..services.facebook_cookie_manager import get_cookie_status
 from ..utils.validators import clean_facebook_location, clean_facebook_name, parse_facebook_date, is_enrichable
+from ..services.classification_prompts import should_remove_not_tutoring_related
+from ..services.search_result_cleanup import delete_search_result_and_comments
 
 logger = get_logger(__name__)
 
@@ -433,6 +435,11 @@ async def _auto_analyze_results(db, result_ids: list) -> int:
                 post_content=result.post_content,
                 user_name=result.name or "",
             )
+            if should_remove_not_tutoring_related(analysis):
+                delete_search_result_and_comments(db, result)
+                analyzed += 1
+                continue
+
             user_type_map = {
                 "CUSTOMER": UserType.CUSTOMER,
                 "TUTOR": UserType.TUTOR,

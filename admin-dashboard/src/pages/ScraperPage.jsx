@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { toast } from 'sonner'
 
 import api from '../api'
 
@@ -196,7 +197,6 @@ export default function ScraperPage() {
   const [cookieJsonInput, setCookieJsonInput] = useState('')
   const [cookieSubmitting, setCookieSubmitting] = useState(false)
   const [cookieStatus, setCookieStatus] = useState(null)
-  const [feedback, setFeedback] = useState(null)
   const [logLines, setLogLines] = useState(300)
   const [showTechnicalLogs, setShowTechnicalLogs] = useState(false)
   const logsContainerRef = useRef(null)
@@ -253,14 +253,13 @@ export default function ScraperPage() {
       const res = await api.post(`/search/keywords`, { keywords: newKws })
       setSavedKeywords(res.data?.keywords || [])
       setKeywordInput('')
-      setFeedback({
-        type: 'success',
-        text: res.data?.added?.length
+      toast.success(
+        res.data?.added?.length
           ? `Added ${res.data.added.length} keyword(s). Total: ${res.data.total}`
           : 'All keywords already exist.',
-      })
+      )
     } catch (err) {
-      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to add keywords') })
+      toast.error(getErrorMessage(err, 'Failed to add keywords'))
     } finally {
       setKeywordSubmitting(false)
     }
@@ -271,26 +270,24 @@ export default function ScraperPage() {
       const res = await api.delete(`/search/keywords`, { params: { keyword: kw } })
       setSavedKeywords(res.data?.keywords || [])
     } catch (err) {
-      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to remove keyword') })
+      toast.error(getErrorMessage(err, 'Failed to remove keyword'))
     }
   }
 
   const submitCookieUpdate = async () => {
     setCookieSubmitting(true)
-    setFeedback(null)
     try {
       const res = await api.post(`/search/cookies`, {
         cookie_json: cookieJsonInput,
       })
-      setFeedback({
-        type: 'success',
-        text: `${res.data?.message || 'Cookie updated successfully.'} (${res.data?.cookie_count || 0} cookies saved)`,
-      })
+      toast.success(
+        `${res.data?.message || 'Cookie updated successfully.'} (${res.data?.cookie_count || 0} cookies saved)`,
+      )
       setCookieJsonInput('')
       setCookieModalOpen(false)
       await fetchCookieStatus()
     } catch (err) {
-      setFeedback({ type: 'error', text: getErrorMessage(err, 'Failed to update cookie') })
+      toast.error(getErrorMessage(err, 'Failed to update cookie'))
     } finally {
       setCookieSubmitting(false)
     }
@@ -328,12 +325,6 @@ export default function ScraperPage() {
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-100 to-sky-50 px-4 py-8">
       <div className="mx-auto max-w-[1400px] space-y-6">
-        {feedback && (
-          <div className={`rounded-xl border px-4 py-3 text-sm ${feedback.type === 'error' ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
-            {feedback.text}
-          </div>
-        )}
-
         <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
@@ -514,7 +505,7 @@ export default function ScraperPage() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => { setScraperLogs([]); setFeedback(null); }}
+                    onClick={() => setScraperLogs([])}
                     className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
                   >
                     Clear logs
