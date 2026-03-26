@@ -7,6 +7,7 @@ import re
 from typing import Dict, List, Optional
 
 from playwright.async_api import Page
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
@@ -334,6 +335,30 @@ async def process_single_profile(
                                 logger.warning("  Immediate Groq analysis failed (dup update): %s", groq_exc)
                         await page.close()
                         return True
+
+                # ── Name + location duplicate check ──────────────────────────
+                # If we already have a row for the same person (same normalised
+                # name AND same normalised location bucket), drop this entry.
+                name_loc_dup = (
+                    db.query(SearchResult)
+                    .filter(
+                        SearchResult.archived.is_(False),
+                        func.lower(func.trim(SearchResult.name))
+                        == func.lower(func.trim(final_name)),
+                        func.lower(func.trim(func.coalesce(SearchResult.location, "")))
+                        == func.lower(func.trim(location_text or "")),
+                    )
+                    .first()
+                )
+                if name_loc_dup:
+                    logger.info(
+                        "  Duplicate name+location — dropping (existing ID: %s, name=%r, location=%r)",
+                        name_loc_dup.id,
+                        final_name,
+                        location_text,
+                    )
+                    await page.close()
+                    return False
 
                 search_result = SearchResult(
                     name=final_name,
