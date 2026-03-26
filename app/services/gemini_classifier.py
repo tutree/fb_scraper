@@ -15,6 +15,10 @@ from .classification_prompts import (
 
 logger = get_logger(__name__)
 
+# Temporary: verbose geo logging for debugging US/non-US mismatches — remove when stable.
+_GEO_DEBUG_MAX_PROMPT_CHARS = 12_000
+_GEO_DEBUG_MAX_PREVIEW_CHARS = 1_200
+
 
 class GeminiClassifier:
     """
@@ -201,6 +205,14 @@ Your entire reply must be that JSON object alone: first character {{, last chara
         """
         post_content = clean_facebook_post_content(post_content) or ""
 
+        logger.info(
+            "[GEO_DEBUG] inputs: location=%r user_name=%r raw_post_len=%d post_preview=%r",
+            (location or "")[:500],
+            (user_name or "")[:200],
+            len(post_content),
+            (post_content[:_GEO_DEBUG_MAX_PREVIEW_CHARS] if post_content else ""),
+        )
+
         if location and location.strip():
             prompt = f"""You are a geographic classifier. Given a Facebook user's location string, determine whether they are located in the United States.
 
@@ -233,24 +245,45 @@ Return ONLY valid JSON (no markdown):
 {{"is_us": true, "confidence": 0.8, "reason": "Post is in English with no non-US indicators"}}
 """
         else:
-            return {"is_us": True, "confidence": 0.3, "reason": "No location or content to classify"}
+            out = {"is_us": True, "confidence": 0.3, "reason": "No location or content to classify"}
+            logger.info("[GEO_DEBUG] skip LLM (empty location and post after clean) — returning %s", out)
+            return out
+
+        plen = len(prompt)
+        prompt_logged = prompt if plen <= _GEO_DEBUG_MAX_PROMPT_CHARS else (
+            prompt[:_GEO_DEBUG_MAX_PROMPT_CHARS] + "...[truncated]"
+        )
+        logger.info(
+            "[GEO_DEBUG] user prompt len=%d chars:\n%s",
+            plen,
+            prompt_logged,
+        )
 
         try:
             if self.provider == "gemini":
                 response = self.model.generate_content(prompt)
                 response_text = response.text.strip()
+                logger.info("[GEO_DEBUG] gemini raw response_text=%r", response_text[:4000])
             elif self.provider == "groq":
                 from .groq_client import groq_chat_json
 
+                logger.info(
+                    "[GEO_DEBUG] groq system_prompt=%r",
+                    JSON_OBJECT_SYSTEM_GEO,
+                )
                 result = await groq_chat_json(
                     prompt,
                     system_prompt=JSON_OBJECT_SYSTEM_GEO,
+                    debug_log_tag="GEO_DEBUG",
                 )
-                return {
+                logger.info("[GEO_DEBUG] groq parsed dict (before coerce): %s", result)
+                out = {
                     "is_us": coerce_is_us_boolean(result.get("is_us")),
                     "confidence": max(0.0, min(1.0, float(result.get("confidence", 0.5)))),
                     "reason": str(result.get("reason", "")),
                 }
+                logger.info("[GEO_DEBUG] normalize geo result: %s", out)
+                return out
             else:
                 raise ValueError(f"Unsupported AI_PROVIDER for geo: {self.provider}")
 
@@ -261,11 +294,14 @@ Return ONLY valid JSON (no markdown):
                 response_text = response_text.strip()
 
             result = json.loads(response_text)
-            return {
+            logger.info("[GEO_DEBUG] gemini parsed json (before coerce): %s", result)
+            out = {
                 "is_us": coerce_is_us_boolean(result.get("is_us")),
                 "confidence": max(0.0, min(1.0, float(result.get("confidence", 0.5)))),
                 "reason": str(result.get("reason", "")),
             }
+            logger.info("[GEO_DEBUG] normalize geo result: %s", out)
+            return out
 
         except Exception as e:
             logger.warning("Geo classification failed: %s", e)

@@ -10,6 +10,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 
 from ...core.database import get_db
+from ...core.logging_config import get_logger
 from ...services.scraper import ScraperService
 from ...services.gemini_classifier import GeminiClassifier
 from ...services.enformion_service import EnformionService
@@ -17,6 +18,7 @@ from ...schemas.search_result import (
     SearchResultResponse,
     SearchResultList,
     RecentProcessedItem,
+    RecentProcessedList,
     SearchResultUpdate,
     AnalyzeBatchRequest,
     AnalyzeBatchResponse,
@@ -42,6 +44,8 @@ from ...services.classification_prompts import should_remove_not_tutoring_relate
 from ...services.search_result_cleanup import delete_search_result_and_comments
 
 router = APIRouter(prefix="/results", tags=["results"])
+
+logger = get_logger(__name__)
 
 _NOT_ARCHIVED = SearchResult.archived.is_(False)
 
@@ -109,11 +113,18 @@ async def _analyze_search_result(
         )
 
     try:
+        logger.info(
+            "[GEO_DEBUG] analyze flow search_result id=%s location=%r name=%r",
+            result.id,
+            (result.location or "")[:300],
+            (result.name or "")[:200],
+        )
         geo_raw = await classifier.classify_geo(
             location=result.location or "",
             post_content=result.post_content or "",
             user_name=result.name or "",
         )
+        logger.info("[GEO_DEBUG] analyze flow geo_raw after classify_geo: %s", geo_raw)
         geo_out = _geo_raw_to_out(geo_raw)
 
         if not coerce_is_us_boolean(geo_raw.get("is_us")):
@@ -258,57 +269,119 @@ async def get_results(
     )
 
 
-@router.get("/recent", response_model=List[RecentProcessedItem])
+def _recent_item_from_result(r: SearchResult) -> RecentProcessedItem:
+    return RecentProcessedItem(
+        id=r.id,
+        name=r.name or "",
+        search_keyword=r.search_keyword or "",
+        post_url=r.post_url,
+        location=r.location,
+        user_type=r.user_type.value if r.user_type else None,
+        scraped_at=r.scraped_at,
+        analyzed_at=r.analyzed_at,
+        enriched_at=r.enriched_at,
+        geo_filtered_at=r.geo_filtered_at,
+        is_us=r.is_us,
+    )
+
+
+@router.get("/recent", response_model=RecentProcessedList)
 async def get_recent_processed(
-    process_type: str = Query("scraped", description="scraped | analyzed | enriched"),
+    process_type: str = Query(
+        "scraped",
+        description="scraped | analyzed | enriched | geo_filtered | comment_analyzed",
+    ),
+    skip: int = Query(0, ge=0),
     limit: int = Query(10, ge=1, le=50),
     db: Session = Depends(get_db),
 ):
-    """Last processed entries for Jobs page: scraped, analyzed, or enriched."""
+    """Paginated last-processed entries for Jobs page."""
     process_type = (process_type or "scraped").strip().lower()
+
     if process_type == "scraped":
-        query = (
+        q = (
             db.query(SearchResult)
             .filter(_NOT_ARCHIVED)
             .order_by(SearchResult.scraped_at.desc().nullslast())
-            .limit(limit)
         )
-    elif process_type == "analyzed":
-        query = (
+        total = q.count()
+        rows = q.offset(skip).limit(limit).all()
+        return RecentProcessedList(total=total, items=[_recent_item_from_result(r) for r in rows])
+
+    if process_type == "analyzed":
+        q = (
             db.query(SearchResult)
             .filter(_NOT_ARCHIVED, SearchResult.analyzed_at.isnot(None))
             .order_by(SearchResult.analyzed_at.desc())
-            .limit(limit)
         )
-    elif process_type == "enriched":
-        query = (
+        total = q.count()
+        rows = q.offset(skip).limit(limit).all()
+        return RecentProcessedList(total=total, items=[_recent_item_from_result(r) for r in rows])
+
+    if process_type == "enriched":
+        q = (
             db.query(SearchResult)
             .filter(_NOT_ARCHIVED, SearchResult.enriched_at.isnot(None))
             .order_by(SearchResult.enriched_at.desc())
-            .limit(limit)
         )
-    else:
-        query = (
+        total = q.count()
+        rows = q.offset(skip).limit(limit).all()
+        return RecentProcessedList(total=total, items=[_recent_item_from_result(r) for r in rows])
+
+    if process_type == "geo_filtered":
+        q = (
             db.query(SearchResult)
-            .filter(_NOT_ARCHIVED)
-            .order_by(SearchResult.scraped_at.desc().nullslast())
-            .limit(limit)
+            .filter(_NOT_ARCHIVED, SearchResult.geo_filtered_at.isnot(None))
+            .order_by(SearchResult.geo_filtered_at.desc())
         )
-    results = query.all()
-    return [
-        RecentProcessedItem(
-            id=r.id,
-            name=r.name or "",
-            search_keyword=r.search_keyword or "",
-            post_url=r.post_url,
-            location=r.location,
-            user_type=r.user_type.value if r.user_type else None,
-            scraped_at=r.scraped_at,
-            analyzed_at=r.analyzed_at,
-            enriched_at=r.enriched_at,
+        total = q.count()
+        rows = q.offset(skip).limit(limit).all()
+        return RecentProcessedList(total=total, items=[_recent_item_from_result(r) for r in rows])
+
+    if process_type == "comment_analyzed":
+        q = (
+            db.query(PostComment, SearchResult)
+            .join(SearchResult, PostComment.search_result_id == SearchResult.id)
+            .filter(
+                PostComment.archived.is_(False),
+                SearchResult.archived.is_(False),
+                PostComment.analyzed_at.isnot(None),
+            )
+            .order_by(PostComment.analyzed_at.desc())
         )
-        for r in results
-    ]
+        total = q.count()
+        batch = q.offset(skip).limit(limit).all()
+        items: List[RecentProcessedItem] = []
+        for c, sr in batch:
+            text = (c.comment_text or "").strip()
+            preview = text if len(text) <= 200 else text[:197] + "..."
+            items.append(
+                RecentProcessedItem(
+                    id=c.id,
+                    name=c.author_name or "—",
+                    search_keyword=sr.search_keyword or "",
+                    post_url=sr.post_url,
+                    location=sr.location,
+                    user_type=c.user_type.value if c.user_type else None,
+                    scraped_at=c.scraped_at,
+                    analyzed_at=c.analyzed_at,
+                    enriched_at=None,
+                    geo_filtered_at=None,
+                    is_us=None,
+                    lead_name=sr.name or "",
+                    comment_preview=preview or None,
+                )
+            )
+        return RecentProcessedList(total=total, items=items)
+
+    q = (
+        db.query(SearchResult)
+        .filter(_NOT_ARCHIVED)
+        .order_by(SearchResult.scraped_at.desc().nullslast())
+    )
+    total = q.count()
+    rows = q.offset(skip).limit(limit).all()
+    return RecentProcessedList(total=total, items=[_recent_item_from_result(r) for r in rows])
 
 
 @router.get("/export/enriched")

@@ -4,6 +4,8 @@ from collections import deque
 from threading import Lock
 from typing import List
 
+import colorlog
+
 _LOG_BUFFER = deque(maxlen=5000)
 _LOG_BUFFER_LOCK = Lock()
 
@@ -21,19 +23,49 @@ class InMemoryLogHandler(logging.Handler):
             pass
 
 
-def setup_logging(level: str = "INFO") -> None:
-    """Configure application-wide logging."""
-    log_format = (
+def _plain_log_format() -> str:
+    return (
         "%(asctime)s | %(levelname)-8s | %(name)s:%(funcName)s:%(lineno)d - %(message)s"
     )
+
+
+def _stdout_colored_formatter() -> colorlog.ColoredFormatter:
+    """Level label (INFO, WARNING, …) uses secondary_log_colors; INFO = green."""
+    return colorlog.ColoredFormatter(
+        fmt=(
+            "%(asctime)s | "
+            "%(levelname_log_color)s%(levelname)-8s%(reset)s | "
+            "%(cyan)s%(name)s%(reset)s:"
+            "%(blue)s%(funcName)s%(reset)s:"
+            "%(lineno)d - %(message)s"
+        ),
+        datefmt=None,
+        reset=True,
+        log_colors={},
+        secondary_log_colors={
+            "levelname": {
+                "DEBUG": "cyan",
+                "INFO": "bold,green",
+                "WARNING": "yellow",
+                "ERROR": "red",
+                "CRITICAL": "red,bg_white",
+            },
+        },
+    )
+
+
+def setup_logging(level: str = "INFO") -> None:
+    """Configure application-wide logging."""
+    plain = _plain_log_format()
 
     # Create handlers with explicit flushing
     stdout_handler = logging.StreamHandler(sys.stdout)
     stdout_handler.setLevel(getattr(logging, level.upper(), logging.INFO))
-    stdout_handler.setFormatter(logging.Formatter(log_format))
+    stdout_handler.setFormatter(_stdout_colored_formatter())
     memory_handler = InMemoryLogHandler()
     memory_handler.setLevel(getattr(logging, level.upper(), logging.INFO))
-    memory_handler.setFormatter(logging.Formatter(log_format))
+    # No ANSI in buffer — used for API/dashboard log streaming
+    memory_handler.setFormatter(logging.Formatter(plain))
 
     # Configure root logger
     root_logger = logging.getLogger()

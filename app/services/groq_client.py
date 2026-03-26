@@ -68,6 +68,7 @@ async def groq_chat_json(
     api_key: Optional[str] = None,
     temperature: float = 0.2,
     use_json_object_mode: bool = True,
+    debug_log_tag: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Call Groq chat completions and parse the assistant message as JSON.
 
@@ -167,6 +168,17 @@ async def groq_chat_json(
                 last_exc = ValueError("empty assistant content from Groq")
                 await asyncio.sleep(min(2.0 * (attempt + 1), 8.0))
                 continue
+            if debug_log_tag:
+                logger.info(
+                    "[%s] groq HTTP response id=%r model=%r finish_reason=%r "
+                    "raw_assistant_len=%d raw_assistant=%r",
+                    debug_log_tag,
+                    data.get("id"),
+                    data.get("model"),
+                    finish_reason,
+                    len(content or ""),
+                    (content or "")[:12_000],
+                )
             try:
                 return _parse_assistant_json(content)
             except ValueError as ve:

@@ -72,6 +72,16 @@ class RecentProcessedItem(BaseModel):
     scraped_at: Optional[datetime] = None
     analyzed_at: Optional[datetime] = None
     enriched_at: Optional[datetime] = None
+    geo_filtered_at: Optional[datetime] = None
+    is_us: Optional[bool] = None
+    # comment_analyzed tab: parent lead + comment snippet
+    lead_name: Optional[str] = None
+    comment_preview: Optional[str] = None
+
+
+class RecentProcessedList(BaseModel):
+    total: int
+    items: List[RecentProcessedItem]
 
 
 # --- Analysis schemas ---

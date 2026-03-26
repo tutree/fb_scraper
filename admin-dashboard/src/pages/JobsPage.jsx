@@ -10,10 +10,14 @@ const STATUS_COLORS = {
   stopped: 'bg-violet-100 text-violet-800',
 }
 
+const RECENT_PAGE_SIZE = 10
+
 const PROCESS_TABS = [
   { id: 'scraped', label: 'Scraped' },
   { id: 'analyzed', label: 'Analyzed' },
   { id: 'enriched', label: 'Enriched' },
+  { id: 'geo_filtered', label: 'Geo filtered' },
+  { id: 'comment_analyzed', label: 'Comments' },
 ]
 
 const getErrorMessage = (err, fallback) =>
@@ -112,6 +116,8 @@ export default function JobsPage() {
   const [processTab, setProcessTab] = useState('scraped')
   const [recentProcessed, setRecentProcessed] = useState([])
   const [recentLoading, setRecentLoading] = useState(false)
+  const [recentPage, setRecentPage] = useState(1)
+  const [recentTotal, setRecentTotal] = useState(0)
   const [jobStats, setJobStats] = useState(null)
   const [duplicateModalOpen, setDuplicateModalOpen] = useState(false)
   const [duplicateArchiving, setDuplicateArchiving] = useState(false)
@@ -133,18 +139,6 @@ export default function JobsPage() {
     }
   }
 
-  const fetchRecentProcessed = async (type) => {
-    setRecentLoading(true)
-    try {
-      const res = await api.get(`/results/recent?process_type=${type}&limit=10`)
-      setRecentProcessed(Array.isArray(res.data) ? res.data : [])
-    } catch (err) {
-      setRecentProcessed([])
-    } finally {
-      setRecentLoading(false)
-    }
-  }
-
   useEffect(() => {
     fetchAll()
     const iv = setInterval(fetchAll, 10000)
@@ -152,8 +146,40 @@ export default function JobsPage() {
   }, [])
 
   useEffect(() => {
-    fetchRecentProcessed(processTab)
+    setRecentPage(1)
   }, [processTab])
+
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      setRecentLoading(true)
+      try {
+        const skip = (recentPage - 1) * RECENT_PAGE_SIZE
+        const res = await api.get('/results/recent', {
+          params: {
+            process_type: processTab,
+            skip,
+            limit: RECENT_PAGE_SIZE,
+          },
+        })
+        if (!cancelled) {
+          setRecentProcessed(Array.isArray(res.data?.items) ? res.data.items : [])
+          setRecentTotal(typeof res.data?.total === 'number' ? res.data.total : 0)
+        }
+      } catch {
+        if (!cancelled) {
+          setRecentProcessed([])
+          setRecentTotal(0)
+        }
+      } finally {
+        if (!cancelled) setRecentLoading(false)
+      }
+    }
+    load()
+    return () => {
+      cancelled = true
+    }
+  }, [processTab, recentPage])
 
   const update = async (patch) => {
     setUpdating(true)
@@ -260,6 +286,52 @@ export default function JobsPage() {
           </div>
 
           <div className="mt-5 grid gap-5 sm:grid-cols-2">
+            {/* Geo-location filtering — full width so it stays visible */}
+            <div className="rounded-xl border border-teal-200 bg-gradient-to-br from-teal-50 to-white p-4 sm:col-span-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="text-sm font-bold text-teal-900">Geo-location filtering</h3>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        await api.post('/automation/trigger-geo-filter')
+                        toast.success('Geo filter job triggered')
+                      } catch (e) {
+                        toast.error(getErrorMessage(e, 'Failed to trigger'))
+                      }
+                    }}
+                    className="rounded-lg bg-teal-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-teal-700"
+                  >
+                    Run now
+                  </button>
+                </div>
+                <span className="rounded-full bg-teal-100 px-2.5 py-0.5 text-xs font-semibold text-teal-800">
+                  {(jobStats.geo_filter_us || 0) + (jobStats.geo_filter_non_us || 0)} classified
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-teal-800/80">
+                US / non-US classification; non-US rows removed when confidence is high enough. Pending = not yet geo-filtered.
+              </p>
+              <JobStatusBadge jobInfo={status?.jobs?.geo_filter} />
+              <div className="mt-2 flex flex-wrap gap-2">
+                <StatPill label="US" value={jobStats.geo_filter_us} color="bg-emerald-100 text-emerald-900" />
+                <StatPill label="non-US" value={jobStats.geo_filter_non_us} color="bg-rose-100 text-rose-900" />
+                <StatPill label="pending" value={jobStats.geo_filter_pending} color="bg-amber-100 text-amber-900" />
+              </div>
+              <BreakdownBar
+                items={[
+                  { label: 'US', value: jobStats.geo_filter_us, color: '#14b8a6' },
+                  { label: 'Non-US', value: jobStats.geo_filter_non_us, color: '#f43f5e' },
+                  { label: 'Pending', value: jobStats.geo_filter_pending, color: '#f59e0b' },
+                ]}
+              />
+              <div className="mt-3">
+                <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Geo-filtered per hour</p>
+                <MiniBarChart data={jobStats.geo_filter_hourly} color="#14b8a6" />
+              </div>
+            </div>
+
             {/* Scraper */}
             <div className="rounded-xl border border-slate-200 bg-gradient-to-br from-indigo-50 to-white p-4">
               <div className="flex items-center justify-between">
@@ -307,9 +379,10 @@ export default function JobsPage() {
                 <div className="flex items-center gap-2">
                   <h3 className="text-sm font-bold text-violet-900">Comment Analyzer</h3>
                   <button
+                    type="button"
                     onClick={async () => { try { await api.post('/automation/trigger-comment-analyze'); toast.success('Comment analyzer triggered'); } catch (e) { toast.error(getErrorMessage(e, 'Failed to trigger')); } }}
-                    className="rounded bg-violet-600 px-2 py-0.5 text-[10px] font-semibold text-white hover:bg-violet-700 transition"
-                  >Run Now</button>
+                    className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-violet-700"
+                  >Run now</button>
                 </div>
                 <span className="rounded-full bg-violet-100 px-2.5 py-0.5 text-xs font-semibold text-violet-700">{jobStats.comment_analyze_done} done</span>
               </div>
@@ -653,17 +726,18 @@ export default function JobsPage() {
         </div>
       </section>
 
-      {/* Last processed: Scraped / Analyzed / Enriched */}
+      {/* Last processed — all job kinds, paginated */}
       <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
         <div className="border-b border-slate-200 px-6 py-4">
           <h3 className="text-sm font-bold text-slate-900">Last processed</h3>
-          <div className="mt-3 flex gap-1 rounded-lg bg-slate-100 p-1">
+          <p className="mt-1 text-xs text-slate-500">Recent activity by job type. Use Next / Previous to load more rows.</p>
+          <div className="mt-3 flex flex-wrap gap-1 rounded-lg bg-slate-100 p-1">
             {PROCESS_TABS.map((tab) => (
               <button
                 key={tab.id}
                 type="button"
                 onClick={() => setProcessTab(tab.id)}
-                className={`rounded-md px-4 py-2 text-sm font-medium transition ${processTab === tab.id ? 'bg-white text-slate-900 shadow' : 'text-slate-600 hover:text-slate-900'}`}
+                className={`rounded-md px-3 py-2 text-sm font-medium transition sm:px-4 ${processTab === tab.id ? 'bg-white text-slate-900 shadow' : 'text-slate-600 hover:text-slate-900'}`}
               >
                 {tab.label}
               </button>
@@ -677,36 +751,88 @@ export default function JobsPage() {
             <table className="min-w-full divide-y divide-slate-200">
               <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
                 <tr>
-                  <th className="px-4 py-3">Name</th>
-                  {processTab === 'scraped' && <th className="px-4 py-3">Keyword</th>}
-                  {processTab === 'analyzed' && <th className="px-4 py-3">User type</th>}
-                  {processTab === 'enriched' && <th className="px-4 py-3">Location</th>}
-                  <th className="px-4 py-3">{processTab === 'scraped' ? 'Scraped at' : processTab === 'analyzed' ? 'Analyzed at' : 'Enriched at'}</th>
+                  {processTab === 'comment_analyzed' ? (
+                    <>
+                      <th className="px-4 py-3">Lead</th>
+                      <th className="px-4 py-3">Comment author</th>
+                      <th className="px-4 py-3">Keyword</th>
+                      <th className="px-4 py-3 min-w-[180px]">Comment</th>
+                      <th className="px-4 py-3 whitespace-nowrap">Analyzed at</th>
+                    </>
+                  ) : processTab === 'geo_filtered' ? (
+                    <>
+                      <th className="px-4 py-3">Name</th>
+                      <th className="px-4 py-3">Location</th>
+                      <th className="px-4 py-3">US</th>
+                      <th className="px-4 py-3 whitespace-nowrap">Geo filtered at</th>
+                    </>
+                  ) : (
+                    <>
+                      <th className="px-4 py-3">Name</th>
+                      {processTab === 'scraped' && <th className="px-4 py-3">Keyword</th>}
+                      {processTab === 'analyzed' && (
+                        <>
+                          <th className="px-4 py-3">User type</th>
+                          <th className="px-4 py-3">Keyword</th>
+                        </>
+                      )}
+                      {processTab === 'enriched' && <th className="px-4 py-3">Location</th>}
+                      <th className="px-4 py-3 whitespace-nowrap">
+                        {processTab === 'scraped' ? 'Scraped at' : processTab === 'analyzed' ? 'Analyzed at' : 'Enriched at'}
+                      </th>
+                    </>
+                  )}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {recentProcessed.length === 0 ? (
                   <tr>
-                    <td colSpan={4} className="px-4 py-10 text-center text-sm text-slate-500">
-                      No {processTab} entries yet.
+                    <td colSpan={6} className="px-4 py-10 text-center text-sm text-slate-500">
+                      No entries for this view yet.
                     </td>
                   </tr>
                 ) : (
                   recentProcessed.map((row) => (
                     <tr key={row.id} className="text-sm">
-                      <td className="px-4 py-3 font-medium text-slate-900">{row.name || '—'}</td>
-                      {processTab === 'scraped' && <td className="px-4 py-3 text-slate-600">{row.search_keyword || '—'}</td>}
-                      {processTab === 'analyzed' && (
-                        <td className="px-4 py-3">
-                          <span className="inline-block rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">{row.user_type || '—'}</span>
-                        </td>
+                      {processTab === 'comment_analyzed' ? (
+                        <>
+                          <td className="px-4 py-3 font-medium text-slate-900">{row.lead_name || '—'}</td>
+                          <td className="px-4 py-3 text-slate-800">{row.name || '—'}</td>
+                          <td className="px-4 py-3 text-slate-600">{row.search_keyword || '—'}</td>
+                          <td className="max-w-xs px-4 py-3 text-slate-600" title={row.comment_preview || ''}>
+                            {row.comment_preview || '—'}
+                          </td>
+                          <td className="whitespace-nowrap px-4 py-3 text-slate-500">{formatDate(row.analyzed_at)}</td>
+                        </>
+                      ) : processTab === 'geo_filtered' ? (
+                        <>
+                          <td className="px-4 py-3 font-medium text-slate-900">{row.name || '—'}</td>
+                          <td className="max-w-[220px] truncate px-4 py-3 text-slate-600" title={row.location || ''}>{row.location || '—'}</td>
+                          <td className="px-4 py-3 text-slate-700">
+                            {row.is_us === true ? <span className="text-emerald-700 font-medium">Yes</span> : row.is_us === false ? <span className="text-rose-700 font-medium">No</span> : '—'}
+                          </td>
+                          <td className="whitespace-nowrap px-4 py-3 text-slate-500">{formatDate(row.geo_filtered_at)}</td>
+                        </>
+                      ) : (
+                        <>
+                          <td className="px-4 py-3 font-medium text-slate-900">{row.name || '—'}</td>
+                          {processTab === 'scraped' && <td className="px-4 py-3 text-slate-600">{row.search_keyword || '—'}</td>}
+                          {processTab === 'analyzed' && (
+                            <>
+                              <td className="px-4 py-3">
+                                <span className="inline-block rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">{row.user_type || '—'}</span>
+                              </td>
+                              <td className="px-4 py-3 text-slate-600">{row.search_keyword || '—'}</td>
+                            </>
+                          )}
+                          {processTab === 'enriched' && <td className="max-w-[200px] truncate px-4 py-3 text-slate-600">{row.location || '—'}</td>}
+                          <td className="whitespace-nowrap px-4 py-3 text-slate-500">
+                            {processTab === 'scraped' && formatDate(row.scraped_at)}
+                            {processTab === 'analyzed' && formatDate(row.analyzed_at)}
+                            {processTab === 'enriched' && formatDate(row.enriched_at)}
+                          </td>
+                        </>
                       )}
-                      {processTab === 'enriched' && <td className="max-w-[200px] truncate px-4 py-3 text-slate-600">{row.location || '—'}</td>}
-                      <td className="px-4 py-3 text-slate-500">
-                        {processTab === 'scraped' && formatDate(row.scraped_at)}
-                        {processTab === 'analyzed' && formatDate(row.analyzed_at)}
-                        {processTab === 'enriched' && formatDate(row.enriched_at)}
-                      </td>
                     </tr>
                   ))
                 )}
@@ -714,6 +840,43 @@ export default function JobsPage() {
             </table>
           )}
         </div>
+        {(() => {
+          const totalPages = Math.max(1, Math.ceil(recentTotal / RECENT_PAGE_SIZE) || 1)
+          const from = recentTotal === 0 ? 0 : (recentPage - 1) * RECENT_PAGE_SIZE + 1
+          const to = Math.min(recentPage * RECENT_PAGE_SIZE, recentTotal)
+          return (
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-4 py-3 sm:px-6">
+              <p className="text-sm text-slate-600">
+                {recentTotal === 0 ? (
+                  '0 rows'
+                ) : (
+                  <>
+                    Showing <span className="font-medium tabular-nums">{from}</span>–<span className="font-medium tabular-nums">{to}</span> of <span className="font-medium tabular-nums">{recentTotal}</span>
+                    <span className="ml-2 text-slate-400">· Page {recentPage} / {totalPages}</span>
+                  </>
+                )}
+              </p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  disabled={recentPage <= 1 || recentLoading}
+                  onClick={() => setRecentPage((p) => Math.max(1, p - 1))}
+                  className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-800 shadow-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Previous
+                </button>
+                <button
+                  type="button"
+                  disabled={recentPage >= totalPages || recentLoading || recentTotal === 0}
+                  onClick={() => setRecentPage((p) => p + 1)}
+                  className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-800 shadow-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )
+        })()}
       </section>
     </div>
   )
