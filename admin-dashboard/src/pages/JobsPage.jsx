@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import api from '../api'
+import LeadDetailModal from '../components/LeadDetailModal'
 
 const STATUS_COLORS = {
   completed: 'bg-emerald-100 text-emerald-800',
@@ -121,6 +122,8 @@ export default function JobsPage() {
   const [jobStats, setJobStats] = useState(null)
   const [duplicateModalOpen, setDuplicateModalOpen] = useState(false)
   const [duplicateArchiving, setDuplicateArchiving] = useState(false)
+  const [leadModalResult, setLeadModalResult] = useState(null)
+  const [recentRefreshTick, setRecentRefreshTick] = useState(0)
 
   const fetchAll = async () => {
     try {
@@ -179,7 +182,23 @@ export default function JobsPage() {
     return () => {
       cancelled = true
     }
-  }, [processTab, recentPage])
+  }, [processTab, recentPage, recentRefreshTick])
+
+  const refreshJobsAfterLeadChange = () => {
+    fetchAll()
+    setRecentRefreshTick((t) => t + 1)
+  }
+
+  const openLeadFromRecentRow = async (row) => {
+    const leadId = row.search_result_id ?? row.id
+    if (!leadId) return
+    try {
+      const res = await api.get(`/results/${leadId}`)
+      setLeadModalResult(res.data)
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Failed to load lead'))
+    }
+  }
 
   const update = async (patch) => {
     setUpdating(true)
@@ -793,7 +812,11 @@ export default function JobsPage() {
                   </tr>
                 ) : (
                   recentProcessed.map((row) => (
-                    <tr key={row.id} className="text-sm">
+                    <tr
+                      key={row.id}
+                      className="cursor-pointer text-sm hover:bg-slate-50"
+                      onClick={() => openLeadFromRecentRow(row)}
+                    >
                       {processTab === 'comment_analyzed' ? (
                         <>
                           <td className="px-4 py-3 font-medium text-slate-900">{row.lead_name || '—'}</td>
@@ -878,6 +901,14 @@ export default function JobsPage() {
           )
         })()}
       </section>
+
+      <LeadDetailModal
+        open={!!leadModalResult}
+        onClose={() => setLeadModalResult(null)}
+        result={leadModalResult}
+        onResultUpdated={setLeadModalResult}
+        onListsRefresh={refreshJobsAfterLeadChange}
+      />
     </div>
   )
 }

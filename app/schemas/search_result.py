@@ -64,6 +64,8 @@ class SearchResultList(BaseModel):
 class RecentProcessedItem(BaseModel):
     """Minimal fields for Jobs page 'Last processed' tables."""
     id: UUID
+    # Parent search result (same as id for lead rows; for comment rows id is comment id)
+    search_result_id: UUID
     name: str
     search_keyword: str
     post_url: Optional[str] = None

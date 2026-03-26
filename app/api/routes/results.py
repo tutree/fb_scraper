@@ -272,6 +272,7 @@ async def get_results(
 def _recent_item_from_result(r: SearchResult) -> RecentProcessedItem:
     return RecentProcessedItem(
         id=r.id,
+        search_result_id=r.id,
         name=r.name or "",
         search_keyword=r.search_keyword or "",
         post_url=r.post_url,
@@ -358,6 +359,7 @@ async def get_recent_processed(
             items.append(
                 RecentProcessedItem(
                     id=c.id,
+                    search_result_id=sr.id,
                     name=c.author_name or "—",
                     search_keyword=sr.search_keyword or "",
                     post_url=sr.post_url,
