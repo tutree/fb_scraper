@@ -19,7 +19,7 @@ MAX_RETRIES = 1
 RETRY_BACKOFF_SECONDS = [5]
 
 ENFORMION_ENRICH_URL = "https://devapi.enformion.com/contact/enrich"
-ENFORMION_PERSON_SEARCH_URL = "https://devapi.enformion.com/person/search"
+ENFORMION_PERSON_SEARCH_URL = "https://devapi.enformion.com/PersonSearch"
 
 # Headers must match working curl: Content-Type, Accept, galaxy-* only (no User-Agent)
 _HTTP_HEADERS_BASE = {
@@ -180,16 +180,77 @@ class EnformionService:
         )
         data = await self._call(ENFORMION_PERSON_SEARCH_URL, payload, "Person")
 
-        # Person Search returns a list under "persons" (or "person" for single-result mode).
+        # Person Search returns a list under "persons".
         persons = data.get("persons") or []
-        if not persons and data.get("person"):
-            persons = [data["person"]]
         if not persons:
             logger.info("EnformionGO PersonSearch: no match for %r", name)
             return {"matched": False}
 
-        # Take first result (most-relevant match).
-        return self._parse_single_person({"person": persons[0]}, name)
+        # Take first result (most-relevant match). Person Search uses different field names.
+        return self._parse_person_search_result(persons[0], name)
+
+    def _parse_person_search_result(self, person: Dict, name: str) -> Dict:
+        """
+        Parse a single entry from the PersonSearch `persons` array.
+        PersonSearch uses different field names than ContactEnrich:
+          phones  → phoneNumbers  (each: phoneNumber, phoneType, isConnected)
+          emails  → emailAddresses (each: emailAddress)
+          address → addresses     (each: fullAddress / city / state / zip)
+        """
+        if not person:
+            return {"matched": False}
+
+        name_obj = person.get("name") or {}
+        full_name = " ".join(filter(None, [
+            name_obj.get("firstName"),
+            name_obj.get("middleName"),
+            name_obj.get("lastName"),
+        ]))
+
+        phones = [
+            {
+                "number": p.get("phoneNumber"),
+                "type": p.get("phoneType"),
+                "is_connected": p.get("isConnected"),
+            }
+            for p in (person.get("phoneNumbers") or [])
+            if p.get("phoneNumber")
+        ]
+
+        emails = [
+            e.get("emailAddress")
+            for e in (person.get("emailAddresses") or [])
+            if e.get("emailAddress")
+        ]
+
+        addresses = []
+        for a in (person.get("addresses") or []):
+            full = a.get("fullAddress")
+            if full:
+                addresses.append({
+                    "street": full,
+                    "unit": None,
+                    "city": a.get("city"),
+                    "state": a.get("state"),
+                    "zip": a.get("zip"),
+                })
+
+        result = {
+            "matched": True,
+            "full_name": full_name,
+            "age": person.get("age"),
+            "phones": phones,
+            "emails": emails,
+            "addresses": addresses,
+        }
+        logger.info(
+            "EnformionGO PersonSearch match: %s, phones=%d, emails=%d, addresses=%d",
+            result["full_name"],
+            len(phones),
+            len(emails),
+            len(addresses),
+        )
+        return result
 
     def _parse_single_person(self, data: Dict, name: str) -> Dict:
         """Map a {person: ...} envelope to our standard enrichment dict."""

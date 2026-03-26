@@ -665,13 +665,21 @@ async def _enrich_single(
     if not can:
         return _format_enrich_item(result, False, reason)
 
+    # Primary: Contact Enrichment
     try:
         data = await service.enrich(result.name, result.location)
     except Exception as exc:
         return _format_enrich_item(result, False, f"EnformionGO API error: {exc}")
 
+    # Fallback: Person Search (more powerful, used when primary returns no match)
     if not data.get("matched"):
-        return _format_enrich_item(result, False, "No match found in EnformionGO")
+        try:
+            data = await service.person_search(result.name, result.location)
+        except Exception as exc:
+            return _format_enrich_item(result, False, f"EnformionGO Person Search error: {exc}")
+
+    if not data.get("matched"):
+        return _format_enrich_item(result, False, "No match found in EnformionGO (tried Contact Enrichment + Person Search)")
 
     result.enriched_phones = data.get("phones")
     result.enriched_emails = data.get("emails")
