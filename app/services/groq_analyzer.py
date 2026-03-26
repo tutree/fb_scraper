@@ -21,6 +21,10 @@ from ..utils.validators import (
     is_enrichable,
     parse_facebook_date,
 )
+from .classification_prompts import (
+    COMMENT_AUTHOR_STRICT_RULES,
+    POST_AUTHOR_STRICT_RULES,
+)
 from .groq_client import groq_chat_json
 
 logger = get_logger(__name__)
@@ -117,18 +121,17 @@ async def _classify_post_groq(post_content: str, user_name: str) -> Dict[str, An
             "reason": "No post content available",
         }
 
-    prompt = f"""You are analyzing a Facebook post scraped from a search results page. The raw text may contain Facebook UI artifacts such as repeated words like "Facebook", navigation labels ("Like", "Comment", "Share"), reaction counts, or timestamps mixed into the post body. Your first task is to mentally extract only the actual user-written post content, ignoring all UI noise.
+    prompt = f"""You are analyzing a Facebook post scraped from a search results page. The raw text may contain Facebook UI artifacts ("Facebook", "Like", "Comment", "Share", reaction counts, timestamps). Extract only the real user-written message; ignore UI noise.
 
 User: {user_name if user_name else "Unknown"}
 Raw scraped text: {post_content}
 
-After extracting the real post content, classify the POST AUTHOR:
-- CUSTOMER: User is looking for a tutor, needs help, asking for tutoring recommendations, seeking educational services
-- TUTOR: User is offering tutoring services, advertising their tutoring business, promoting their teaching
-- UNKNOWN: Post is unclear, irrelevant, only contains UI noise with no real content, or doesn't clearly indicate either category
+Classify the POST AUTHOR using these rules:
 
-Return ONLY valid JSON (no markdown):
-{{"type": "CUSTOMER", "confidence": 0.95, "reason": "User explicitly asks for a tutor"}}"""
+{POST_AUTHOR_STRICT_RULES}
+
+Return ONLY valid JSON (no markdown). type must be CUSTOMER, TUTOR, or UNKNOWN. confidence 0.0–1.0. reason must cite explicit evidence from the post or explain why UNKNOWN:
+{{"type": "UNKNOWN", "confidence": 0.6, "reason": "..."}}"""
 
     data = await groq_chat_json(prompt)
     data["type"] = str(data.get("type", "UNKNOWN")).upper()
@@ -164,15 +167,12 @@ Search keyword that surfaced this post: {search_keyword or "(none)"}
 COMMENTS (index is stable — you must output one classification per index):
 {chr(10).join(lines)}
 
-For EACH comment, classify the COMMENT AUTHOR:
-- CUSTOMER: looking for a tutor, asking for help, interested in services, "DM", "message me" on a tutor-offering post, etc.
-- TUTOR: offering tutoring or promoting teaching
-- UNKNOWN: generic / off-topic / cannot tell
+For EACH comment, classify the COMMENT AUTHOR using the rules below.
 
-Important: If the post is clearly a tutor offering services, short intents like "hi", "interested", "dm" are usually CUSTOMER.
+{COMMENT_AUTHOR_STRICT_RULES}
 
 Return ONLY valid JSON (no markdown):
-{{"comments": [{{"index": 0, "type": "CUSTOMER", "confidence": 0.9, "reason": "brief"}}, ...]}}
+{{"comments": [{{"index": 0, "type": "UNKNOWN", "confidence": 0.5, "reason": "brief"}}, ...]}}
 
 You MUST include exactly {len(comments)} objects with index 0 through {len(comments) - 1}."""
 

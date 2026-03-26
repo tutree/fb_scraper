@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings
+from pydantic import field_validator
 from typing import List, Optional
 import json
 
@@ -49,6 +50,14 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = ""
     # llama-3.1-8b-instant: 14 400 RPD vs 1 000 RPD for the 70b model — much more headroom
     GROQ_MODEL: str = "llama-3.1-8b-instant"
+
+    @field_validator("GROQ_MODEL", mode="before")
+    @classmethod
+    def _fix_groq_model_typo(cls, v: str) -> str:
+        """Auto-correct common typos like 'lama-' → 'llama-'."""
+        if isinstance(v, str) and v.startswith("lama-"):
+            return "l" + v  # 'lama-...' → 'llama-...'
+        return v
 
     # EnformionGO Contact Enrichment
     ENFORMION_AP_NAME: str = ""

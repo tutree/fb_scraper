@@ -6,8 +6,9 @@ Docs:
 """
 import asyncio
 import json
+import re
 import httpx
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from ..core.config import settings
 from ..core.logging_config import get_logger
@@ -167,27 +168,63 @@ class EnformionService:
         data = await self._call(ENFORMION_ENRICH_URL, payload, "DevAPIContactEnrich")
         return self._parse_single_person(data, name)
 
+    @staticmethod
+    def _compound_last_name_variants(last: str) -> List[str]:
+        """
+        Facebook users sometimes write compound names like 'GuthrieFarmer' or
+        'Guthriefarmer'. Split on CamelCase boundaries and return each chunk
+        as a standalone last-name candidate to retry the search with.
+        E.g. 'Guthriefarmer' → ['Guthrie', 'Farmer']
+             'SmithJones'    → ['Smith', 'Jones']
+        Returns empty list when the name doesn't look compound.
+        """
+        # Find capitalised word chunks inside the string
+        parts = re.findall(r'[A-Z][a-z]+', last)
+        # Only useful when we get 2+ chunks AND they differ from the original
+        if len(parts) >= 2 and "".join(parts).lower() == last.lower():
+            return parts
+        return []
+
     async def person_search(self, name: str, location: str) -> Dict:
         """
         Call EnformionGO Person Search (fallback, more powerful).
         Returns the best-matching person data dict or {"matched": False}.
         Raises on HTTP/network errors.
+
+        When the last name looks like a Facebook compound name (e.g. 'GuthrieFarmer')
+        and the first attempt returns no results, retries with each word-chunk of
+        the last name individually so we still find the record.
         """
-        payload = self._build_person_search_request(name, location)
-        logger.info(
-            "EnformionGO PersonSearch fallback request: name=%r location=%r",
-            name, location,
-        )
-        data = await self._call(ENFORMION_PERSON_SEARCH_URL, payload, "Person")
+        first, middle, last = self.split_name(name)
 
-        # Person Search returns a list under "persons".
-        persons = data.get("persons") or []
-        if not persons:
-            logger.info("EnformionGO PersonSearch: no match for %r", name)
-            return {"matched": False}
+        # Build a list of last-name candidates to try: full last name first,
+        # then any CamelCase sub-parts (e.g. 'Guthrie', 'Farmer').
+        last_candidates: List[str] = [last] + self._compound_last_name_variants(last)
 
-        # Take first result (most-relevant match). Person Search uses different field names.
-        return self._parse_person_search_result(persons[0], name)
+        for candidate_last in last_candidates:
+            candidate_name = f"{first} {candidate_last}".strip()
+            payload = self._build_person_search_request(candidate_name, location)
+            logger.info(
+                "EnformionGO PersonSearch request: name=%r location=%r",
+                candidate_name, location,
+            )
+            data = await self._call(ENFORMION_PERSON_SEARCH_URL, payload, "Person")
+
+            persons = data.get("persons") or []
+            if persons:
+                logger.info(
+                    "EnformionGO PersonSearch: found %d result(s) for last=%r",
+                    len(persons), candidate_last,
+                )
+                return self._parse_person_search_result(persons[0], candidate_name)
+
+            logger.info(
+                "EnformionGO PersonSearch: no match for last=%r, trying next variant...",
+                candidate_last,
+            )
+
+        logger.info("EnformionGO PersonSearch: exhausted all name variants for %r", name)
+        return {"matched": False}
 
     def _parse_person_search_result(self, person: Dict, name: str) -> Dict:
         """

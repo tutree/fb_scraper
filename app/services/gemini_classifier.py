@@ -5,6 +5,10 @@ from typing import Dict, Optional
 from ..core.config import settings
 from ..core.logging_config import get_logger
 from ..utils.validators import clean_facebook_post_content
+from .classification_prompts import (
+    COMMENT_AUTHOR_STRICT_RULES,
+    POST_AUTHOR_STRICT_RULES,
+)
 
 logger = get_logger(__name__)
 
@@ -87,18 +91,15 @@ class GeminiClassifier:
                 "reason": "No post content available",
             }
 
-        prompt = f"""You are analyzing a Facebook post scraped from a search results page. The raw text may contain Facebook UI artifacts such as repeated words like "Facebook", navigation labels ("Like", "Comment", "Share"), reaction counts, or timestamps mixed into the post body. Your first task is to mentally extract only the actual user-written post content, ignoring all UI noise.
+        prompt = f"""You are analyzing a Facebook post scraped from a search results page. The raw text may contain Facebook UI artifacts such as repeated words like "Facebook", navigation labels ("Like", "Comment", "Share"), reaction counts, or timestamps mixed into the post body. Extract only the actual user-written post content; ignore UI noise.
 
 User: {user_name if user_name else "Unknown"}
 Raw scraped text: {post_content}
 
-After extracting the real post content, classify the user:
-- CUSTOMER: User is looking for a tutor, needs help, asking for tutoring recommendations, seeking educational services
-- TUTOR: User is offering tutoring services, advertising their tutoring business, promoting their teaching
-- UNKNOWN: Post is unclear, irrelevant, only contains UI noise with no real content, or doesn't clearly indicate either category
+{POST_AUTHOR_STRICT_RULES}
 
-Return ONLY valid JSON in this exact format (no markdown, no extra text):
-{{"type": "CUSTOMER", "confidence": 0.95, "reason": "User explicitly asks for a tutor"}}
+Return ONLY valid JSON in this exact format (no markdown, no extra text). Use type CUSTOMER, TUTOR, or UNKNOWN; confidence 0.0–1.0; reason must cite which rule above was met or why UNKNOWN:
+{{"type": "UNKNOWN", "confidence": 0.55, "reason": "Brief justification"}}
 """
 
         try:
@@ -149,27 +150,16 @@ Return ONLY valid JSON in this exact format (no markdown, no extra text):
         if post_context:
             context_block += f"Post the comment appears on:\n{post_context[:600]}\n"
 
-        prompt = f"""You are analyzing Facebook comments to find people who are looking for a tutor (CUSTOMER) or people offering tutoring services (TUTOR).
-
-NOTE: The post context below was scraped from Facebook and may contain UI artifacts (repeated "Facebook" words, "Like", "Comment", "Share" buttons, reaction counts, timestamps). Ignore all such noise and focus on the actual user-written content.
+        prompt = f"""NOTE: Post context may include Facebook UI noise ("Like", "Share", timestamps). Ignore it; use only real user-written text.
 
 {context_block}
 Comment author: {author_name or "Unknown"}
 Comment: {comment_text}
 
-Classification rules:
-- CUSTOMER: The commenter is looking for a tutor, asking for help, recommending someone, or expressing a need for tutoring.
-- TUTOR: The commenter is offering tutoring, advertising services, or promoting their own teaching.
-- UNKNOWN: The comment is a generic reply, off-topic, or impossible to classify reliably without more context.
+{COMMENT_AUTHOR_STRICT_RULES}
 
-Important context rule:
-- If the post context is clearly from a tutor offering tutoring services, then short greeting or intent-to-connect comments (e.g. "hi", "hello", "interested", "dm", "inbox", "message me", "check dm") should usually be treated as CUSTOMER rather than UNKNOWN.
-- Only classify as UNKNOWN for greetings when the post context is unclear or unrelated to tutoring.
-
-Consider the post context when interpreting ambiguous comments like "Yes please!", "Me too", "DM sent", etc.
-
-Return ONLY valid JSON, no markdown:
-{{"type": "CUSTOMER", "confidence": 0.9, "reason": "Short explanation"}}
+Return ONLY valid JSON, no markdown. type is CUSTOMER, TUTOR, or UNKNOWN; confidence 0.0–1.0; reason must justify using the definitions above:
+{{"type": "UNKNOWN", "confidence": 0.5, "reason": "Short explanation"}}
 """
         try:
             result = await self._generate_json(prompt)
