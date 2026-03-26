@@ -233,7 +233,7 @@ function App() {
     setFeedback(null)
     try {
       const res = await api.post(`/results/${id}/enrich`, null, {
-        params: { force: false },
+        params: { force: true },
       })
       const item = res.data?.item
       if (item?.success) {
@@ -278,11 +278,11 @@ function App() {
     try {
       const res = await api.post(`/results/enrich/batch`, {
         result_ids: eligible,
-        force_re_enrich: false,
+        force_re_enrich: true,
       })
       const { succeeded = 0, skipped = 0, failed = 0 } = res.data || {}
       const parts = [`${succeeded} enriched`]
-      if (skipped > 0) parts.push(`${skipped} already enriched`)
+      if (skipped > 0) parts.push(`${skipped} skipped`)
       if (failed > 0) parts.push(`${failed} failed`)
       if (skippedNames.length > 0) parts.push(`${skippedNames.length} skipped (no location): ${skippedNames.join(', ')}`)
       setFeedback({

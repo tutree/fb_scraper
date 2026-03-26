@@ -351,12 +351,24 @@ async def process_single_profile(
                     .first()
                 )
                 if name_loc_dup:
+                    _update_existing_result(
+                        name_loc_dup, final_name, location_text, post_content,
+                        post_date, profile_url, keyword, db,
+                    )
                     logger.info(
                         "  Duplicate name+location — dropping (existing ID: %s, name=%r, location=%r)",
                         name_loc_dup.id,
                         final_name,
                         location_text,
                     )
+                    if (settings.GROQ_API_KEY or "").strip() and (
+                        name_loc_dup.analyzed_at is None or name_loc_dup.geo_filtered_at is None
+                    ):
+                        try:
+                            from .groq_analyzer import apply_immediate_groq_analysis
+                            await apply_immediate_groq_analysis(db, name_loc_dup.id)
+                        except Exception as groq_exc:
+                            logger.warning("  Immediate Groq analysis failed (name+loc dup): %s", groq_exc)
                     await page.close()
                     return False
 
