@@ -202,17 +202,17 @@ async def enable_search_recent_posts_filter(page: Page) -> bool:
 
     try:
         await switch.scroll_into_view_if_needed(timeout=10000)
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(0.2)
         checked = (await switch.get_attribute("aria-checked") or "").strip().lower()
         if checked == "true":
             logger.info("Recent Posts filter already enabled (aria-checked=true)")
             return True
         await switch.click(timeout=10000, force=True)
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(0.75)
         checked2 = (await switch.get_attribute("aria-checked") or "").strip().lower()
         if checked2 != "true":
             await switch.click(timeout=10000, force=True)
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
             checked2 = (await switch.get_attribute("aria-checked") or "").strip().lower()
         logger.info(
             "Recent Posts filter toggled (aria-checked was %r -> %r)",
@@ -286,6 +286,24 @@ def _is_user_profile_url(url: str) -> bool:
     if match and match.group(1).lower() in non_profile:
         return False
     return True
+
+
+def _is_group_member_author_url(url: str) -> bool:
+    """
+    Group posts often link the author as /groups/{id}/user/{uid}/ which is not a normal profile slug.
+    These are scraped via the 'View profile' path in process_single_profile (type=group).
+    """
+    if not url or not isinstance(url, str):
+        return False
+    clean = url.split("?")[0].split("&")[0].lower()
+    if "/groups/" not in clean:
+        return False
+    return "/user/" in clean or "/people/" in clean
+
+
+def _is_acceptable_feed_author_url(url: str) -> bool:
+    """Keep profile URLs plus group-scoped member links (not bare /groups/ home or unrelated)."""
+    return _is_user_profile_url(url) or _is_group_member_author_url(url)
 
 
 def _link_key(link: Dict) -> str:
@@ -867,16 +885,41 @@ async def scroll_and_process_posts(
                 return null;
             }
 
-            function addLink(absoluteHref, text, postContent, postUrl, postDate, visibleIndex = null) {
+            function isGroupMemberAuthorHref(href) {
+                if (!href || !href.includes('facebook.com')) return false;
+                try {
+                    const p = new URL(href).pathname.toLowerCase();
+                    if (!p.includes('/groups/')) return false;
+                    return p.includes('/user/') || p.includes('/people/');
+                } catch (e) { return false; }
+            }
+
+            function findAuthorLink(article) {
+                const anchors = article.querySelectorAll('a[href]');
+                for (const a of anchors) {
+                    if (isProfileHref(a.href)) {
+                        return { href: a.href, text: (a.textContent || '').trim(), type: 'direct' };
+                    }
+                }
+                for (const a of anchors) {
+                    if (isGroupMemberAuthorHref(a.href)) {
+                        return { href: a.href, text: (a.textContent || '').trim(), type: 'group' };
+                    }
+                }
+                return null;
+            }
+
+            function addLink(absoluteHref, text, postContent, postUrl, postDate, visibleIndex, linkType) {
                 try {
                     const u = new URL(absoluteHref);
                     const key = `${postUrl || u.pathname.replace(/\\/$/, '')}|${(postContent || '').slice(0, 80)}`;
                     if (seen.has(key)) return;
                     seen.add(key);
+                    const lt = linkType || 'direct';
                     results.push({
                         url: absoluteHref,
                         text: (text || '').trim(),
-                        type: 'direct',
+                        type: lt,
                         post_content: postContent || null,
                         post_url: postUrl || null,
                         post_date: postDate || null,
@@ -935,11 +978,9 @@ async def scroll_and_process_posts(
                 const postContent = extractPostContent(article);
                 const postUrl = extractPostUrl(article);
                 const postDate = extractPostDate(article, postUrl);
-                for (const a of article.querySelectorAll('a[href]')) {
-                    if (isProfileHref(a.href)) {
-                        addLink(a.href, a.textContent, postContent, postUrl, postDate, idx);
-                        break;
-                    }
+                const author = findAuthorLink(article);
+                if (author) {
+                    addLink(author.href, author.text, postContent, postUrl, postDate, idx, author.type);
                 }
             });
 
@@ -951,11 +992,9 @@ async def scroll_and_process_posts(
                         const postContent = extractPostContent(child);
                         const postUrl = extractPostUrl(child);
                         const postDate = extractPostDate(child, postUrl);
-                        for (const a of child.querySelectorAll('a[href]')) {
-                            if (isProfileHref(a.href)) {
-                                addLink(a.href, a.textContent, postContent, postUrl, postDate, idx);
-                                break;
-                            }
+                        const author = findAuthorLink(child);
+                        if (author) {
+                            addLink(author.href, author.text, postContent, postUrl, postDate, idx, author.type);
                         }
                     });
                 }
@@ -963,13 +1002,13 @@ async def scroll_and_process_posts(
 
             // Strategy 3: full main-content scan
             if (results.length === 0) {
-                mainContent.querySelectorAll('a[href]').forEach(a => {
-                    if (isProfileHref(a.href)) {
-                        const parent = a.closest('div[role="article"]');
-                        const postContent = parent ? extractPostContent(parent) : null;
-                        const postUrl = parent ? extractPostUrl(parent) : null;
-                        const postDate = parent ? extractPostDate(parent, postUrl) : null;
-                        addLink(a.href, a.textContent, postContent, postUrl, postDate, null);
+                mainContent.querySelectorAll('div[role="article"]').forEach((article, idx) => {
+                    const postContent = extractPostContent(article);
+                    const postUrl = extractPostUrl(article);
+                    const postDate = extractPostDate(article, postUrl);
+                    const author = findAuthorLink(article);
+                    if (author) {
+                        addLink(author.href, author.text, postContent, postUrl, postDate, null, author.type);
                     }
                 });
             }
@@ -989,7 +1028,7 @@ async def scroll_and_process_posts(
         new_count = 0
         new_links_this_round: List[Dict] = []
         for link in batch:
-            if not _is_user_profile_url(link.get("url", "")):
+            if not _is_acceptable_feed_author_url(link.get("url", "")):
                 continue
             key = _link_key(link)
             if key in seen_link_keys:

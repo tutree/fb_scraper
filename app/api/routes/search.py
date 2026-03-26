@@ -3,11 +3,10 @@ from pydantic import BaseModel
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
 from threading import Lock
-from pathlib import Path
 import json
 import uuid
 
-from ...core.config import settings
+from ...core.config import keywords_json_path, settings
 from ...core.database import SessionLocal
 from ...core.logging_config import get_recent_logs
 from ...services.scraper import ScraperService
@@ -267,7 +266,28 @@ async def update_saved_cookie(request: CookieUpdateRequest) -> CookieUpdateRespo
     )
 
 
-KEYWORDS_FILE = Path(__file__).resolve().parents[3] / "config" / "keywords.json"
+def _read_keywords_file() -> dict:
+    path = keywords_json_path()
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"searchKeywords": []}
+
+
+def _write_keywords_file(data: dict) -> None:
+    path = keywords_json_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        logger.exception("Failed to write keywords file at %s", path)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Cannot write keywords file at {path}: {e}. "
+                "Set KEYWORDS_FILE_PATH to a writable path and mount a volume in Docker (e.g. /data/keywords.json)."
+            ),
+        ) from e
 
 
 class AddKeywordsRequest(BaseModel):
@@ -276,34 +296,26 @@ class AddKeywordsRequest(BaseModel):
 
 @router.get("/keywords")
 async def get_keywords():
-    """Return current keywords from config/keywords.json."""
-    try:
-        data = json.loads(KEYWORDS_FILE.read_text(encoding="utf-8"))
-        return {"keywords": data.get("searchKeywords", [])}
-    except FileNotFoundError:
-        return {"keywords": []}
+    """Return current keywords from config/keywords.json (or KEYWORDS_FILE_PATH)."""
+    data = _read_keywords_file()
+    return {"keywords": data.get("searchKeywords", [])}
 
 
 @router.post("/keywords")
 async def add_keywords(request: AddKeywordsRequest):
-    """Add new keywords to config/keywords.json (deduplicates)."""
+    """Add new keywords to keywords file (deduplicates)."""
     new_kws = [kw.strip() for kw in request.keywords if kw.strip()]
     if not new_kws:
         raise HTTPException(status_code=400, detail="No valid keywords provided")
 
-    try:
-        data = json.loads(KEYWORDS_FILE.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        data = {"searchKeywords": []}
-
+    data = _read_keywords_file()
     existing = data.get("searchKeywords", [])
     existing_lower = {k.lower() for k in existing}
     added = [kw for kw in new_kws if kw.lower() not in existing_lower]
     existing.extend(added)
     data["searchKeywords"] = existing
 
-    KEYWORDS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    KEYWORDS_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _write_keywords_file(data)
     logger.info("Keywords updated: added %d, total %d", len(added), len(existing))
 
     return {"added": added, "total": len(existing), "keywords": existing}
@@ -311,10 +323,9 @@ async def add_keywords(request: AddKeywordsRequest):
 
 @router.delete("/keywords")
 async def remove_keyword(keyword: str = Query(...)):
-    """Remove a single keyword from config/keywords.json."""
-    try:
-        data = json.loads(KEYWORDS_FILE.read_text(encoding="utf-8"))
-    except FileNotFoundError:
+    """Remove a single keyword from keywords file."""
+    data = _read_keywords_file()
+    if not data.get("searchKeywords") and not keywords_json_path().exists():
         raise HTTPException(status_code=404, detail="Keywords file not found")
 
     existing = data.get("searchKeywords", [])
@@ -325,7 +336,7 @@ async def remove_keyword(keyword: str = Query(...)):
         raise HTTPException(status_code=404, detail=f"Keyword '{keyword}' not found")
 
     data["searchKeywords"] = updated
-    KEYWORDS_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _write_keywords_file(data)
     logger.info("Keyword removed: '%s', total %d", keyword, len(updated))
 
     return {"removed": keyword, "total": len(updated), "keywords": updated}

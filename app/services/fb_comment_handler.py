@@ -49,8 +49,8 @@ def resolve_comment_limit(max_comments: int) -> int:
 
 async def expand_inline_comments(
     page: Page,
-    max_cycles: int = 180,
-    stall_limit: int = 14,
+    max_cycles: int = 120,
+    stall_limit: int = 4,
 ) -> int:
     """
     Expand visible inline "more comments/replies" controls on post pages.
@@ -108,7 +108,7 @@ async def expand_inline_comments(
             no_progress_cycles += 1
 
         await page.evaluate("window.scrollBy(0, 900)")
-        await asyncio.sleep(3)
+        await asyncio.sleep(2.0 if clicked > 0 else 1.0)
 
         if no_progress_cycles >= stall_limit:
             break
@@ -157,7 +157,7 @@ async def extract_comments(
         if has_dialog:
             logger.info("  Comments opened in dialog, expanding all comments/replies...")
             await expand_all_comments_in_dialog(
-                page, root_selector='[role="dialog"]', max_cycles=120, stall_limit=10
+                page, root_selector='[role="dialog"]', max_cycles=80, stall_limit=4
             )
             comments_data = await page.evaluate(EXTRACT_DIALOG_COMMENTS_JS, limit)
         else:

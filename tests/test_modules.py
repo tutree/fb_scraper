@@ -24,7 +24,12 @@ from playwright.sync_api import sync_playwright, Browser, Page
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 from app.services.fb_comment_handler import resolve_comment_limit
-from app.services.fb_feed_scanner import _is_user_profile_url, _link_key
+from app.services.fb_feed_scanner import (
+    _is_acceptable_feed_author_url,
+    _is_group_member_author_url,
+    _is_user_profile_url,
+    _link_key,
+)
 from app.services.fb_account_loader import _extract_c_user_from_cookie_json
 from app.services.facebook_selectors import (
     COMMENT_TRIGGER_FROM_PAGE_JS,
@@ -116,6 +121,22 @@ class TestIsUserProfileUrl:
     def test_query_string_stripped_before_check(self):
         # profile.php with query string must still be True
         assert _is_user_profile_url("https://www.facebook.com/profile.php?id=999&ref=hl") is True
+
+
+class TestGroupMemberAuthorUrl:
+    def test_group_user_path_is_member_author(self):
+        assert _is_group_member_author_url(
+            "https://www.facebook.com/groups/123456789/user/987654321/"
+        ) is True
+
+    def test_group_home_is_not(self):
+        assert _is_group_member_author_url("https://www.facebook.com/groups/some-group") is False
+
+    def test_acceptable_feed_includes_group_user(self):
+        assert _is_acceptable_feed_author_url(
+            "https://www.facebook.com/groups/111/user/222/"
+        ) is True
+        assert _is_acceptable_feed_author_url("https://www.facebook.com/jane.doe") is True
 
 
 class TestLinkKey:

@@ -4,14 +4,12 @@ import asyncio
 import random
 from datetime import datetime
 import json
-from pathlib import Path
-
 from . import scraper_state
 from .browser_manager import BrowserManager
 from .facebook_scraper import FacebookScraper, NoActiveCookieError
 from .proxy_manager import ProxyManager
 from ..models.search_result import SearchResult
-from ..core.config import settings
+from ..core.config import keywords_json_path, settings
 from ..core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -25,20 +23,19 @@ class ScraperService:
         self.facebook_scraper = FacebookScraper(db, self.browser_manager)
 
     async def load_keywords(self) -> List[str]:
-        """Load keywords from config file."""
-        config_path = Path("config/keywords.json")
-        logger.info(f"Loading keywords from: {config_path.absolute()}")
-        
+        """Load keywords from keywords.json (same path as API: keywords_json_path())."""
+        config_path = keywords_json_path()
+        logger.info("Loading keywords from: %s", config_path)
+
         if config_path.exists():
-            with open(config_path) as f:
+            with open(config_path, encoding="utf-8") as f:
                 data = json.load(f)
                 keywords = data.get("searchKeywords", [])
                 logger.info(f"Loaded {len(keywords)} keywords from config: {keywords}")
                 return keywords
-        else:
-            logger.warning(f"Keywords file not found at {config_path}, using defaults")
-            logger.info(f"Default keywords: {settings.DEFAULT_KEYWORDS}")
-            return settings.DEFAULT_KEYWORDS
+        logger.warning("Keywords file not found at %s, using defaults", config_path)
+        logger.info(f"Default keywords: {settings.DEFAULT_KEYWORDS}")
+        return settings.DEFAULT_KEYWORDS
 
     async def run_search(
         self,

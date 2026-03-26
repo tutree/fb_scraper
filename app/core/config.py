@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from pydantic_settings import BaseSettings
 from pydantic import field_validator
 from typing import List, Optional
@@ -29,7 +31,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
 
     # Scraper Settings
-    MAX_RESULTS_PER_KEYWORD: int = 60
+    MAX_RESULTS_PER_KEYWORD: int = 10
     SCRAPE_DELAY_MIN: int = 3  # seconds
     SCRAPE_DELAY_MAX: int = 8
     MAX_RETRIES: int = 3
@@ -66,10 +68,14 @@ class Settings(BaseSettings):
     # 2Captcha (for Facebook login captcha solving)
     CAPTCHA_2CAPTCHA_API_KEY: str = ""
 
+    # Optional: writable path to keywords.json (required in Docker if the image's config/ is read-only).
+    # Example: KEYWORDS_FILE_PATH=/data/keywords.json with a volume mount.
+    KEYWORDS_FILE_PATH: str = ""
+
     # Background automation (runs automatically on startup, uses config/keywords.json)
     AUTO_SCRAPE_ENABLED: bool = True
     AUTO_SCRAPE_INTERVAL_MINUTES: int = 180
-    AUTO_SCRAPE_MAX_RESULTS: int = 60
+    AUTO_SCRAPE_MAX_RESULTS: int = 10
     AUTO_ANALYZE_AFTER_SCRAPE: bool = True
     AUTO_ENRICH_AFTER_ANALYZE: bool = True
 
@@ -92,3 +98,11 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def keywords_json_path() -> Path:
+    """Resolved path for keywords.json (settings.KEYWORDS_FILE_PATH or project config/keywords.json)."""
+    raw = (settings.KEYWORDS_FILE_PATH or "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return Path(__file__).resolve().parents[2] / "config" / "keywords.json"
