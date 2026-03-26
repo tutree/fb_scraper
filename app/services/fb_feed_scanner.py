@@ -238,6 +238,42 @@ async def _screenshot(page, label: str) -> None:
         logger.warning("[Screenshot] failed (%s): %s", label, exc)
 
 
+async def _expand_see_more_buttons(page: Page) -> int:
+    """
+    Click every visible 'See more' button on the current page to expand truncated
+    post content, then wait briefly for the DOM to reflect the expanded text.
+
+    Uses a separate evaluate + asyncio.sleep so that React/the page has time to
+    re-render the full content before the caller reads it.
+    """
+    try:
+        clicked = await page.evaluate(
+            """
+            () => {
+                let count = 0;
+                const candidates = document.querySelectorAll(
+                    'div[role="button"], span[role="button"]'
+                );
+                for (const el of candidates) {
+                    const text = (el.innerText || el.textContent || '').trim();
+                    if (text === 'See more') {
+                        try { el.click(); count++; } catch (e) {}
+                    }
+                }
+                return count;
+            }
+            """
+        )
+        if clicked > 0:
+            # Give React / the page renderer time to update the DOM
+            await asyncio.sleep(0.6)
+            logger.info("'See more' expansion: clicked %d button(s)", clicked)
+        return clicked
+    except Exception as exc:
+        logger.debug("'See more' expansion error: %s", exc)
+        return 0
+
+
 
 def _is_user_profile_url(url: str) -> bool:
     clean = url.split("?")[0].split("&")[0]
@@ -555,6 +591,9 @@ async def scroll_and_process_posts(
         if should_stop and should_stop():
             break
 
+        # Expand any truncated posts before extracting content
+        await _expand_see_more_buttons(page)
+
         batch = await page.evaluate(
         """
         (excludeUids) => {
@@ -590,7 +629,9 @@ async def scroll_and_process_posts(
             }
 
             function extractPostContent(article) {
-                // Expand truncated post text before reading it
+                // "See more" buttons are expanded by _expand_see_more_buttons() before this
+                // evaluate runs, so content should already be fully visible.
+                // Click any remaining ones as a last-resort fallback (no async wait possible here).
                 const seeMoreBtn = Array.from(
                     article.querySelectorAll('div[role="button"], span[role="button"]')
                 ).find(el => (el.innerText || el.textContent || '').trim() === 'See more');
@@ -852,6 +893,31 @@ async def scroll_and_process_posts(
                     'a[href*="watch?v="]',
                     'a[role="link"][href*="facebook.com"]', 'span[id] a[href]'
                 ];
+
+                // Reshared/quoted posts: the outer article contains nested sub-articles
+                // representing embedded content from the original author.  Links inside those
+                // nested elements belong to the *original* post, not to the resharer.
+                // Collect all elements that are part of nested sub-articles so we can skip them
+                // in the first pass and only fall back to them if no direct URL is found.
+                const nestedLinkSet = new Set();
+                for (const nested of article.querySelectorAll('div[role="article"]')) {
+                    for (const a of nested.querySelectorAll('a[href]')) {
+                        nestedLinkSet.add(a);
+                    }
+                }
+
+                // First pass: prefer links that belong to the outer (resharer's) article only
+                if (nestedLinkSet.size > 0) {
+                    for (const selector of selectors) {
+                        for (const link of article.querySelectorAll(selector)) {
+                            if (nestedLinkSet.has(link)) continue;
+                            const href = link.href;
+                            if (href && !isProfileHref(href) && isPostUrl(href)) return href;
+                        }
+                    }
+                }
+
+                // Second pass (fallback): search all links including nested/reshared content
                 for (const selector of selectors) {
                     for (const link of article.querySelectorAll(selector)) {
                         const href = link.href;

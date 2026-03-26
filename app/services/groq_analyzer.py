@@ -99,17 +99,13 @@ Return ONLY valid JSON (no markdown):
     else:
         return {"is_us": True, "confidence": 0.3, "reason": "No location or content to classify"}
 
-    try:
-        data = await groq_chat_json(prompt)
-        return {
-            "is_us": bool(data.get("is_us", True)),
-            "confidence": _clamp_confidence(data.get("confidence", 0.5)),
-            "reason": str(data.get("reason") or ""),
-            "extracted_location": data.get("extracted_location") or None,
-        }
-    except Exception as exc:
-        logger.warning("Geo classification (Groq) failed: %s", exc)
-        return {"is_us": True, "confidence": 0.0, "reason": f"Geo error: {exc}", "extracted_location": None}
+    data = await groq_chat_json(prompt)
+    return {
+        "is_us": bool(data.get("is_us", True)),
+        "confidence": _clamp_confidence(data.get("confidence", 0.5)),
+        "reason": str(data.get("reason") or ""),
+        "extracted_location": data.get("extracted_location") or None,
+    }
 
 
 async def _classify_post_groq(post_content: str, user_name: str) -> Dict[str, Any]:
@@ -238,7 +234,7 @@ async def apply_immediate_groq_analysis(db: Session, search_result_id: UUID) -> 
     Geo-filter → post classification → comment classification, all via Groq.
 
     Steps:
-      1. Geo check: if not US-based → archive result + delete comments, done.
+      1. Geo check: if not US-based → delete result + all comments, done.
       2. Post classification.
       3. If CUSTOMER → delete comments, done.
       4. Comment classification with post context.
@@ -271,84 +267,87 @@ async def apply_immediate_groq_analysis(db: Session, search_result_id: UUID) -> 
         result.location or "",
     )
 
-    # ── Step 1: Geo classification ────────────────────────────────────────────
-    logger.info("Groq geo classification running — id=%s", short_id)
-    geo = await _classify_geo_groq(
-        result.location or "",
-        result.post_content or "",
-        result.name or "",
-    )
-    logger.info(
-        "Groq geo result — id=%s is_us=%s confidence=%.2f reason=%r",
-        short_id,
-        geo["is_us"],
-        geo["confidence"],
-        geo["reason"],
-    )
-
-    if not geo["is_us"]:
-        deleted_comments = (
-            db.query(PostComment)
-            .filter(
-                PostComment.search_result_id == result.id,
-                PostComment.archived.is_(False),
-            )
-            .delete(synchronize_session=False)
+    try:
+        # ── Step 1: Geo classification ────────────────────────────────────────
+        logger.info("Groq geo classification running — id=%s", short_id)
+        geo = await _classify_geo_groq(
+            result.location or "",
+            result.post_content or "",
+            result.name or "",
         )
-        result.is_us = False
-        result.geo_filtered_at = datetime.now(timezone.utc)
-        result.archived = True
-        db.commit()
         logger.info(
-            "Groq geo: non-US post archived + %d comments deleted — id=%s (%s)",
-            deleted_comments,
+            "Groq geo result — id=%s is_us=%s confidence=%.2f reason=%r",
             short_id,
+            geo["is_us"],
+            geo["confidence"],
             geo["reason"],
         )
-        return
 
-    # Mark geo as checked so the background geo-filter job skips this row
-    result.is_us = True
-    result.geo_filtered_at = datetime.now(timezone.utc)
-
-    # If the profile has no location but the post text reveals a US one, use it
-    extracted_loc = geo.get("extracted_location")
-    if extracted_loc and isinstance(extracted_loc, str) and extracted_loc.strip():
-        if not (result.location or "").strip():
-            result.location = extracted_loc.strip()
-            logger.info(
-                "Groq geo: extracted location from post — id=%s location=%r",
-                short_id,
-                result.location,
+        if not geo["is_us"]:
+            deleted_comments = (
+                db.query(PostComment)
+                .filter(PostComment.search_result_id == result.id)
+                .delete(synchronize_session=False)
             )
+            db.delete(result)
+            db.commit()
+            logger.info(
+                "Groq geo: non-US — deleted result + %d comments — id=%s (%s)",
+                deleted_comments,
+                short_id,
+                geo["reason"],
+            )
+            return
 
-    # ── Step 2: Load comments ─────────────────────────────────────────────────
-    rows = (
-        db.query(PostComment)
-        .filter(
-            PostComment.search_result_id == search_result_id,
-            PostComment.archived.is_(False),
+        # Mark geo as checked so the background geo-filter job skips this row
+        result.is_us = True
+        result.geo_filtered_at = datetime.now(timezone.utc)
+
+        # If the profile has no location but the post text reveals a US one, use it
+        extracted_loc = geo.get("extracted_location")
+        if extracted_loc and isinstance(extracted_loc, str) and extracted_loc.strip():
+            if not (result.location or "").strip():
+                result.location = extracted_loc.strip()
+                logger.info(
+                    "Groq geo: extracted location from post — id=%s location=%r",
+                    short_id,
+                    result.location,
+                )
+
+        # ── Step 2: Load comments ─────────────────────────────────────────────
+        rows = (
+            db.query(PostComment)
+            .filter(
+                PostComment.search_result_id == search_result_id,
+                PostComment.archived.is_(False),
+            )
+            .order_by(asc(PostComment.scraped_at), asc(PostComment.id))
+            .all()
         )
-        .order_by(asc(PostComment.scraped_at), asc(PostComment.id))
-        .all()
-    )
-    triples = [(r.id, r.author_name, r.comment_text) for r in rows]
+        triples = [(r.id, r.author_name, r.comment_text) for r in rows]
 
-    # ── Step 3: Post + comment classification ─────────────────────────────────
-    logger.info(
-        "Groq post+comment classification running — id=%s comments=%d",
-        short_id,
-        len(triples),
-    )
-    try:
+        # ── Step 3: Post + comment classification ─────────────────────────────
+        logger.info(
+            "Groq post+comment classification running — id=%s comments=%d",
+            short_id,
+            len(triples),
+        )
         bundle = await analyze_post_then_comments(
             result.post_content or "",
             result.name or "",
             result.search_keyword or "",
             triples,
         )
+
     except Exception as exc:
-        logger.warning("Immediate Groq analysis failed for %s: %s", search_result_id, exc)
+        # Any Groq failure (rate-limit, network, parse error) — leave analyzed_at
+        # and geo_filtered_at as NULL so the background jobs will retry this row.
+        logger.warning(
+            "Groq analysis failed for id=%s — will be retried by background job: %s",
+            short_id,
+            exc,
+        )
+        db.rollback()
         return
 
     pr = bundle.get("post") or {}

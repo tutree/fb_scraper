@@ -56,7 +56,7 @@ ANALYZE_ENRICH_INTERVAL_MINUTES = 15
 ENRICH_INTERVAL_MINUTES = 30
 ENRICH_MAX_PER_MINUTE = 90
 COMMENT_ANALYZE_INTERVAL_MINUTES = 60
-GEO_FILTER_INTERVAL_MINUTES = 120
+GEO_FILTER_INTERVAL_MINUTES = 30
 
 _scheduler: Optional[AsyncIOScheduler] = None
 _redis: Optional[redis.Redis] = None
@@ -862,7 +862,7 @@ async def run_scheduled_comment_analyze():
 
 
 async def _auto_geo_filter_batch(db, batch_size: int = 50) -> dict:
-    """Classify a batch of un-filtered results as US/non-US. Returns counts."""
+    """Classify a batch of un-filtered results as US/non-US. Deletes non-US rows immediately."""
     try:
         classifier = GeminiClassifier()
     except ValueError as exc:
@@ -890,16 +890,19 @@ async def _auto_geo_filter_batch(db, batch_size: int = 50) -> dict:
                 post_content=result.post_content or "",
                 user_name=result.name or "",
             )
-            result.is_us = geo["is_us"]
-            result.geo_filtered_at = datetime.now(timezone.utc)
             checked += 1
 
             if not geo["is_us"] and geo["confidence"] >= 0.6:
                 removed += 1
+                result_id = result.id
                 logger.info(
-                    "Geo-filter: removing non-US result %s (location=%r, reason=%s, confidence=%.2f)",
-                    result.id, result.location, geo["reason"], geo["confidence"],
+                    "Geo-filter: deleting non-US result %s (location=%r, reason=%s, confidence=%.2f)",
+                    result_id, result.location, geo["reason"], geo["confidence"],
                 )
+                db.delete(result)
+            else:
+                result.is_us = geo["is_us"]
+                result.geo_filtered_at = datetime.now(timezone.utc)
 
         except Exception as exc:
             logger.warning("Geo-filter failed for %s: %s", result.id, exc)
@@ -943,22 +946,9 @@ async def run_scheduled_geo_filter():
                 total_checked += counts["checked"]
                 total_removed += counts["removed"]
                 logger.info(
-                    "Geo-filter progress: %d/%d checked, %d flagged non-US",
+                    "Geo-filter progress: %d/%d checked, %d deleted non-US",
                     total_checked, pending, total_removed,
                 )
-
-            if total_removed > 0:
-                deleted = (
-                    db.query(SearchResult)
-                    .filter(
-                        SearchResult.archived.is_(False),
-                        SearchResult.is_us == False,  # noqa: E712
-                        SearchResult.geo_filtered_at.isnot(None),
-                    )
-                    .delete(synchronize_session="fetch")
-                )
-                db.commit()
-                logger.info("Geo-filter: deleted %d non-US results from database", deleted)
 
             logger.info(
                 "Geo-filter complete: %d checked, %d removed",

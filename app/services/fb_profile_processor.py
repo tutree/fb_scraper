@@ -323,8 +323,10 @@ async def process_single_profile(
                             post_date, profile_url, keyword, db,
                         )
                         search_result = existing
-                        # Run Groq analysis even on updated duplicate rows
-                        if (settings.GROQ_API_KEY or "").strip() and existing.analyzed_at is None:
+                        # Run Groq if not yet analyzed OR not yet geo-filtered
+                        if (settings.GROQ_API_KEY or "").strip() and (
+                            existing.analyzed_at is None or existing.geo_filtered_at is None
+                        ):
                             try:
                                 from .groq_analyzer import apply_immediate_groq_analysis
                                 await apply_immediate_groq_analysis(db, existing.id)
@@ -364,7 +366,9 @@ async def process_single_profile(
                                 post_date, profile_url, keyword, db,
                             )
                             # Run Groq on the recovered row too
-                            if (settings.GROQ_API_KEY or "").strip() and existing.analyzed_at is None:
+                            if (settings.GROQ_API_KEY or "").strip() and (
+                                existing.analyzed_at is None or existing.geo_filtered_at is None
+                            ):
                                 try:
                                     from .groq_analyzer import apply_immediate_groq_analysis
                                     await apply_immediate_groq_analysis(db, existing.id)

@@ -47,7 +47,8 @@ class Settings(BaseSettings):
 
     # Groq (OpenAI-compatible API): queue/API classification and immediate on-save analysis when key is set.
     GROQ_API_KEY: str = ""
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    # llama-3.1-8b-instant: 14 400 RPD vs 1 000 RPD for the 70b model — much more headroom
+    GROQ_MODEL: str = "llama-3.1-8b-instant"
 
     # EnformionGO Contact Enrichment
     ENFORMION_AP_NAME: str = ""

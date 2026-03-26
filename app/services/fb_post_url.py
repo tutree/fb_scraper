@@ -117,11 +117,33 @@ _SHARE_CLICK_FOR_PROFILE_JS = """
     function norm(u) {
         try {
             const url = new URL(u, window.location.origin);
+            // For profile.php URLs the numeric id is the only stable identifier —
+            // stripping query params would collapse every profile.php user to the
+            // same string and cause false matches across users.
+            if (url.pathname === '/profile.php') {
+                const id = url.searchParams.get('id') || '';
+                const base = url.origin + url.pathname;
+                return (id ? base + '?id=' + id : base).toLowerCase();
+            }
             return (url.origin + url.pathname).replace(/\\/$/, '').toLowerCase();
         } catch (_) {
             return (u || '').split('?')[0].replace(/\\/$/, '').toLowerCase();
         }
     }
+
+    // Exact-prefix match: h is either identical to target, a path under it
+    // (e.g. target/posts/...), or the same profile.php?id= URL.
+    // The old substring check (target.includes(h)) caused any profile.php card
+    // to match every profile.php user because the bare path without id is a
+    // substring of every normalised profile.php URL.
+    function matchesProfile(h, target) {
+        if (!h || !target) return false;
+        if (h === target) return true;
+        if (h.startsWith(target + '/')) return true;
+        if (h.startsWith(target + '?')) return true;
+        return false;
+    }
+
     const target = norm(profileHref || '');
     if (!target) return { ok: false, reason: 'no_target' };
 
@@ -137,7 +159,7 @@ _SHARE_CLICK_FOR_PROFILE_JS = """
         for (const a of card.querySelectorAll('a[href*="facebook.com"]')) {
             const h = norm(a.href || '');
             if (!h) continue;
-            if (h.includes(target) || target.includes(h)) {
+            if (matchesProfile(h, target)) {
                 try {
                     card.scrollIntoView({ block: 'center', behavior: 'instant' });
                 } catch (_) {}

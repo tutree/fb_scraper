@@ -483,7 +483,7 @@ class BrowserManager:
             )
             await context.grant_permissions(
                 ["clipboard-read", "clipboard-write"],
-                origin="https://web.facebook.com",
+                origin="https://www.facebook.com",
             )
         except Exception as exc:
             logger.debug("Could not grant clipboard permissions: %s", exc)
@@ -549,7 +549,7 @@ class BrowserManager:
             )
             await context.grant_permissions(
                 ["clipboard-read", "clipboard-write"],
-                origin="https://web.facebook.com",
+                origin="https://www.facebook.com",
             )
         except Exception as exc:
             logger.debug("Could not grant clipboard permissions: %s", exc)
@@ -617,7 +617,7 @@ class BrowserManager:
             )
             await context.grant_permissions(
                 ["clipboard-read", "clipboard-write"],
-                origin="https://web.facebook.com",
+                origin="https://www.facebook.com",
             )
         except Exception as exc:
             logger.debug("Could not grant clipboard permissions: %s", exc)

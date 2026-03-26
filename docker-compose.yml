@@ -47,7 +47,7 @@ services:
       AI_PROVIDER: ${AI_PROVIDER:-groq}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
-      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.1-8b-instant}
       API_V1_PREFIX: ${API_V1_PREFIX:-/api/v1}
       PROJECT_NAME: ${PROJECT_NAME:-Math Tutor Scraper API}
       ENFORMION_AP_NAME: ${ENFORMION_AP_NAME:-}
