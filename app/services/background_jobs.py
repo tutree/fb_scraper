@@ -1319,6 +1319,16 @@ async def _safe_run(coro, label: str):
         logger.exception("Background task '%s' failed with unhandled exception", label)
 
 
+def _schedule_delayed_startup(factory, delay_sec: float, label: str) -> None:
+    """Run an async job after ``delay_sec`` (fire-and-forget)."""
+
+    async def _run() -> None:
+        await asyncio.sleep(delay_sec)
+        await _safe_run(factory(), label)
+
+    asyncio.ensure_future(_run())
+
+
 def trigger_now():
     asyncio.ensure_future(run_scheduled_scrape())
 
