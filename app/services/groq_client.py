@@ -15,10 +15,7 @@ logger = get_logger(__name__)
 
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-# Groq free-tier: 30 RPM for all models.
-# Enforcing a minimum gap of 2.5 s between calls keeps us at ≤24 RPM,
-# well inside the limit even when multiple workers run concurrently.
-_MIN_REQUEST_INTERVAL = 2.5  # seconds
+# Groq: global pacing via settings.GROQ_MIN_INTERVAL_SECONDS (default 3.5s).
 _last_request_ts: float = 0.0
 _request_lock = asyncio.Lock()
 
@@ -110,11 +107,12 @@ async def groq_chat_json(
         rotate_to_next_key = False
         for attempt in range(_MAX_RETRIES):
             # --- rate-limit pacing ---
+            min_interval = float(settings.GROQ_MIN_INTERVAL_SECONDS)
             async with _request_lock:
                 now = time.monotonic()
                 gap = now - _last_request_ts
-                if gap < _MIN_REQUEST_INTERVAL:
-                    await asyncio.sleep(_MIN_REQUEST_INTERVAL - gap)
+                if gap < min_interval:
+                    await asyncio.sleep(min_interval - gap)
                 _last_request_ts = time.monotonic()
 
             try:

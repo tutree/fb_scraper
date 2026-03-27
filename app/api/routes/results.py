@@ -702,14 +702,14 @@ class ArchiveDuplicatesResponse(BaseModel):
     message: str
 
 
-@router.post("/archive-duplicates", response_model=ArchiveDuplicatesResponse)
-async def archive_duplicate_results(db: Session = Depends(get_db)):
-    """
-    Mark duplicate search_results as archived (by trimmed name + normalized location).
-    NULL or blank location is treated as empty string, so duplicates with no location
-    still match. Keeps the earliest row per pair (by scraped_at, then id). Archives
-    linked comments. Archived rows are never returned by the API.
-    """
+class DuplicatePreviewResponse(BaseModel):
+    duplicate_result_rows: int
+    linked_comments: int
+    message: str
+
+
+def _duplicate_search_result_ids(db: Session):
+    """IDs of search_results that are duplicates (not the keeper row) for name+location."""
     from sqlalchemy import text
 
     dup_sql = """
@@ -724,9 +724,47 @@ async def archive_duplicate_results(db: Session = Depends(get_db)):
               AND name IS NOT NULL AND TRIM(name) != ''
         ) t WHERE rn > 1
     """
+    return [row[0] for row in db.execute(text(dup_sql)).fetchall()]
+
+
+@router.get("/archive-duplicates/preview", response_model=DuplicatePreviewResponse)
+async def preview_archive_duplicates(db: Session = Depends(get_db)):
+    """Counts duplicate rows and linked comments that would be archived (no writes)."""
+    dup_ids = _duplicate_search_result_ids(db)
+    n_dup = len(dup_ids)
+    if not dup_ids:
+        return DuplicatePreviewResponse(
+            duplicate_result_rows=0,
+            linked_comments=0,
+            message="No duplicate name+location pairs found.",
+        )
+    n_comments = (
+        db.query(PostComment)
+        .filter(
+            PostComment.search_result_id.in_(dup_ids),
+            PostComment.archived.is_(False),
+        )
+        .count()
+    )
+    return DuplicatePreviewResponse(
+        duplicate_result_rows=n_dup,
+        linked_comments=n_comments,
+        message=(
+            f"{n_dup} duplicate lead(s) and {n_comments} comment row(s) would be archived."
+        ),
+    )
+
+
+@router.post("/archive-duplicates", response_model=ArchiveDuplicatesResponse)
+async def archive_duplicate_results(db: Session = Depends(get_db)):
+    """
+    Mark duplicate search_results as archived (by trimmed name + normalized location).
+    NULL or blank location is treated as empty string, so duplicates with no location
+    still match. Keeps the earliest row per pair (by scraped_at, then id). Archives
+    linked comments. Archived rows are never returned by the API.
+    """
     try:
-        ids_rows = db.execute(text(dup_sql)).fetchall()
-        dup_ids = [row[0] for row in ids_rows]
+        dup_ids = _duplicate_search_result_ids(db)
         if not dup_ids:
             return ArchiveDuplicatesResponse(
                 archived_results=0,

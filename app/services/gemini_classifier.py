@@ -15,6 +15,11 @@ from .classification_prompts import (
 
 logger = get_logger(__name__)
 
+
+class AnalysisInvocationError(RuntimeError):
+    """LLM call failed, JSON was invalid, or the response could not be used — do not persist as analyzed."""
+
+
 # Temporary: verbose geo logging for debugging US/non-US mismatches — remove when stable.
 _GEO_DEBUG_MAX_PROMPT_CHARS = 12_000
 _GEO_DEBUG_MAX_PREVIEW_CHARS = 1_200
@@ -127,25 +132,13 @@ Your entire reply must be that JSON object alone: first character {{, last chara
 
         except json.JSONDecodeError as e:
             logger.error("Failed to parse AI response as JSON: %s", e)
-            return {
-                "type": "UNKNOWN",
-                "confidence": 0.0,
-                "reason": f"Failed to parse AI response: {str(e)}",
-            }
+            raise AnalysisInvocationError(f"Failed to parse AI response: {e}") from e
         except (ValueError, RuntimeError) as e:
             logger.error("AI classification returned unusable JSON: %s", e)
-            return {
-                "type": "UNKNOWN",
-                "confidence": 0.0,
-                "reason": f"Failed to parse AI response: {str(e)}",
-            }
+            raise AnalysisInvocationError(f"Failed to parse AI response: {e}") from e
         except Exception as e:
             logger.error("AI classification error: %s", e, exc_info=True)
-            return {
-                "type": "UNKNOWN",
-                "confidence": 0.0,
-                "reason": f"Classification error: {str(e)}",
-            }
+            raise AnalysisInvocationError(f"Classification error: {e}") from e
 
     async def classify_comment_user(
         self,
@@ -187,9 +180,11 @@ Your entire reply must be that JSON object alone: first character {{, last chara
         try:
             result = await self._generate_json(prompt)
             return result
-        except (json.JSONDecodeError, ValueError, Exception) as e:
-            logger.debug(f"Comment classification failed: {e}")
-            return {"type": "UNKNOWN", "confidence": 0.0, "reason": str(e)[:200]}
+        except AnalysisInvocationError:
+            raise
+        except Exception as e:
+            logger.error("Comment classification failed: %s", e, exc_info=True)
+            raise AnalysisInvocationError(f"Comment classification error: {e}") from e
 
     async def classify_geo(
         self,
@@ -305,7 +300,7 @@ Return ONLY valid JSON (no markdown):
 
         except Exception as e:
             logger.warning("Geo classification failed: %s", e)
-            return {"is_us": True, "confidence": 0.0, "reason": f"Classification error: {e}"}
+            raise AnalysisInvocationError(f"Geo classification error: {e}") from e
 
     async def batch_classify(self, posts: list) -> list:
         """

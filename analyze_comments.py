@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from app.core.database import SessionLocal
 from app.core.logging_config import setup_logging, get_logger
-from app.services.gemini_classifier import GeminiClassifier
+from app.services.gemini_classifier import AnalysisInvocationError, GeminiClassifier
 from app.models.post_comment import PostComment
 from app.models.search_result import SearchResult, UserType
 
@@ -74,12 +74,19 @@ async def analyze_pending_comments(limit: int = None, force_reanalyze: bool = Fa
 
             post_content, search_keyword = post_contexts.get(str(comment.search_result_id), ("", ""))
 
-            result = await classifier.classify_comment_user(
-                comment_text=comment.comment_text,
-                author_name=comment.author_name or "",
-                post_context=post_content,
-                search_keyword=search_keyword,
-            )
+            try:
+                result = await classifier.classify_comment_user(
+                    comment_text=comment.comment_text,
+                    author_name=comment.author_name or "",
+                    post_context=post_content,
+                    search_keyword=search_keyword,
+                )
+            except AnalysisInvocationError as e:
+                logger.warning(
+                    "  ⚠ Comment analysis failed (left un-analyzed): %s",
+                    e,
+                )
+                continue
 
             type_mapping = {
                 "CUSTOMER": UserType.CUSTOMER,

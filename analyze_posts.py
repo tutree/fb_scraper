@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from app.core.database import SessionLocal
 from app.core.logging_config import setup_logging, get_logger
-from app.services.gemini_classifier import GeminiClassifier
+from app.services.gemini_classifier import AnalysisInvocationError, GeminiClassifier
 from app.models.search_result import SearchResult, UserType
 
 setup_logging(level="INFO")
@@ -74,10 +74,17 @@ async def analyze_pending_posts(limit: int = None, force_reanalyze: bool = False
                 unknown_count += 1
                 continue
 
-            result = await classifier.classify_user(
-                post_content=post.post_content,
-                user_name=post.name
-            )
+            try:
+                result = await classifier.classify_user(
+                    post_content=post.post_content,
+                    user_name=post.name,
+                )
+            except AnalysisInvocationError as e:
+                logger.warning(
+                    "  ⚠ Analysis failed (left un-analyzed): %s",
+                    e,
+                )
+                continue
 
             type_mapping = {
                 "CUSTOMER": UserType.CUSTOMER,

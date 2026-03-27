@@ -122,6 +122,8 @@ export default function JobsPage() {
   const [jobStats, setJobStats] = useState(null)
   const [duplicateModalOpen, setDuplicateModalOpen] = useState(false)
   const [duplicateArchiving, setDuplicateArchiving] = useState(false)
+  const [duplicatePreview, setDuplicatePreview] = useState(null)
+  const [duplicatePreviewLoading, setDuplicatePreviewLoading] = useState(false)
   const [leadModalResult, setLeadModalResult] = useState(null)
   const [recentRefreshTick, setRecentRefreshTick] = useState(0)
 
@@ -245,6 +247,29 @@ export default function JobsPage() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [duplicateModalOpen, duplicateArchiving])
+
+  useEffect(() => {
+    if (!duplicateModalOpen) {
+      setDuplicatePreview(null)
+      return
+    }
+    let cancelled = false
+    const load = async () => {
+      setDuplicatePreviewLoading(true)
+      try {
+        const res = await api.get('/results/archive-duplicates/preview')
+        if (!cancelled) setDuplicatePreview(res.data)
+      } catch {
+        if (!cancelled) setDuplicatePreview(null)
+      } finally {
+        if (!cancelled) setDuplicatePreviewLoading(false)
+      }
+    }
+    load()
+    return () => {
+      cancelled = true
+    }
+  }, [duplicateModalOpen])
 
   const stopJob = async (job) => {
     try {
@@ -676,6 +701,20 @@ export default function JobsPage() {
             <p className="mt-3 text-sm text-slate-600">
               This keeps one row per person name + location (earliest scrape wins) and archives the extra rows and their comments. Archived leads no longer appear in the dashboard.
             </p>
+            {duplicatePreviewLoading && (
+              <p className="mt-3 text-sm text-slate-500">Counting duplicates…</p>
+            )}
+            {!duplicatePreviewLoading && duplicatePreview && (
+              <p
+                className={`mt-3 text-sm font-medium ${
+                  duplicatePreview.duplicate_result_rows === 0 ? 'text-slate-600' : 'text-amber-800'
+                }`}
+              >
+                {duplicatePreview.duplicate_result_rows === 0
+                  ? 'No duplicate rows found — nothing will be archived.'
+                  : `Will archive ${duplicatePreview.duplicate_result_rows} duplicate lead(s) and ${duplicatePreview.linked_comments} linked comment row(s).`}
+              </p>
+            )}
             <div className="mt-6 flex justify-end gap-3">
               <button
                 type="button"
@@ -687,7 +726,11 @@ export default function JobsPage() {
               </button>
               <button
                 type="button"
-                disabled={duplicateArchiving}
+                disabled={
+                  duplicateArchiving ||
+                  duplicatePreviewLoading ||
+                  (duplicatePreview && duplicatePreview.duplicate_result_rows === 0)
+                }
                 onClick={confirmArchiveDuplicates}
                 className="rounded-lg bg-rose-600 px-4 py-2 text-sm font-medium text-white hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
               >

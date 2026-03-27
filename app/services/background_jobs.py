@@ -59,6 +59,10 @@ ENRICH_INTERVAL_MINUTES = 30
 ENRICH_MAX_PER_MINUTE = 90
 COMMENT_ANALYZE_INTERVAL_MINUTES = 60
 GEO_FILTER_INTERVAL_MINUTES = 30
+# Stagger Groq-heavy jobs on startup so scrape + workers are not all hammering the API at once.
+STARTUP_ANALYZE_ENRICH_DELAY_SEC = 30.0
+STARTUP_COMMENT_ANALYZE_DELAY_SEC = 60.0
+STARTUP_GEO_FILTER_DELAY_SEC = 90.0
 
 _scheduler: Optional[AsyncIOScheduler] = None
 _redis: Optional[redis.Redis] = None
@@ -1234,9 +1238,21 @@ def start_scheduler():
     )
 
     scheduler.start()
-    trigger_analyze_enrich_now()
-    asyncio.ensure_future(_safe_run(run_scheduled_comment_analyze(), "comment-analyze-startup"))
-    asyncio.ensure_future(_safe_run(run_scheduled_geo_filter(), "geo-filter-startup"))
+    _schedule_delayed_startup(
+        run_scheduled_analyze_enrich,
+        STARTUP_ANALYZE_ENRICH_DELAY_SEC,
+        "analyze-enrich-startup",
+    )
+    _schedule_delayed_startup(
+        run_scheduled_comment_analyze,
+        STARTUP_COMMENT_ANALYZE_DELAY_SEC,
+        "comment-analyze-startup",
+    )
+    _schedule_delayed_startup(
+        run_scheduled_geo_filter,
+        STARTUP_GEO_FILTER_DELAY_SEC,
+        "geo-filter-startup",
+    )
     start_analyze_worker()
     start_enrich_worker()
     logger.info("Enrich feeder deferred — first run in %d minutes (scheduled)", ENRICH_INTERVAL_MINUTES)

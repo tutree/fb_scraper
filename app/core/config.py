@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from pydantic_settings import BaseSettings
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from typing import List, Optional
 import json
 
@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = ""
     # llama-3.1-8b-instant: 14 400 RPD vs 1 000 RPD for the 70b model — much more headroom
     GROQ_MODEL: str = "llama-3.1-8b-instant"
+    # Minimum seconds between Groq API calls (global lock). Raise if 429s persist (default 3.5 ≈ 17 RPM).
+    GROQ_MIN_INTERVAL_SECONDS: float = Field(default=3.5, ge=0.5, le=120.0)
 
     @field_validator("GROQ_MODEL", mode="before")
     @classmethod
