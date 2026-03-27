@@ -207,6 +207,9 @@ async def extract_comments_from_post_permalink(
     Navigate to a post permalink (or share short link), open the comments dialog using
     COMMENT_TRIGGER_FROM_PAGE_JS, extract comments, then close with ESC.
 
+    May run on any Page (typically a dedicated worker tab) so the search-results tab
+    is not left on a post URL after ``goto``.
+
     Same return shape as click_comments_and_extract_from_dialog:
     (comments_data, post_url, post_date).
     """

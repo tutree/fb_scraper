@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
 
     # Groq (OpenAI-compatible API): queue/API classification and immediate on-save analysis when key is set.
+    # Comma-separated list — first key is used until Groq returns 401/403, then the next key is tried.
     GROQ_API_KEY: str = ""
     # llama-3.1-8b-instant: 14 400 RPD vs 1 000 RPD for the 70b model — much more headroom
     GROQ_MODEL: str = "llama-3.1-8b-instant"
@@ -95,6 +96,11 @@ class Settings(BaseSettings):
     @property
     def proxies(self) -> List[str]:
         return [p.strip() for p in self.PROXY_LIST.split(",") if p.strip()]
+
+    @property
+    def groq_api_keys(self) -> List[str]:
+        """Non-empty Groq API keys from ``GROQ_API_KEY`` (comma-separated)."""
+        return [k.strip() for k in (self.GROQ_API_KEY or "").split(",") if k.strip()]
 
 
 settings = Settings()

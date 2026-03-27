@@ -24,8 +24,15 @@ _request_lock = asyncio.Lock()
 
 # Retry settings for 429 / transient errors
 _MAX_RETRIES = 4
-_BASE_BACKOFF = 5.0   # seconds — first retry wait before consulting retry-after
-_MAX_BACKOFF = 60.0   # cap on any single wait
+_BASE_BACKOFF = 5.0  # seconds — first retry wait before consulting retry-after
+_MAX_BACKOFF = 60.0  # cap on any single wait
+
+
+def _resolve_groq_keys(explicit: Optional[str]) -> List[str]:
+    """Use a single explicit key, or all keys from settings (comma-separated)."""
+    if explicit and str(explicit).strip():
+        return [str(explicit).strip()]
+    return list(settings.groq_api_keys)
 
 
 def _strip_json_fences(text: str) -> str:
@@ -74,11 +81,14 @@ async def groq_chat_json(
 
     Respects the 30 RPM rate limit by enforcing a minimum inter-request gap,
     and retries on 429 using the ``retry-after`` response header.
+
+    If ``GROQ_API_KEY`` contains multiple comma-separated keys, the next key is
+    used when Groq responds with 401/403 (expired or invalid key).
     """
     global _last_request_ts
 
-    key = api_key or settings.GROQ_API_KEY
-    if not key:
+    keys = _resolve_groq_keys(api_key)
+    if not keys:
         raise ValueError("GROQ_API_KEY not configured")
     m = model or settings.GROQ_MODEL
 
@@ -95,112 +105,171 @@ async def groq_chat_json(
 
     last_exc: Exception | None = None
 
-    for attempt in range(_MAX_RETRIES):
-        # --- rate-limit pacing ---
-        async with _request_lock:
-            now = time.monotonic()
-            gap = now - _last_request_ts
-            if gap < _MIN_REQUEST_INTERVAL:
-                await asyncio.sleep(_MIN_REQUEST_INTERVAL - gap)
-            _last_request_ts = time.monotonic()
+    for key_index, key in enumerate(keys):
+        key_label = f"{key_index + 1}/{len(keys)}"
+        rotate_to_next_key = False
+        for attempt in range(_MAX_RETRIES):
+            # --- rate-limit pacing ---
+            async with _request_lock:
+                now = time.monotonic()
+                gap = now - _last_request_ts
+                if gap < _MIN_REQUEST_INTERVAL:
+                    await asyncio.sleep(_MIN_REQUEST_INTERVAL - gap)
+                _last_request_ts = time.monotonic()
 
-        try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                payload = dict(base_payload)
-                if use_json_object_mode:
-                    payload["response_format"] = {"type": "json_object"}
-                resp = await client.post(
-                    GROQ_CHAT_URL,
-                    headers={
-                        "Authorization": f"Bearer {key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-                if resp.status_code == 400 and use_json_object_mode:
-                    body = (resp.text or "")[:800]
-                    logger.warning(
-                        "Groq rejected json_object mode — retrying without (attempt %d): %s",
-                        attempt + 1,
-                        body,
-                    )
+            try:
+                async with httpx.AsyncClient(timeout=120.0) as client:
+                    payload = dict(base_payload)
+                    if use_json_object_mode:
+                        payload["response_format"] = {"type": "json_object"}
                     resp = await client.post(
                         GROQ_CHAT_URL,
                         headers={
                             "Authorization": f"Bearer {key}",
                             "Content-Type": "application/json",
                         },
-                        json=base_payload,
+                        json=payload,
                     )
+                    if resp.status_code == 400 and use_json_object_mode:
+                        body = (resp.text or "")[:800]
+                        logger.warning(
+                            "Groq rejected json_object mode — retrying without (attempt %d): %s",
+                            attempt + 1,
+                            body,
+                        )
+                        resp = await client.post(
+                            GROQ_CHAT_URL,
+                            headers={
+                                "Authorization": f"Bearer {key}",
+                                "Content-Type": "application/json",
+                            },
+                            json=base_payload,
+                        )
 
-            if resp.status_code == 429:
-                retry_after = float(resp.headers.get("retry-after", _BASE_BACKOFF * (2 ** attempt)))
-                wait = min(retry_after + 1.0, _MAX_BACKOFF)
-                logger.warning(
-                    "Groq 429 rate-limited (attempt %d/%d) — waiting %.1fs before retry",
-                    attempt + 1, _MAX_RETRIES, wait,
-                )
-                await asyncio.sleep(wait)
-                last_exc = httpx.HTTPStatusError(
-                    f"429 Too Many Requests", request=resp.request, response=resp
-                )
-                continue
+                    if resp.status_code in (401, 403):
+                        body = (resp.text or "")[:500]
+                        logger.warning(
+                            "Groq API key %s rejected (HTTP %s): %s",
+                            key_label,
+                            resp.status_code,
+                            body,
+                        )
+                        last_exc = httpx.HTTPStatusError(
+                            f"HTTP {resp.status_code}",
+                            request=resp.request,
+                            response=resp,
+                        )
+                        rotate_to_next_key = True
+                        break  # try next key
 
-            try:
-                resp.raise_for_status()
+                    if resp.status_code == 429:
+                        retry_after = float(
+                            resp.headers.get("retry-after", _BASE_BACKOFF * (2**attempt))
+                        )
+                        wait = min(retry_after + 1.0, _MAX_BACKOFF)
+                        logger.warning(
+                            "Groq 429 rate-limited (key %s, attempt %d/%d) — waiting %.1fs before retry",
+                            key_label,
+                            attempt + 1,
+                            _MAX_RETRIES,
+                            wait,
+                        )
+                        await asyncio.sleep(wait)
+                        last_exc = httpx.HTTPStatusError(
+                            "429 Too Many Requests", request=resp.request, response=resp
+                        )
+                        continue
+
+                    try:
+                        resp.raise_for_status()
+                    except httpx.HTTPStatusError as e:
+                        if e.response.status_code in (401, 403):
+                            body = (e.response.text or "")[:500]
+                            logger.warning(
+                                "Groq API key %s rejected (HTTP %s): %s",
+                                key_label,
+                                e.response.status_code,
+                                body,
+                            )
+                            last_exc = e
+                            rotate_to_next_key = True
+                            break  # next key
+                        body = (e.response.text or "")[:500]
+                        logger.warning("Groq HTTP error %s: %s", e.response.status_code, body)
+                        raise
+
+                    data = resp.json()
+                    choice0 = (data.get("choices") or [{}])[0]
+                    msg = choice0.get("message") or {}
+                    content = msg.get("content") or ""
+                    finish_reason = choice0.get("finish_reason")
+                    if not str(content).strip():
+                        logger.warning(
+                            "Groq empty assistant content (key %s, finish_reason=%s, attempt %d/%d)",
+                            key_label,
+                            finish_reason,
+                            attempt + 1,
+                            _MAX_RETRIES,
+                        )
+                        last_exc = ValueError("empty assistant content from Groq")
+                        await asyncio.sleep(min(2.0 * (attempt + 1), 8.0))
+                        continue
+                    if debug_log_tag:
+                        logger.info(
+                            "[%s] groq HTTP response id=%r model=%r finish_reason=%r "
+                            "raw_assistant_len=%d raw_assistant=%r",
+                            debug_log_tag,
+                            data.get("id"),
+                            data.get("model"),
+                            finish_reason,
+                            len(content or ""),
+                            (content or "")[:12_000],
+                        )
+                    try:
+                        return _parse_assistant_json(content)
+                    except ValueError as ve:
+                        preview = (content or "")[:400].replace("\n", "\\n")
+                        logger.warning(
+                            "Groq JSON parse failed (%s) preview=%r — retrying",
+                            ve,
+                            preview,
+                        )
+                        last_exc = ve
+                        await asyncio.sleep(min(1.5 * (attempt + 1), 6.0))
+                        continue
+
             except httpx.HTTPStatusError as e:
-                body = (e.response.text or "")[:500]
-                logger.warning("Groq HTTP error %s: %s", e.response.status_code, body)
+                if e.response is not None and e.response.status_code in (401, 403):
+                    logger.warning(
+                        "Groq API key %s rejected (HTTP %s): %s",
+                        key_label,
+                        e.response.status_code,
+                        (e.response.text or "")[:500],
+                    )
+                    last_exc = e
+                    rotate_to_next_key = True
+                    break
                 raise
-
-            data = resp.json()
-            choice0 = (data.get("choices") or [{}])[0]
-            msg = choice0.get("message") or {}
-            content = msg.get("content") or ""
-            finish_reason = choice0.get("finish_reason")
-            if not str(content).strip():
+            except (httpx.TransportError, httpx.TimeoutException) as exc:
+                wait = min(_BASE_BACKOFF * (2**attempt), _MAX_BACKOFF)
                 logger.warning(
-                    "Groq empty assistant content (finish_reason=%s, attempt %d/%d)",
-                    finish_reason,
+                    "Groq transport error (key %s, attempt %d/%d): %s — retrying in %.1fs",
+                    key_label,
                     attempt + 1,
                     _MAX_RETRIES,
+                    exc,
+                    wait,
                 )
-                last_exc = ValueError("empty assistant content from Groq")
-                await asyncio.sleep(min(2.0 * (attempt + 1), 8.0))
-                continue
-            if debug_log_tag:
-                logger.info(
-                    "[%s] groq HTTP response id=%r model=%r finish_reason=%r "
-                    "raw_assistant_len=%d raw_assistant=%r",
-                    debug_log_tag,
-                    data.get("id"),
-                    data.get("model"),
-                    finish_reason,
-                    len(content or ""),
-                    (content or "")[:12_000],
-                )
-            try:
-                return _parse_assistant_json(content)
-            except ValueError as ve:
-                preview = (content or "")[:400].replace("\n", "\\n")
-                logger.warning(
-                    "Groq JSON parse failed (%s) preview=%r — retrying",
-                    ve,
-                    preview,
-                )
-                last_exc = ve
-                await asyncio.sleep(min(1.5 * (attempt + 1), 6.0))
-                continue
+                last_exc = exc
+                await asyncio.sleep(wait)
 
-        except httpx.HTTPStatusError:
-            raise
-        except (httpx.TransportError, httpx.TimeoutException) as exc:
-            wait = min(_BASE_BACKOFF * (2 ** attempt), _MAX_BACKOFF)
-            logger.warning(
-                "Groq transport error (attempt %d/%d): %s — retrying in %.1fs",
-                attempt + 1, _MAX_RETRIES, exc, wait,
-            )
-            last_exc = exc
-            await asyncio.sleep(wait)
+        if rotate_to_next_key:
+            continue
+        # exhausted retries on this key without 401/403 (e.g. 429, empty body, parse errors)
+        raise RuntimeError(
+            f"Groq request failed after {_MAX_RETRIES} attempt(s) on key {key_label}"
+        ) from last_exc
 
-    raise RuntimeError(f"Groq request failed after {_MAX_RETRIES} attempts") from last_exc
+    raise RuntimeError(
+        f"All {len(keys)} Groq API key(s) failed or were rejected (invalid/expired)"
+    ) from last_exc

@@ -264,7 +264,7 @@ async def apply_immediate_groq_analysis(db: Session, search_result_id: UUID) -> 
       3. If CUSTOMER → delete comments, done.
       4. Comment classification with post context.
     """
-    if not (settings.GROQ_API_KEY or "").strip():
+    if not settings.groq_api_keys:
         return
 
     result = (

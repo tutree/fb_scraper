@@ -543,6 +543,10 @@ async def scroll_and_process_posts(
     """
     Scroll the search results feed, extract author profile links,
     then for each link: scrape comments → visit profile → save to DB.
+
+    Permalink-based comment extraction runs on a **second browser tab** so the search
+    tab never navigates away; the feed, scroll position, and filters stay stable.
+
     Returns the number of personal profiles saved.
     """
     logger.info(f"Starting extraction for keyword: '{keyword}' (target: {max_results} posts)")
@@ -594,577 +598,623 @@ async def scroll_and_process_posts(
     exclude_uids_list = list(exclude_uids)
     logger.info(f"Account UIDs to exclude from results: {exclude_uids_list}")
 
+    BATCH_SIZE = 10
+
     user_links: List[Dict] = []
     seen_link_keys: Set[str] = set()
     max_scan_rounds = min(25, max(10, (max_results // 4) + 5))
     no_growth_threshold = 3
     no_growth_rounds = 0
+    users_saved = 0
+    pending_links: List[Dict] = []
 
     logger.info(
-        "Scrape-then-scroll (anti-virtualization): up to %d rounds — extract before each scroll",
-        max_scan_rounds,
+        "Scrape-then-scroll (anti-virtualization): up to %d rounds, batch size %d",
+        max_scan_rounds, BATCH_SIZE,
     )
 
-    for scan_round in range(1, max_scan_rounds + 1):
-        if should_stop and should_stop():
-            break
+    # Second tab: permalink comment flow uses page.goto(); keep the search tab on results
+    # so scroll position and feed DOM stay stable (no reload / re-navigate between batches).
+    permalink_worker: Optional[Page] = None
+    try:
+        if account_uid:
+            try:
+                permalink_worker = await browser_manager.create_page_with_cookies(
+                    account_uid
+                )
+                logger.info(
+                    "Opened dedicated tab for permalink/comment extraction "
+                    "(search tab stays on results)."
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not open permalink worker tab (%s); "
+                    "permalink flow will fall back to the search tab.",
+                    exc,
+                )
 
-        # Expand any truncated posts before extracting content
-        await _expand_see_more_buttons(page)
+        for scan_round in range(1, max_scan_rounds + 1):
+            if should_stop and should_stop():
+                break
 
-        batch = await page.evaluate(
-        """
-        (excludeUids) => {
-            const results = [];
-            const seen = new Set();
-            const BASE = location.origin;
+            # Expand any truncated posts before extracting content
+            await _expand_see_more_buttons(page)
 
-            const NON_PROFILE = new Set([
-                'pages', 'groups', 'events', 'marketplace', 'watch', 'gaming',
-                'ads', 'search', 'stories', 'notifications', 'messages',
-                'friends', 'bookmarks', 'memory', 'help', 'privacy', 'terms',
-                'hashtag', 'reel', 'reels', 'live', 'photo', 'photos', 'video',
-                'videos', 'login', 'recover', 'checkpoint', 'settings', 'composer',
-                'sharer', 'dialog', 'share', 'l.php', 'ajax', 'api'
-            ]);
-
-            function isProfileHref(absoluteHref) {
-                if (!absoluteHref || !absoluteHref.includes('facebook.com')) return false;
-                for (const uid of excludeUids) {
-                    if (uid && absoluteHref.includes(uid)) return false;
-                }
-                try {
-                    const u = new URL(absoluteHref);
-                    const parts = u.pathname.replace(/^\\//, '').replace(/\\/$/, '').split('/');
-                    const slug = parts[0];
-                    if (!slug) return false;
-                    if (NON_PROFILE.has(slug.toLowerCase())) return false;
-                    if (/^(groups|events|pages|hashtag|watch|gaming|marketplace|reel|reels|stories|live|photo|photos|video|videos|posts|permalink|story\\.php|share|sharer|composer|checkpoint|login|ajax)/.test(slug)) return false;
-                    if (u.search.includes('comment_id=')) return false;
-                    if (slug === 'profile.php') return true;
-                    return /^[A-Za-z0-9._-]{2,}$/.test(slug) && parts.length === 1;
-                } catch(e) { return false; }
-            }
-
-            function extractPostContent(article) {
-                // "See more" buttons are expanded by _expand_see_more_buttons() before this
-                // evaluate runs, so content should already be fully visible.
-                // Click any remaining ones as a last-resort fallback (no async wait possible here).
-                const seeMoreBtn = Array.from(
-                    article.querySelectorAll('div[role="button"], span[role="button"]')
-                ).find(el => (el.innerText || el.textContent || '').trim() === 'See more');
-                if (seeMoreBtn) seeMoreBtn.click();
-
-                const contentSelectors = [
-                    'div[data-ad-rendering-role="story_message"]',
-                    'div[data-ad-comet-preview="message"]',
-                    'div[dir="auto"][style*="text-align"]',
-                    'span[dir="auto"]'
-                ];
-                for (const selector of contentSelectors) {
-                    const elem = article.querySelector(selector);
-                    if (elem && elem.textContent.trim().length > 20) {
-                        return elem.textContent.trim();
-                    }
-                }
-                const dirAutoAll = article.querySelectorAll('[dir="auto"]');
-                const fragments = [];
+            batch = await page.evaluate(
+            """
+            (excludeUids) => {
+                const results = [];
                 const seen = new Set();
-                for (const el of dirAutoAll) {
-                    const t = el.textContent.trim();
-                    if (t.length > 15 && !seen.has(t) && !/^(Facebook|Like|Comment|Share|Send|Follow|Suggested for you|Sponsored)$/i.test(t)) {
-                        seen.add(t);
-                        fragments.push(t);
+                const BASE = location.origin;
+
+                const NON_PROFILE = new Set([
+                    'pages', 'groups', 'events', 'marketplace', 'watch', 'gaming',
+                    'ads', 'search', 'stories', 'notifications', 'messages',
+                    'friends', 'bookmarks', 'memory', 'help', 'privacy', 'terms',
+                    'hashtag', 'reel', 'reels', 'live', 'photo', 'photos', 'video',
+                    'videos', 'login', 'recover', 'checkpoint', 'settings', 'composer',
+                    'sharer', 'dialog', 'share', 'l.php', 'ajax', 'api'
+                ]);
+
+                function isProfileHref(absoluteHref) {
+                    if (!absoluteHref || !absoluteHref.includes('facebook.com')) return false;
+                    for (const uid of excludeUids) {
+                        if (uid && absoluteHref.includes(uid)) return false;
                     }
-                }
-                if (fragments.length > 0) {
-                    const joined = fragments.join(' ');
-                    return joined.length > 500 ? joined.substring(0, 500) + '...' : joined;
-                }
-                return null;
-            }
-
-            function isPostUrl(href) {
-                if (!href) return false;
-                const h = String(href).toLowerCase();
-                return (
-                    h.includes('/posts/') ||
-                    h.includes('/permalink/') ||
-                    h.includes('story_fbid') ||
-                    h.includes('/photo/') ||
-                    h.includes('/share/') ||
-                    h.includes('/watch') ||
-                    h.includes('/reel/') ||
-                    h.includes('/videos/') ||
-                    h.includes('story.php') ||
-                    h.includes('watch?v=') ||
-                    h.includes('multi_permalinks=')
-                );
-            }
-
-            function normalizeText(value) {
-                return (value || '').replace(/\\s+/g, ' ').trim();
-            }
-
-            const MONTH_RE = '(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)';
-            const MONTH_DAY_RE = new RegExp('\\\\b' + MONTH_RE + '\\\\b[\\\\s,]*\\\\d', 'i');
-            const DAY_MONTH_RE = new RegExp('\\\\d[\\\\s,]*\\\\b' + MONTH_RE + '\\\\b', 'i');
-            function isLikelyPostDate(value) {
-                const text = normalizeText(value);
-                if (!text || text.length > 80) return false;
-                if (/^(?:\\d+\\s*(?:s|m|min|h|hr|d|w|mo|y)|just now|yesterday|today)$/i.test(text)) return true;
-                if (MONTH_DAY_RE.test(text)) return true;
-                if (DAY_MONTH_RE.test(text)) return true;
-                if (/\\b(?:today|yesterday)\\b/i.test(text)) return true;
-                if (/\\b\\d{1,2}:\\d{2}\\b/.test(text)) return true;
-                if (/\\b\\d+\\s*(?:mins?|minutes?|hrs?|hours?|days?|weeks?|months?|years?)\\s*(?:ago)?\\b/i.test(text)) return true;
-                if (/^\\d{1,2}\\/\\d{1,2}\\/\\d{2,4}$/.test(text)) return true;
-                if (/^\\w+ \\d{1,2}(?:,? \\d{4})?(?:\\s+at\\s+\\d{1,2}:\\d{2}\\s*(?:AM|PM)?)?$/i.test(text)) return true;
-                return false;
-            }
-
-            function readVisibleCharsFromObfuscatedSpans(container) {
-                const wrapper = container.querySelector('span[style*="display: flex"], span[style*="display:flex"]');
-                const parent = wrapper || container;
-                const charSpans = parent.querySelectorAll(':scope > span');
-                if (charSpans.length < 3) return null;
-                let text = '';
-                for (const span of charSpans) {
-                    if (span.children.length > 0) continue;
-                    const ch = span.textContent;
-                    if (!ch) continue;
-                    const rect = span.getBoundingClientRect();
-                    if (rect.width === 0 && rect.height === 0) continue;
-                    const cs = getComputedStyle(span);
-                    if (cs.display === 'none' || cs.visibility === 'hidden') continue;
-                    if (parseFloat(cs.opacity) === 0) continue;
-                    if (cs.position === 'absolute' && cs.clip && cs.clip !== 'auto') continue;
-                    if (parseFloat(cs.fontSize) === 0) continue;
-                    if (cs.color === cs.backgroundColor && cs.color !== '') continue;
-                    text += ch;
-                }
-                return text.replace(/\\s+/g, ' ').trim() || null;
-            }
-
-            function readFromAriaLabelledBy(node) {
-                if (!node || !node.getAttribute) return null;
-                const labelledBy = node.getAttribute('aria-labelledby');
-                if (!labelledBy) return null;
-                for (const id of labelledBy.split(' ').filter(Boolean)) {
-                    const target = document.getElementById(id);
-                    if (!target) continue;
-                    const text = normalizeText(target.innerText || target.textContent || '');
-                    if (text && text.length > 0) return text;
-                }
-                return null;
-            }
-
-            function extractDateFromElement(el) {
-                if (!el) return null;
-                const ariaLabel = normalizeText(el.getAttribute('aria-label') || '');
-                if (isLikelyPostDate(ariaLabel)) return ariaLabel;
-
-                for (const child of el.querySelectorAll('[aria-labelledby]')) {
-                    const labelText = readFromAriaLabelledBy(child);
-                    if (labelText && isLikelyPostDate(labelText)) return labelText;
+                    try {
+                        const u = new URL(absoluteHref);
+                        const parts = u.pathname.replace(/^\\//, '').replace(/\\/$/, '').split('/');
+                        const slug = parts[0];
+                        if (!slug) return false;
+                        if (NON_PROFILE.has(slug.toLowerCase())) return false;
+                        if (/^(groups|events|pages|hashtag|watch|gaming|marketplace|reel|reels|stories|live|photo|photos|video|videos|posts|permalink|story\\.php|share|sharer|composer|checkpoint|login|ajax)/.test(slug)) return false;
+                        if (u.search.includes('comment_id=')) return false;
+                        if (slug === 'profile.php') return true;
+                        return /^[A-Za-z0-9._-]{2,}$/.test(slug) && parts.length === 1;
+                    } catch(e) { return false; }
                 }
 
-                const obfuscatedContainers = el.querySelectorAll('span[aria-labelledby]');
-                for (const oc of obfuscatedContainers) {
-                    const ariaText = readFromAriaLabelledBy(oc);
-                    if (ariaText && isLikelyPostDate(ariaText)) return ariaText;
-                    const visible = readVisibleCharsFromObfuscatedSpans(oc);
-                    if (visible && isLikelyPostDate(visible)) return visible;
+                function extractPostContent(article) {
+                    // "See more" buttons are expanded by _expand_see_more_buttons() before this
+                    // evaluate runs, so content should already be fully visible.
+                    // Click any remaining ones as a last-resort fallback (no async wait possible here).
+                    const seeMoreBtn = Array.from(
+                        article.querySelectorAll('div[role="button"], span[role="button"]')
+                    ).find(el => (el.innerText || el.textContent || '').trim() === 'See more');
+                    if (seeMoreBtn) seeMoreBtn.click();
+
+                    const contentSelectors = [
+                        'div[data-ad-rendering-role="story_message"]',
+                        'div[data-ad-comet-preview="message"]',
+                        'div[dir="auto"][style*="text-align"]',
+                        'span[dir="auto"]'
+                    ];
+                    for (const selector of contentSelectors) {
+                        const elem = article.querySelector(selector);
+                        if (elem && elem.textContent.trim().length > 20) {
+                            return elem.textContent.trim();
+                        }
+                    }
+                    const dirAutoAll = article.querySelectorAll('[dir="auto"]');
+                    const fragments = [];
+                    const seen = new Set();
+                    for (const el of dirAutoAll) {
+                        const t = el.textContent.trim();
+                        if (t.length > 15 && !seen.has(t) && !/^(Facebook|Like|Comment|Share|Send|Follow|Suggested for you|Sponsored)$/i.test(t)) {
+                            seen.add(t);
+                            fragments.push(t);
+                        }
+                    }
+                    if (fragments.length > 0) {
+                        const joined = fragments.join(' ');
+                        return joined.length > 500 ? joined.substring(0, 500) + '...' : joined;
+                    }
+                    return null;
                 }
 
-                const flexSpans = el.querySelectorAll('span[style*="display: flex"], span[style*="display:flex"]');
-                for (const fs of flexSpans) {
-                    const container = fs.parentElement || fs;
-                    const visible = readVisibleCharsFromObfuscatedSpans(container);
-                    if (visible && isLikelyPostDate(visible)) return visible;
+                function isPostUrl(href) {
+                    if (!href) return false;
+                    const h = String(href).toLowerCase();
+                    return (
+                        h.includes('/posts/') ||
+                        h.includes('/permalink/') ||
+                        h.includes('story_fbid') ||
+                        h.includes('/photo/') ||
+                        h.includes('/share/') ||
+                        h.includes('/watch') ||
+                        h.includes('/reel/') ||
+                        h.includes('/videos/') ||
+                        h.includes('story.php') ||
+                        h.includes('watch?v=') ||
+                        h.includes('multi_permalinks=')
+                    );
                 }
 
-                const timeEl = el.querySelector('time[datetime]');
-                if (timeEl) {
-                    const dt = normalizeText(timeEl.getAttribute('datetime') || '');
-                    if (dt) return dt;
-                }
-                const abbrEl = el.querySelector('abbr[title], abbr[data-utime]');
-                if (abbrEl) {
-                    const title = normalizeText(abbrEl.getAttribute('title') || '');
-                    if (title) return title;
-                }
-                const visibleText = normalizeText(el.innerText || el.textContent || '');
-                if (isLikelyPostDate(visibleText)) return visibleText;
-                return null;
-            }
-
-            function isDateAnchor(href, rawHref) {
-                if (!href && !rawHref) return false;
-                if (isPostUrl(href) || isPostUrl(rawHref)) return true;
-                if ((rawHref || '').includes('#?') || (href || '').includes('#?')) return true;
-                return false;
-            }
-
-            function extractPostDate(article, postUrl) {
-                const candidates = [];
-                for (const link of article.querySelectorAll('a[href]')) {
-                    const href = link.href || '';
-                    const rawHref = link.getAttribute('href') || '';
-                    if (!href && !rawHref) continue;
-                    if (postUrl && href === postUrl) { candidates.push(link); continue; }
-                    if (isDateAnchor(href, rawHref) && !isProfileHref(href)) candidates.push(link);
+                function normalizeText(value) {
+                    return (value || '').replace(/\\s+/g, ' ').trim();
                 }
 
-                for (const anchor of candidates) {
-                    const value = extractDateFromElement(anchor);
-                    if (value) return value;
+                const MONTH_RE = '(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)';
+                const MONTH_DAY_RE = new RegExp('\\\\b' + MONTH_RE + '\\\\b[\\\\s,]*\\\\d', 'i');
+                const DAY_MONTH_RE = new RegExp('\\\\d[\\\\s,]*\\\\b' + MONTH_RE + '\\\\b', 'i');
+                function isLikelyPostDate(value) {
+                    const text = normalizeText(value);
+                    if (!text || text.length > 80) return false;
+                    if (/^(?:\\d+\\s*(?:s|m|min|h|hr|d|w|mo|y)|just now|yesterday|today)$/i.test(text)) return true;
+                    if (MONTH_DAY_RE.test(text)) return true;
+                    if (DAY_MONTH_RE.test(text)) return true;
+                    if (/\\b(?:today|yesterday)\\b/i.test(text)) return true;
+                    if (/\\b\\d{1,2}:\\d{2}\\b/.test(text)) return true;
+                    if (/\\b\\d+\\s*(?:mins?|minutes?|hrs?|hours?|days?|weeks?|months?|years?)\\s*(?:ago)?\\b/i.test(text)) return true;
+                    if (/^\\d{1,2}\\/\\d{1,2}\\/\\d{2,4}$/.test(text)) return true;
+                    if (/^\\w+ \\d{1,2}(?:,? \\d{4})?(?:\\s+at\\s+\\d{1,2}:\\d{2}\\s*(?:AM|PM)?)?$/i.test(text)) return true;
+                    return false;
                 }
 
-                const headerDiv = article.querySelector('div[data-ad-rendering-role="profile_name"]');
-                if (headerDiv) {
-                    let ancestor = headerDiv;
-                    for (let i = 0; i < 8 && ancestor && ancestor !== article; i++) {
-                        ancestor = ancestor.parentElement;
-                        if (!ancestor) break;
-                        for (const child of ancestor.children) {
-                            for (const a of child.querySelectorAll('a[href]')) {
-                                const rawH = a.getAttribute('href') || '';
-                                if (isDateAnchor(a.href || '', rawH) && !isProfileHref(a.href || '')) {
-                                    const val = extractDateFromElement(a);
-                                    if (val) return val;
+                function readVisibleCharsFromObfuscatedSpans(container) {
+                    const wrapper = container.querySelector('span[style*="display: flex"], span[style*="display:flex"]');
+                    const parent = wrapper || container;
+                    const charSpans = parent.querySelectorAll(':scope > span');
+                    if (charSpans.length < 3) return null;
+                    let text = '';
+                    for (const span of charSpans) {
+                        if (span.children.length > 0) continue;
+                        const ch = span.textContent;
+                        if (!ch) continue;
+                        const rect = span.getBoundingClientRect();
+                        if (rect.width === 0 && rect.height === 0) continue;
+                        const cs = getComputedStyle(span);
+                        if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+                        if (parseFloat(cs.opacity) === 0) continue;
+                        if (cs.position === 'absolute' && cs.clip && cs.clip !== 'auto') continue;
+                        if (parseFloat(cs.fontSize) === 0) continue;
+                        if (cs.color === cs.backgroundColor && cs.color !== '') continue;
+                        text += ch;
+                    }
+                    return text.replace(/\\s+/g, ' ').trim() || null;
+                }
+
+                function readFromAriaLabelledBy(node) {
+                    if (!node || !node.getAttribute) return null;
+                    const labelledBy = node.getAttribute('aria-labelledby');
+                    if (!labelledBy) return null;
+                    for (const id of labelledBy.split(' ').filter(Boolean)) {
+                        const target = document.getElementById(id);
+                        if (!target) continue;
+                        const text = normalizeText(target.innerText || target.textContent || '');
+                        if (text && text.length > 0) return text;
+                    }
+                    return null;
+                }
+
+                function extractDateFromElement(el) {
+                    if (!el) return null;
+                    const ariaLabel = normalizeText(el.getAttribute('aria-label') || '');
+                    if (isLikelyPostDate(ariaLabel)) return ariaLabel;
+
+                    for (const child of el.querySelectorAll('[aria-labelledby]')) {
+                        const labelText = readFromAriaLabelledBy(child);
+                        if (labelText && isLikelyPostDate(labelText)) return labelText;
+                    }
+
+                    const obfuscatedContainers = el.querySelectorAll('span[aria-labelledby]');
+                    for (const oc of obfuscatedContainers) {
+                        const ariaText = readFromAriaLabelledBy(oc);
+                        if (ariaText && isLikelyPostDate(ariaText)) return ariaText;
+                        const visible = readVisibleCharsFromObfuscatedSpans(oc);
+                        if (visible && isLikelyPostDate(visible)) return visible;
+                    }
+
+                    const flexSpans = el.querySelectorAll('span[style*="display: flex"], span[style*="display:flex"]');
+                    for (const fs of flexSpans) {
+                        const container = fs.parentElement || fs;
+                        const visible = readVisibleCharsFromObfuscatedSpans(container);
+                        if (visible && isLikelyPostDate(visible)) return visible;
+                    }
+
+                    const timeEl = el.querySelector('time[datetime]');
+                    if (timeEl) {
+                        const dt = normalizeText(timeEl.getAttribute('datetime') || '');
+                        if (dt) return dt;
+                    }
+                    const abbrEl = el.querySelector('abbr[title], abbr[data-utime]');
+                    if (abbrEl) {
+                        const title = normalizeText(abbrEl.getAttribute('title') || '');
+                        if (title) return title;
+                    }
+                    const visibleText = normalizeText(el.innerText || el.textContent || '');
+                    if (isLikelyPostDate(visibleText)) return visibleText;
+                    return null;
+                }
+
+                function isDateAnchor(href, rawHref) {
+                    if (!href && !rawHref) return false;
+                    if (isPostUrl(href) || isPostUrl(rawHref)) return true;
+                    if ((rawHref || '').includes('#?') || (href || '').includes('#?')) return true;
+                    return false;
+                }
+
+                function extractPostDate(article, postUrl) {
+                    const candidates = [];
+                    for (const link of article.querySelectorAll('a[href]')) {
+                        const href = link.href || '';
+                        const rawHref = link.getAttribute('href') || '';
+                        if (!href && !rawHref) continue;
+                        if (postUrl && href === postUrl) { candidates.push(link); continue; }
+                        if (isDateAnchor(href, rawHref) && !isProfileHref(href)) candidates.push(link);
+                    }
+
+                    for (const anchor of candidates) {
+                        const value = extractDateFromElement(anchor);
+                        if (value) return value;
+                    }
+
+                    const headerDiv = article.querySelector('div[data-ad-rendering-role="profile_name"]');
+                    if (headerDiv) {
+                        let ancestor = headerDiv;
+                        for (let i = 0; i < 8 && ancestor && ancestor !== article; i++) {
+                            ancestor = ancestor.parentElement;
+                            if (!ancestor) break;
+                            for (const child of ancestor.children) {
+                                for (const a of child.querySelectorAll('a[href]')) {
+                                    const rawH = a.getAttribute('href') || '';
+                                    if (isDateAnchor(a.href || '', rawH) && !isProfileHref(a.href || '')) {
+                                        const val = extractDateFromElement(a);
+                                        if (val) return val;
+                                    }
                                 }
                             }
                         }
                     }
+
+                    const allObfuscated = article.querySelectorAll('span[aria-labelledby]');
+                    for (const oc of allObfuscated) {
+                        const closestLink = oc.closest('a[href]');
+                        if (closestLink && isProfileHref(closestLink.href || '')) continue;
+                        const ariaText = readFromAriaLabelledBy(oc);
+                        if (ariaText && isLikelyPostDate(ariaText)) return ariaText;
+                        const visible = readVisibleCharsFromObfuscatedSpans(oc);
+                        if (visible && isLikelyPostDate(visible)) return visible;
+                    }
+
+                    const allFlexSpans = article.querySelectorAll('span[style*="display: flex"], span[style*="display:flex"]');
+                    for (const fs of allFlexSpans) {
+                        const closestLink = fs.closest('a[href]');
+                        if (closestLink && isProfileHref(closestLink.href || '')) continue;
+                        const container = fs.parentElement || fs;
+                        const visible = readVisibleCharsFromObfuscatedSpans(container);
+                        if (visible && isLikelyPostDate(visible)) return visible;
+                    }
+
+                    const fallbackTime = article.querySelector('time[datetime]');
+                    if (fallbackTime) {
+                        const dt = normalizeText(fallbackTime.getAttribute('datetime') || '');
+                        if (dt) return dt;
+                    }
+                    const fallbackAbbr = article.querySelector('abbr[title], abbr[data-utime]');
+                    if (fallbackAbbr) {
+                        const title = normalizeText(fallbackAbbr.getAttribute('title') || '');
+                        if (title) return title;
+                    }
+
+                    for (const a of article.querySelectorAll('a[href]')) {
+                        if (isProfileHref(a.href || '')) continue;
+                        const linkText = normalizeText(a.innerText || a.textContent || '');
+                        if (linkText && linkText.length < 40 && isLikelyPostDate(linkText)) return linkText;
+                        const ariaL = normalizeText(a.getAttribute('aria-label') || '');
+                        if (ariaL && ariaL.length < 40 && isLikelyPostDate(ariaL)) return ariaL;
+                    }
+
+                    for (const span of article.querySelectorAll('span')) {
+                        if (span.children.length > 3) continue;
+                        const st = normalizeText(span.innerText || span.textContent || '');
+                        if (st && st.length > 2 && st.length < 30 && isLikelyPostDate(st)) return st;
+                    }
+                    return null;
                 }
 
-                const allObfuscated = article.querySelectorAll('span[aria-labelledby]');
-                for (const oc of allObfuscated) {
-                    const closestLink = oc.closest('a[href]');
-                    if (closestLink && isProfileHref(closestLink.href || '')) continue;
-                    const ariaText = readFromAriaLabelledBy(oc);
-                    if (ariaText && isLikelyPostDate(ariaText)) return ariaText;
-                    const visible = readVisibleCharsFromObfuscatedSpans(oc);
-                    if (visible && isLikelyPostDate(visible)) return visible;
+                function isGroupMemberAuthorHref(href) {
+                    if (!href || !href.includes('facebook.com')) return false;
+                    try {
+                        const p = new URL(href).pathname.toLowerCase();
+                        if (!p.includes('/groups/')) return false;
+                        return p.includes('/user/') || p.includes('/people/');
+                    } catch (e) { return false; }
                 }
 
-                const allFlexSpans = article.querySelectorAll('span[style*="display: flex"], span[style*="display:flex"]');
-                for (const fs of allFlexSpans) {
-                    const closestLink = fs.closest('a[href]');
-                    if (closestLink && isProfileHref(closestLink.href || '')) continue;
-                    const container = fs.parentElement || fs;
-                    const visible = readVisibleCharsFromObfuscatedSpans(container);
-                    if (visible && isLikelyPostDate(visible)) return visible;
-                }
-
-                const fallbackTime = article.querySelector('time[datetime]');
-                if (fallbackTime) {
-                    const dt = normalizeText(fallbackTime.getAttribute('datetime') || '');
-                    if (dt) return dt;
-                }
-                const fallbackAbbr = article.querySelector('abbr[title], abbr[data-utime]');
-                if (fallbackAbbr) {
-                    const title = normalizeText(fallbackAbbr.getAttribute('title') || '');
-                    if (title) return title;
-                }
-
-                for (const a of article.querySelectorAll('a[href]')) {
-                    if (isProfileHref(a.href || '')) continue;
-                    const linkText = normalizeText(a.innerText || a.textContent || '');
-                    if (linkText && linkText.length < 40 && isLikelyPostDate(linkText)) return linkText;
-                    const ariaL = normalizeText(a.getAttribute('aria-label') || '');
-                    if (ariaL && ariaL.length < 40 && isLikelyPostDate(ariaL)) return ariaL;
-                }
-
-                for (const span of article.querySelectorAll('span')) {
-                    if (span.children.length > 3) continue;
-                    const st = normalizeText(span.innerText || span.textContent || '');
-                    if (st && st.length > 2 && st.length < 30 && isLikelyPostDate(st)) return st;
-                }
-                return null;
-            }
-
-            function isGroupMemberAuthorHref(href) {
-                if (!href || !href.includes('facebook.com')) return false;
-                try {
-                    const p = new URL(href).pathname.toLowerCase();
-                    if (!p.includes('/groups/')) return false;
-                    return p.includes('/user/') || p.includes('/people/');
-                } catch (e) { return false; }
-            }
-
-            function findAuthorLink(article) {
-                // Group posts: two links are common — group home (/groups/id/) vs member (/groups/id/user/uid/).
-                // Prefer the member link, especially inside the profile_name header (matches real author).
-                const profileNameRoot = article.querySelector('div[data-ad-rendering-role="profile_name"]');
-                if (profileNameRoot) {
-                    for (const a of profileNameRoot.querySelectorAll('a[href]')) {
+                function findAuthorLink(article) {
+                    // Group posts: two links are common — group home (/groups/id/) vs member (/groups/id/user/uid/).
+                    // Prefer the member link, especially inside the profile_name header (matches real author).
+                    const profileNameRoot = article.querySelector('div[data-ad-rendering-role="profile_name"]');
+                    if (profileNameRoot) {
+                        for (const a of profileNameRoot.querySelectorAll('a[href]')) {
+                            if (isGroupMemberAuthorHref(a.href)) {
+                                return { href: a.href, text: (a.textContent || '').trim(), type: 'group' };
+                            }
+                        }
+                    }
+                    const anchors = article.querySelectorAll('a[href]');
+                    for (const a of anchors) {
                         if (isGroupMemberAuthorHref(a.href)) {
                             return { href: a.href, text: (a.textContent || '').trim(), type: 'group' };
                         }
                     }
-                }
-                const anchors = article.querySelectorAll('a[href]');
-                for (const a of anchors) {
-                    if (isGroupMemberAuthorHref(a.href)) {
-                        return { href: a.href, text: (a.textContent || '').trim(), type: 'group' };
+                    for (const a of anchors) {
+                        if (isProfileHref(a.href)) {
+                            return { href: a.href, text: (a.textContent || '').trim(), type: 'direct' };
+                        }
                     }
+                    return null;
                 }
-                for (const a of anchors) {
-                    if (isProfileHref(a.href)) {
-                        return { href: a.href, text: (a.textContent || '').trim(), type: 'direct' };
+
+                function addLink(absoluteHref, text, postContent, postUrl, postDate, visibleIndex, linkType) {
+                    try {
+                        const u = new URL(absoluteHref);
+                        const key = `${postUrl || u.pathname.replace(/\\/$/, '')}|${(postContent || '').slice(0, 80)}`;
+                        if (seen.has(key)) return;
+                        seen.add(key);
+                        const lt = linkType || 'direct';
+                        results.push({
+                            url: absoluteHref,
+                            text: (text || '').trim(),
+                            type: lt,
+                            post_content: postContent || null,
+                            post_url: postUrl || null,
+                            post_date: postDate || null,
+                            visible_index: visibleIndex,
+                        });
+                    } catch(e) {}
+                }
+
+                function extractPostUrl(article) {
+                    const selectors = [
+                        'a[href*="/posts/pfbid"]', 'a[href*="/posts/"]', 'a[href*="/permalink/"]',
+                        'a[href*="story_fbid"]', 'a[href*="/photo/"]',
+                        'a[href*="/watch"]', 'a[href*="/reel/"]', 'a[href*="/videos/"]',
+                        'a[href*="watch?v="]',
+                        'a[role="link"][href*="facebook.com"]', 'span[id] a[href]'
+                    ];
+
+                    // Reshared/quoted posts: the outer article contains nested sub-articles
+                    // representing embedded content from the original author.  Links inside those
+                    // nested elements belong to the *original* post, not to the resharer.
+                    // Collect all elements that are part of nested sub-articles so we can skip them
+                    // in the first pass and only fall back to them if no direct URL is found.
+                    const nestedLinkSet = new Set();
+                    for (const nested of article.querySelectorAll('div[role="article"]')) {
+                        for (const a of nested.querySelectorAll('a[href]')) {
+                            nestedLinkSet.add(a);
+                        }
                     }
-                }
-                return null;
-            }
 
-            function addLink(absoluteHref, text, postContent, postUrl, postDate, visibleIndex, linkType) {
-                try {
-                    const u = new URL(absoluteHref);
-                    const key = `${postUrl || u.pathname.replace(/\\/$/, '')}|${(postContent || '').slice(0, 80)}`;
-                    if (seen.has(key)) return;
-                    seen.add(key);
-                    const lt = linkType || 'direct';
-                    results.push({
-                        url: absoluteHref,
-                        text: (text || '').trim(),
-                        type: lt,
-                        post_content: postContent || null,
-                        post_url: postUrl || null,
-                        post_date: postDate || null,
-                        visible_index: visibleIndex,
-                    });
-                } catch(e) {}
-            }
-
-            function extractPostUrl(article) {
-                const selectors = [
-                    'a[href*="/posts/pfbid"]', 'a[href*="/posts/"]', 'a[href*="/permalink/"]',
-                    'a[href*="story_fbid"]', 'a[href*="/photo/"]',
-                    'a[href*="/watch"]', 'a[href*="/reel/"]', 'a[href*="/videos/"]',
-                    'a[href*="watch?v="]',
-                    'a[role="link"][href*="facebook.com"]', 'span[id] a[href]'
-                ];
-
-                // Reshared/quoted posts: the outer article contains nested sub-articles
-                // representing embedded content from the original author.  Links inside those
-                // nested elements belong to the *original* post, not to the resharer.
-                // Collect all elements that are part of nested sub-articles so we can skip them
-                // in the first pass and only fall back to them if no direct URL is found.
-                const nestedLinkSet = new Set();
-                for (const nested of article.querySelectorAll('div[role="article"]')) {
-                    for (const a of nested.querySelectorAll('a[href]')) {
-                        nestedLinkSet.add(a);
+                    // First pass: prefer links that belong to the outer (resharer's) article only
+                    if (nestedLinkSet.size > 0) {
+                        for (const selector of selectors) {
+                            for (const link of article.querySelectorAll(selector)) {
+                                if (nestedLinkSet.has(link)) continue;
+                                const href = link.href;
+                                if (href && !isProfileHref(href) && isPostUrl(href)) return href;
+                            }
+                        }
                     }
-                }
 
-                // First pass: prefer links that belong to the outer (resharer's) article only
-                if (nestedLinkSet.size > 0) {
+                    // Second pass (fallback): search all links including nested/reshared content
                     for (const selector of selectors) {
                         for (const link of article.querySelectorAll(selector)) {
-                            if (nestedLinkSet.has(link)) continue;
                             const href = link.href;
                             if (href && !isProfileHref(href) && isPostUrl(href)) return href;
                         }
                     }
+                    return null;
                 }
 
-                // Second pass (fallback): search all links including nested/reshared content
-                for (const selector of selectors) {
-                    for (const link of article.querySelectorAll(selector)) {
-                        const href = link.href;
-                        if (href && !isProfileHref(href) && isPostUrl(href)) return href;
-                    }
-                }
-                return null;
-            }
+                const mainContent = document.querySelector('div[role="main"]') || document.body;
 
-            const mainContent = document.querySelector('div[role="main"]') || document.body;
-
-            // Strategy 1: role="article" elements
-            const articles = mainContent.querySelectorAll('div[role="article"]');
-            articles.forEach((article, idx) => {
-                const postContent = extractPostContent(article);
-                const postUrl = extractPostUrl(article);
-                const postDate = extractPostDate(article, postUrl);
-                const author = findAuthorLink(article);
-                if (author) {
-                    addLink(author.href, author.text, postContent, postUrl, postDate, idx, author.type);
-                }
-            });
-
-            // Strategy 2: feed direct children
-            if (results.length === 0) {
-                const feed = mainContent.querySelector('div[role="feed"]');
-                if (feed) {
-                    Array.from(feed.children).forEach((child, idx) => {
-                        const postContent = extractPostContent(child);
-                        const postUrl = extractPostUrl(child);
-                        const postDate = extractPostDate(child, postUrl);
-                        const author = findAuthorLink(child);
-                        if (author) {
-                            addLink(author.href, author.text, postContent, postUrl, postDate, idx, author.type);
-                        }
-                    });
-                }
-            }
-
-            // Strategy 3: full main-content scan
-            if (results.length === 0) {
-                mainContent.querySelectorAll('div[role="article"]').forEach((article, idx) => {
+                // Strategy 1: role="article" elements
+                const articles = mainContent.querySelectorAll('div[role="article"]');
+                articles.forEach((article, idx) => {
                     const postContent = extractPostContent(article);
                     const postUrl = extractPostUrl(article);
                     const postDate = extractPostDate(article, postUrl);
                     const author = findAuthorLink(article);
                     if (author) {
-                        addLink(author.href, author.text, postContent, postUrl, postDate, null, author.type);
+                        addLink(author.href, author.text, postContent, postUrl, postDate, idx, author.type);
                     }
                 });
+
+                // Strategy 2: feed direct children
+                if (results.length === 0) {
+                    const feed = mainContent.querySelector('div[role="feed"]');
+                    if (feed) {
+                        Array.from(feed.children).forEach((child, idx) => {
+                            const postContent = extractPostContent(child);
+                            const postUrl = extractPostUrl(child);
+                            const postDate = extractPostDate(child, postUrl);
+                            const author = findAuthorLink(child);
+                            if (author) {
+                                addLink(author.href, author.text, postContent, postUrl, postDate, idx, author.type);
+                            }
+                        });
+                    }
+                }
+
+                // Strategy 3: full main-content scan
+                if (results.length === 0) {
+                    mainContent.querySelectorAll('div[role="article"]').forEach((article, idx) => {
+                        const postContent = extractPostContent(article);
+                        const postUrl = extractPostUrl(article);
+                        const postDate = extractPostDate(article, postUrl);
+                        const author = findAuthorLink(article);
+                        if (author) {
+                            addLink(author.href, author.text, postContent, postUrl, postDate, null, author.type);
+                        }
+                    });
+                }
+
+                return results;
             }
+            """,
+                exclude_uids_list,
+            )
 
-            return results;
-        }
-        """,
-            exclude_uids_list,
-        )
+            feed_children = await page.evaluate(
+                """() => {
+                    const f = document.querySelector('div[role="feed"]');
+                    return f ? f.children.length : 0;
+                }"""
+            )
+            new_count = 0
+            new_links_this_round: List[Dict] = []
+            for link in batch:
+                if not _is_acceptable_feed_author_url(link.get("url", "")):
+                    continue
+                key = _link_key(link)
+                if key in seen_link_keys:
+                    continue
+                seen_link_keys.add(key)
+                user_links.append(link)
+                new_links_this_round.append(link)
+                new_count += 1
 
-        feed_children = await page.evaluate(
-            """() => {
-                const f = document.querySelector('div[role="feed"]');
-                return f ? f.children.length : 0;
-            }"""
-        )
-        new_count = 0
-        new_links_this_round: List[Dict] = []
-        for link in batch:
-            if not _is_acceptable_feed_author_url(link.get("url", "")):
-                continue
-            key = _link_key(link)
-            if key in seen_link_keys:
-                continue
-            seen_link_keys.add(key)
-            user_links.append(link)
-            new_links_this_round.append(link)
-            new_count += 1
-
-        logger.info(
-            "  Scrape round %d/%d: +%d new unique (batch_raw=%d, feed_children=%d, total_unique=%d)",
-            scan_round,
-            max_scan_rounds,
-            new_count,
-            len(batch),
-            feed_children,
-            len(user_links),
-        )
-
-        # Post-URL-first: capture Share → Copy link while this round's cards still match the viewport
-        for early_link in new_links_this_round:
-            if should_stop and should_stop():
-                break
-            if early_link.get("post_url") and is_usable_post_url_for_permalink_flow(
-                str(early_link.get("post_url"))
-            ):
-                continue
-            try:
-                captured = await capture_post_url_via_share_button(page, early_link)
-                if captured:
-                    early_link["post_url"] = captured
-                    logger.info(
-                        "  [PostURL] Early capture (pre-scroll): %s",
-                        captured[:88] + ("..." if len(captured) > 88 else ""),
-                    )
-            except Exception as exc:
-                logger.debug("  [PostURL] Early capture error: %s", exc)
-            await asyncio.sleep(random.uniform(0.35, 0.75))
-
-        if len(user_links) >= max_results:
-            break
-
-        if new_count == 0:
-            no_growth_rounds += 1
             logger.info(
-                "  No new unique links this round (%d/%d no-growth stops)",
-                no_growth_rounds,
-                no_growth_threshold,
-            )
-            if no_growth_rounds >= no_growth_threshold:
-                logger.info(
-                    "Stopping scrape-then-scroll: no new links for %d consecutive rounds",
-                    no_growth_threshold,
-                )
-                break
-        else:
-            no_growth_rounds = 0
-
-        await page.evaluate("window.scrollBy(0, 1800)")
-        if await sleep_with_stop(8, should_stop=should_stop):
-            break
-
-    # Mandatory tooltip dates: DOM-only dates miss obfuscated timestamps. Search layout
-    # often has feed children but no div[role=article] — use feed-card hover path.
-    try:
-        article_count = await page.locator("div[role='main'] div[role='article']").count()
-        feed_child_count = await page.locator("div[role='main'] div[role='feed'] > *").count()
-        max_vis = max(
-            (int(l["visible_index"]) for l in user_links if l.get("visible_index") is not None),
-            default=-1,
-        )
-        scan_feed_cards = max(max_vis + 1, 0) if max_vis >= 0 else min(feed_child_count, 80)
-
-        date_by_index: Dict[int, str] = {}
-        if article_count > 0:
-            logger.info(
-                "Tooltip dates: using article layout (%d role=article nodes)",
-                article_count,
-            )
-            date_by_index = await _extract_dates_via_tooltip_hover(
-                page, article_count, should_stop=should_stop
-            )
-        elif feed_child_count > 0 and user_links:
-            logger.info(
-                "Tooltip dates: using feed-card layout (articles=0, %d feed children, scanning %d)",
-                feed_child_count,
-                min(scan_feed_cards, feed_child_count),
-            )
-            date_by_index = await _extract_dates_via_tooltip_hover_feed_children(
-                page,
-                min(scan_feed_cards, feed_child_count),
-                should_stop=should_stop,
-            )
-        else:
-            logger.warning(
-                "Tooltip dates: skipped (articles=%d, feed_children=%d, user_links=%d)",
-                article_count,
-                feed_child_count,
+                "  Scrape round %d/%d: +%d new unique (batch_raw=%d, feed_children=%d, total_unique=%d)",
+                scan_round,
+                max_scan_rounds,
+                new_count,
+                len(batch),
+                feed_children,
                 len(user_links),
             )
 
-        for link in user_links:
-            idx = link.get("visible_index")
-            if idx is not None and idx in date_by_index:
-                link["post_date"] = date_by_index[idx]
-    except Exception as e:
-        logger.warning("Tooltip date extraction (after scrape-then-scroll): %s", e)
+            # Post-URL-first: capture Share → Copy link while this round's cards still match the viewport
+            for early_link in new_links_this_round:
+                if should_stop and should_stop():
+                    break
+                if early_link.get("post_url") and is_usable_post_url_for_permalink_flow(
+                    str(early_link.get("post_url"))
+                ):
+                    continue
+                try:
+                    captured = await capture_post_url_via_share_button(page, early_link)
+                    if captured:
+                        early_link["post_url"] = captured
+                        logger.info(
+                            "  [PostURL] Early capture (pre-scroll): %s",
+                            captured[:88] + ("..." if len(captured) > 88 else ""),
+                        )
+                except Exception as exc:
+                    logger.debug("  [PostURL] Early capture error: %s", exc)
+                await asyncio.sleep(random.uniform(0.35, 0.75))
 
-    logger.info(
-        "Total unique profile links after scrape-then-scroll: %d",
-        len(user_links),
-    )
-    for link in user_links:
-        logger.info(
-            "  Extracted link: url=%s post_date=%r",
-            link.get("url", "")[:60],
-            link.get("post_date"),
-        )
+            pending_links.extend(new_links_this_round)
 
-    users_saved = 0
-    # No deduplication by profile/user ID here — same user can have multiple posts.
-    # Deduplication is only by post_url when saving (in fb_profile_processor).
-    filtered_links: List[Dict] = user_links
-    logger.info(f"Processing {len(filtered_links)} links sequentially")
+            # --- Process a batch when we have enough or at the end ---
+            should_process_now = (
+                len(pending_links) >= BATCH_SIZE
+                or len(user_links) >= max_results
+                or (new_count == 0 and no_growth_rounds + 1 >= no_growth_threshold)
+            )
 
-    for i, link in enumerate(filtered_links):
+            if should_process_now and pending_links:
+                batch_to_process = pending_links[:]
+                pending_links.clear()
+                logger.info(
+                    "Processing batch of %d links (saved so far: %d/%d)",
+                    len(batch_to_process), users_saved, max_results,
+                )
+                users_saved = await _process_link_batch(
+                    batch_to_process,
+                    page=page,
+                    permalink_page=permalink_worker,
+                    keyword=keyword,
+                    max_results=max_results,
+                    browser_manager=browser_manager,
+                    current_account=current_account,
+                    db=db,
+                    sleep_with_stop=sleep_with_stop,
+                    should_stop=should_stop,
+                    users_saved=users_saved,
+                    total_links=len(user_links),
+                )
+                if users_saved >= max_results:
+                    break
+
+            if len(user_links) >= max_results:
+                break
+
+            if new_count == 0:
+                no_growth_rounds += 1
+                logger.info(
+                    "  No new unique links this round (%d/%d no-growth stops)",
+                    no_growth_rounds,
+                    no_growth_threshold,
+                )
+                if no_growth_rounds >= no_growth_threshold:
+                    logger.info(
+                        "Stopping scrape-then-scroll: no new links for %d consecutive rounds",
+                        no_growth_threshold,
+                    )
+                    break
+            else:
+                no_growth_rounds = 0
+
+            await page.evaluate("window.scrollBy(0, 1800)")
+            if await sleep_with_stop(8, should_stop=should_stop):
+                break
+
+        # Process any remaining pending links
+        if pending_links and users_saved < max_results:
+            logger.info(
+                "Processing final batch of %d remaining links (saved so far: %d/%d)",
+                len(pending_links), users_saved, max_results,
+            )
+            users_saved = await _process_link_batch(
+                pending_links,
+                page=page,
+                permalink_page=permalink_worker,
+                keyword=keyword,
+                max_results=max_results,
+                browser_manager=browser_manager,
+                current_account=current_account,
+                db=db,
+                sleep_with_stop=sleep_with_stop,
+                should_stop=should_stop,
+                users_saved=users_saved,
+                total_links=len(user_links),
+            )
+
+    finally:
+        if permalink_worker:
+            try:
+                await permalink_worker.close()
+            except Exception:
+                pass
+
+    logger.info(f"Completed: {users_saved} users saved to database")
+    return users_saved
+
+
+async def _process_link_batch(
+    links: List[Dict],
+    *,
+    page: Page,
+    permalink_page: Optional[Page],
+    keyword: str,
+    max_results: int,
+    browser_manager,
+    current_account: Dict,
+    db: Session,
+    sleep_with_stop: Callable,
+    should_stop: Optional[Callable[[], bool]],
+    users_saved: int,
+    total_links: int,
+) -> int:
+    """Process a batch of scraped links: comments + profile visit + DB save.
+    ``page`` stays on search (feed, Share, dialog flow). ``permalink_page`` is a
+    separate tab for ``goto`` permalink extraction so the feed tab never navigates away.
+    Returns updated users_saved count."""
+
+    for i, link in enumerate(links):
         if should_stop and should_stop():
             logger.warning("Stop requested while processing profiles.")
             break
@@ -1174,36 +1224,36 @@ async def scroll_and_process_posts(
             break
 
         logger.info(
-            f"Processing link {i+1}/{len(filtered_links)}: "
+            f"Processing link {i+1}/{len(links)}: "
             f"{link.get('text', '') or link['url'][:50]}"
         )
 
-        # 1) Capture canonical post URL via Share → Copy link (only if not already usable for permalink flow)
         extracted_post_url = link.get("post_url")
-        logger.info(f"  [PostURL] JS-extracted post_url={extracted_post_url!r}")
+        logger.debug(f"  [PostURL] JS-extracted post_url={extracted_post_url!r}")
         if not is_usable_post_url_for_permalink_flow(link.get("post_url")):
             await _ensure_on_search_posts_page(page, keyword, sleep_with_stop, should_stop)
             try:
                 shared_post_url = await capture_post_url_via_share_button(page, link)
                 if shared_post_url:
                     link["post_url"] = shared_post_url
-                    logger.info(f"  [PostURL] Captured via Share->CopyLink: {shared_post_url[:80]}")
-                else:
-                    logger.info(
-                        f"  [PostURL] Share->CopyLink returned nothing; keeping: {extracted_post_url!r}"
-                    )
+                    logger.debug(f"  [PostURL] Captured via Share->CopyLink: {shared_post_url[:80]}")
             except Exception as e:
                 logger.debug("  [PostURL] Share link capture error: %s", e)
 
         use_permalink = is_usable_post_url_for_permalink_flow(link.get("post_url"))
 
-        # 2) Comments: permalink (goto post) when we have a stable URL; else search-feed dialog
         comments_data: List[Dict] = []
         try:
             if use_permalink and link.get("post_url"):
-                logger.info("  [Comments] Using permalink flow (post URL first)")
+                logger.debug("  [Comments] Using permalink flow")
+                pm = permalink_page if permalink_page is not None else page
+                if permalink_page is None:
+                    logger.warning(
+                        "  [Comments] Permalink worker tab missing — using search tab "
+                        "(feed state may break)"
+                    )
                 comments_data, dialog_post_url, dialog_post_date = await extract_comments_from_post_permalink(
-                    page,
+                    pm,
                     link["post_url"],
                     max_comments=0,
                 )
@@ -1218,42 +1268,31 @@ async def scroll_and_process_posts(
 
             if dialog_post_url:
                 link["post_url"] = dialog_post_url
-                logger.info(f"  [PostURL] Set from dialog: {dialog_post_url}")
-            elif not link.get("post_url"):
-                logger.info(
-                    "  [PostURL] Dialog gave no URL and share button also failed — post_url will be None"
-                )
             if dialog_post_date and not link.get("post_date"):
                 link["post_date"] = dialog_post_date
-                logger.info(f"  [PostDate] Set from dialog: {dialog_post_date}")
 
             if comments_data:
-                logger.info(f"  [Comments] Final count: {len(comments_data)}")
-            else:
-                logger.info("  [Comments] No comments scraped for this post")
+                logger.debug(f"  [Comments] Final count: {len(comments_data)}")
         except Exception as e:
             logger.warning(f"  [Comments] Comment extraction error: {e}")
 
-        # 3) Visit profile and store to DB
         account_uid = current_account.get("uid", "")
         new_page = await browser_manager.create_page_with_cookies(account_uid)
         try:
             result = await process_single_profile(
-                new_page, link, keyword, i + 1, len(filtered_links), db, comments_data
+                new_page, link, keyword, i + 1, len(links), db, comments_data
             )
             if result:
                 users_saved += 1
-                logger.info(f"Progress: {users_saved}/{max_results} profiles saved")
+                logger.info(f"  Saved ({users_saved}/{max_results})")
         except Exception as e:
             logger.error(f"  Error processing profile: {e}")
 
-        if i < len(filtered_links) - 1 and users_saved < max_results:
+        if i < len(links) - 1 and users_saved < max_results:
             delay = random.uniform(2, 4)
-            logger.info(f"Waiting {delay:.1f}s before next profile...")
             remaining = delay
             while remaining > 0:
                 if should_stop and should_stop():
-                    logger.warning("Stop requested during profile delay.")
                     break
                 chunk = min(1.0, remaining)
                 await asyncio.sleep(chunk)
@@ -1261,5 +1300,4 @@ async def scroll_and_process_posts(
             if should_stop and should_stop():
                 break
 
-    logger.info(f"Completed: {users_saved} users saved to database")
     return users_saved

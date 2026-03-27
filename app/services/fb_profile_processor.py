@@ -337,7 +337,7 @@ async def process_single_profile(
                         )
                         search_result = existing
                         # Run Groq if not yet analyzed OR not yet geo-filtered
-                        if (settings.GROQ_API_KEY or "").strip() and (
+                        if settings.groq_api_keys and (
                             existing.analyzed_at is None or existing.geo_filtered_at is None
                         ):
                             try:
@@ -373,7 +373,7 @@ async def process_single_profile(
                         final_name,
                         location_text,
                     )
-                    if (settings.GROQ_API_KEY or "").strip() and (
+                    if settings.groq_api_keys and (
                         name_loc_dup.analyzed_at is None or name_loc_dup.geo_filtered_at is None
                     ):
                         try:
@@ -415,7 +415,7 @@ async def process_single_profile(
                                 post_date, profile_url, keyword, db,
                             )
                             # Run Groq on the recovered row too
-                            if (settings.GROQ_API_KEY or "").strip() and (
+                            if settings.groq_api_keys and (
                                 existing.analyzed_at is None or existing.geo_filtered_at is None
                             ):
                                 try:
@@ -489,7 +489,7 @@ async def process_single_profile(
                     logger.warning(f"  Could not extract comments from profile: {e}")
 
                 # Run Groq combined post+comments analysis immediately after all comments are saved
-                if (settings.GROQ_API_KEY or "").strip():
+                if settings.groq_api_keys:
                     try:
                         from .groq_analyzer import apply_immediate_groq_analysis
                         logger.info("  Running immediate Groq analysis for %s...", search_result.id)
@@ -549,7 +549,7 @@ async def process_single_profile(
                         db.add(pc)
                     db.commit()
                     logger.info(f"  Saved {len(comments_data)} comments")
-                    if (settings.GROQ_API_KEY or "").strip():
+                    if settings.groq_api_keys:
                         try:
                             from .groq_analyzer import apply_immediate_groq_analysis
 

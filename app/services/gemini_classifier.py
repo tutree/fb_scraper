@@ -43,7 +43,7 @@ class GeminiClassifier:
             logger.info("AI classifier using provider=gemini model=gemini-2.5-flash")
         elif self.provider == "groq":
             self.model = None
-            if not (settings.GROQ_API_KEY or "").strip():
+            if not settings.groq_api_keys:
                 raise ValueError("GROQ_API_KEY not configured")
             logger.info(
                 "AI classifier using provider=groq model=%s",
