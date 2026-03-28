@@ -24,6 +24,7 @@ from .fb_post_url import (
     capture_post_url_via_share_button,
     is_usable_post_url_for_permalink_flow,
 )
+from .fb_errors import CookieExpiredDuringProfileScrape
 from .fb_profile_processor import process_single_profile
 
 logger = get_logger(__name__)
@@ -1122,20 +1123,28 @@ async def scroll_and_process_posts(
                     "Processing batch of %d links (saved so far: %d/%d)",
                     len(batch_to_process), users_saved, max_results,
                 )
-                users_saved = await _process_link_batch(
-                    batch_to_process,
-                    page=page,
-                    permalink_page=permalink_worker,
-                    keyword=keyword,
-                    max_results=max_results,
-                    browser_manager=browser_manager,
-                    current_account=current_account,
-                    db=db,
-                    sleep_with_stop=sleep_with_stop,
-                    should_stop=should_stop,
-                    users_saved=users_saved,
-                    total_links=len(user_links),
-                )
+                try:
+                    users_saved = await _process_link_batch(
+                        batch_to_process,
+                        page=page,
+                        permalink_page=permalink_worker,
+                        keyword=keyword,
+                        max_results=max_results,
+                        browser_manager=browser_manager,
+                        current_account=current_account,
+                        db=db,
+                        sleep_with_stop=sleep_with_stop,
+                        should_stop=should_stop,
+                        users_saved=users_saved,
+                        total_links=len(user_links),
+                    )
+                except CookieExpiredDuringProfileScrape:
+                    pending_links.clear()
+                    logger.error(
+                        "Cookie expired mid-scrape — cleared pending queue for this keyword "
+                        "(in-flight batch already aborted)",
+                    )
+                    raise
                 if users_saved >= max_results:
                     break
 
@@ -1168,20 +1177,27 @@ async def scroll_and_process_posts(
                 "Processing final batch of %d remaining links (saved so far: %d/%d)",
                 len(pending_links), users_saved, max_results,
             )
-            users_saved = await _process_link_batch(
-                pending_links,
-                page=page,
-                permalink_page=permalink_worker,
-                keyword=keyword,
-                max_results=max_results,
-                browser_manager=browser_manager,
-                current_account=current_account,
-                db=db,
-                sleep_with_stop=sleep_with_stop,
-                should_stop=should_stop,
-                users_saved=users_saved,
-                total_links=len(user_links),
-            )
+            try:
+                users_saved = await _process_link_batch(
+                    pending_links,
+                    page=page,
+                    permalink_page=permalink_worker,
+                    keyword=keyword,
+                    max_results=max_results,
+                    browser_manager=browser_manager,
+                    current_account=current_account,
+                    db=db,
+                    sleep_with_stop=sleep_with_stop,
+                    should_stop=should_stop,
+                    users_saved=users_saved,
+                    total_links=len(user_links),
+                )
+            except CookieExpiredDuringProfileScrape:
+                pending_links.clear()
+                logger.error(
+                    "Cookie expired mid-scrape — dropped remaining pending links for this keyword",
+                )
+                raise
 
     finally:
         if permalink_worker:
@@ -1280,11 +1296,20 @@ async def _process_link_batch(
         new_page = await browser_manager.create_page_with_cookies(account_uid)
         try:
             result = await process_single_profile(
-                new_page, link, keyword, i + 1, len(links), db, comments_data
+                new_page,
+                link,
+                keyword,
+                i + 1,
+                len(links),
+                db,
+                comments_data,
+                account_uid=account_uid or None,
             )
             if result:
                 users_saved += 1
                 logger.info(f"  Saved ({users_saved}/{max_results})")
+        except CookieExpiredDuringProfileScrape:
+            raise
         except Exception as e:
             logger.error(f"  Error processing profile: {e}")
 

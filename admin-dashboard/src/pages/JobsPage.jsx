@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import api from '../api'
+import CookieUploadModal from '../components/CookieUploadModal'
 import LeadDetailModal from '../components/LeadDetailModal'
 
 const STATUS_COLORS = {
@@ -127,6 +128,12 @@ export default function JobsPage() {
   const [leadModalResult, setLeadModalResult] = useState(null)
   const [recentRefreshTick, setRecentRefreshTick] = useState(0)
 
+  const [cookieModalOpen, setCookieModalOpen] = useState(false)
+  const [cookieJsonInput, setCookieJsonInput] = useState('')
+  const [cookieSubmitting, setCookieSubmitting] = useState(false)
+  const [cookieStatus, setCookieStatus] = useState(null)
+  const [cookieUrgencyMessage, setCookieUrgencyMessage] = useState('')
+
   const fetchAll = async () => {
     try {
       const [s, h, js] = await Promise.all([
@@ -148,6 +155,31 @@ export default function JobsPage() {
     fetchAll()
     const iv = setInterval(fetchAll, 10000)
     return () => clearInterval(iv)
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const [healthRes, statusRes] = await Promise.all([
+          api.get('/search/scraper-health'),
+          api.get('/search/cookies/status'),
+        ])
+        if (cancelled) return
+        setCookieStatus(statusRes.data || null)
+        if (healthRes.data?.level === 'error') {
+          setCookieUrgencyMessage(
+            healthRes.data?.message || 'Upload a valid Facebook cookie to continue scraping.',
+          )
+          setCookieModalOpen(true)
+        }
+      } catch {
+        /* ignore */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   useEffect(() => {
@@ -270,6 +302,25 @@ export default function JobsPage() {
       cancelled = true
     }
   }, [duplicateModalOpen])
+
+  const submitCookieUpdate = async () => {
+    setCookieSubmitting(true)
+    try {
+      const res = await api.post('/search/cookies', { cookie_json: cookieJsonInput })
+      toast.success(
+        `${res.data?.message || 'Cookie updated successfully.'} (${res.data?.cookie_count || 0} cookies saved)`,
+      )
+      setCookieJsonInput('')
+      setCookieModalOpen(false)
+      setCookieUrgencyMessage('')
+      const s = await api.get('/search/cookies/status')
+      setCookieStatus(s.data || null)
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Failed to update cookie'))
+    } finally {
+      setCookieSubmitting(false)
+    }
+  }
 
   const stopJob = async (job) => {
     try {
@@ -477,9 +528,19 @@ export default function JobsPage() {
 
       {/* Live Status */}
       <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-lg font-bold text-slate-900">Background Jobs</h2>
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setCookieUrgencyMessage('')
+                setCookieModalOpen(true)
+              }}
+              className="rounded-lg border border-sky-300 bg-sky-50 px-3 py-1.5 text-xs font-semibold text-sky-800 hover:bg-sky-100"
+            >
+              Facebook cookie
+            </button>
             <span className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold ${status?.is_running ? 'bg-blue-100 text-blue-800' : status?.auto_scrape_enabled ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-600'}`}>
               <span className={`h-2 w-2 rounded-full ${status?.is_running ? 'bg-blue-500 animate-pulse' : status?.auto_scrape_enabled ? 'bg-emerald-500' : 'bg-slate-400'}`} />
               {status?.is_running ? 'Running' : status?.auto_scrape_enabled ? 'Scheduled' : 'Disabled'}
@@ -944,6 +1005,17 @@ export default function JobsPage() {
           )
         })()}
       </section>
+
+      <CookieUploadModal
+        open={cookieModalOpen}
+        onClose={() => setCookieModalOpen(false)}
+        cookieJsonInput={cookieJsonInput}
+        onCookieJsonChange={setCookieJsonInput}
+        cookieSubmitting={cookieSubmitting}
+        onSubmit={submitCookieUpdate}
+        cookieStatus={cookieStatus}
+        urgencyHint={cookieUrgencyMessage || undefined}
+      />
 
       <LeadDetailModal
         open={!!leadModalResult}

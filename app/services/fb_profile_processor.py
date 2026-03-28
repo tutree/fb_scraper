@@ -17,10 +17,36 @@ from ..models.post_comment import PostComment
 from ..models.search_result import ResultStatus, SearchResult
 from ..utils.facebook_urls import profile_url_from_group_member_url
 from ..utils.validators import clean_facebook_location, clean_facebook_name, clean_facebook_post_content
+from . import scraper_state
+from .fb_account_loader import remove_cookie_files_for_uid
 from .fb_comment_handler import extract_comments
+from .fb_errors import CookieExpiredDuringProfileScrape
 from .fb_post_url import canonicalize_post_url
 
 logger = get_logger(__name__)
+
+
+def _looks_like_expired_fb_session(
+    *,
+    page_url: str,
+    page_title: str,
+    final_name_before_clean: str,
+    cleaned_name: Optional[str],
+    actual_pick_name: Optional[str],
+) -> bool:
+    """True when the page is login/branding or the only name we got is Facebook/FB."""
+    u = (page_url or "").lower()
+    if "/login" in u or "/checkpoint" in u or "login.php" in u:
+        return True
+    t = (page_title or "").strip().lower()
+    if t == "facebook" or t == "fb":
+        return True
+    if "facebook" in t and ("log in" in t or "sign up" in t or "sign in" in t):
+        return True
+    for cand in (final_name_before_clean, cleaned_name or "", actual_pick_name or ""):
+        if cand and str(cand).strip().lower() in ("facebook", "fb"):
+            return True
+    return False
 
 
 def _update_existing_result(
@@ -74,6 +100,8 @@ async def process_single_profile(
     total: int,
     db: Session,
     comments_data: Optional[List[Dict]] = None,
+    *,
+    account_uid: Optional[str] = None,
 ) -> bool:
     """
     Visit a single profile, determine if it's a personal account, and persist to the DB.
@@ -279,6 +307,45 @@ async def process_single_profile(
 
         location_text = clean_facebook_location(", ".join(unique_locations)) if unique_locations else None
 
+        pre_clean_name = final_name
+        page_title = await page.title()
+        page_url = page.url
+        cleaned_for_name = clean_facebook_name(pre_clean_name)
+        final_name = cleaned_for_name or pre_clean_name or "Unknown"
+
+        pick_str = None
+        if isinstance(actual_name, str) and actual_name.strip():
+            pick_str = actual_name.strip()
+
+        if _looks_like_expired_fb_session(
+            page_url=page_url,
+            page_title=page_title,
+            final_name_before_clean=(pre_clean_name or "").strip(),
+            cleaned_name=cleaned_for_name,
+            actual_pick_name=pick_str,
+        ):
+            logger.error(
+                "Cookie session expired — Facebook login/branding detected "
+                "(name=%r, title=%r). Not saving; aborting pending scrape queue.",
+                final_name,
+                (page_title or "")[:200],
+            )
+            uid = (account_uid or "").strip()
+            if uid:
+                remove_cookie_files_for_uid(uid)
+            scraper_state.report_all_cookies_failed()
+            scraper_state.report_cookie_fail(
+                uid,
+                "Session expired: profile showed Facebook name/login page instead of a real user",
+            )
+            try:
+                await page.close()
+            except Exception:
+                pass
+            raise CookieExpiredDuringProfileScrape(
+                "Facebook session expired — profile showed login/branding instead of a real name"
+            )
+
         # -- Personal-profile check --
         is_personal_profile = await page.evaluate(
             """
@@ -311,8 +378,6 @@ async def process_single_profile(
             }
             """
         )
-
-        final_name = clean_facebook_name(final_name) or final_name or "Unknown"
 
         if is_personal_profile:
             if location_text:

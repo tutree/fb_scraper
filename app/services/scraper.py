@@ -6,6 +6,7 @@ from datetime import datetime
 import json
 from . import scraper_state
 from .browser_manager import BrowserManager
+from .fb_errors import CookieExpiredDuringProfileScrape
 from .facebook_scraper import FacebookScraper, NoActiveCookieError
 from .proxy_manager import ProxyManager
 from ..models.search_result import SearchResult
@@ -92,6 +93,23 @@ class ScraperService:
                     total_results_count += processed_count
                     logger.info(f"Keyword '{keyword}' completed: {processed_count} results")
                     logger.info(f"Total results so far: {total_results_count}")
+                except CookieExpiredDuringProfileScrape as ce:
+                    logger.error(
+                        "Cookie expired mid-scrape — stopping run (keyword '%s'): %s",
+                        keyword,
+                        ce,
+                    )
+                    scraper_state.report_scrape_finish(
+                        success=False,
+                        error="Cookie session expired — profile showed Facebook login instead of a real name",
+                    )
+                    return {
+                        "success": False,
+                        "stopped": False,
+                        "error": str(ce),
+                        "total_results": total_results_count,
+                        "keywords_searched": idx - 1,
+                    }
                 except NoActiveCookieError:
                     logger.error(
                         "All auto-login attempts failed for keyword '%s' — skipping to next keyword",

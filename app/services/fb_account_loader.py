@@ -35,6 +35,22 @@ def _extract_c_user_from_cookie_json(data: object) -> Optional[str]:
     return None
 
 
+def remove_cookie_files_for_uid(uid: str) -> None:
+    """Delete saved Playwright cookie JSON for ``uid`` from all known cookie dirs."""
+    u = (uid or "").strip()
+    if not u:
+        return
+    name = f"{u}.json"
+    for directory in COOKIE_DIRS:
+        path = directory / name
+        if path.exists():
+            try:
+                path.unlink()
+                logger.info("Removed stale cookie file (session invalid): %s", path)
+            except OSError as exc:
+                logger.warning("Could not remove cookie file %s: %s", path, exc)
+
+
 def _cookie_uid_order() -> List[str]:
     """Return cookie-backed account IDs ordered by freshest file first."""
     uid_mtime: Dict[str, float] = {}

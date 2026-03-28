@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from app.core.database import get_db
 from app.services.browser_manager import BrowserManager
 from app.services.proxy_manager import ProxyManager
+from app.services.fb_errors import CookieExpiredDuringProfileScrape
 from app.services.facebook_scraper import FacebookScraper, NoActiveCookieError
 from app.core.logging_config import setup_logging, get_logger
 
@@ -96,7 +97,7 @@ async def main():
                     logger.info(f"Waiting {delay:.1f}s before next keyword search...")
                     await asyncio.sleep(delay)
                     
-            except NoActiveCookieError as e:
+            except (NoActiveCookieError, CookieExpiredDuringProfileScrape) as e:
                 logger.error(
                     "Session invalid and auto-login failed for all accounts — stopping "
                     "(fix cookies or credentials, then retry). Detail: %s",

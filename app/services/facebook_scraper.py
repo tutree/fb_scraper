@@ -26,6 +26,7 @@ from ..core.logging_config import get_logger
 from . import scraper_state
 from .fb_account_loader import load_accounts
 from .fb_auto_login import load_login_accounts, login_on_page
+from .fb_errors import CookieExpiredDuringProfileScrape
 from .fb_feed_scanner import enable_search_recent_posts_filter, scroll_and_process_posts
 from .fb_login_verify import page_has_logged_in_reel_tab_link
 
@@ -276,7 +277,7 @@ class FacebookScraper:
         for attempt in range(MAX_LOGIN_RETRIES + 1):
             try:
                 return await self._search_keyword_inner(keyword, max_results, should_stop)
-            except NoActiveCookieError:
+            except (NoActiveCookieError, CookieExpiredDuringProfileScrape):
                 if attempt >= MAX_LOGIN_RETRIES:
                     logger.error(
                         "Session expired for '%s' — exhausted %d login retries",
@@ -472,6 +473,8 @@ class FacebookScraper:
             return posts_processed
 
         except NoActiveCookieError:
+            raise
+        except CookieExpiredDuringProfileScrape:
             raise
         except Exception as e:
             logger.error(f"Error searching for '{keyword}': {e}", exc_info=True)
