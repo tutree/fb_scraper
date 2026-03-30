@@ -37,6 +37,64 @@ ACTIVE_STATUSES = {"running", "stopping"}
 TERMINAL_STATUSES = {"completed", "failed", "stopped"}
 
 
+def _enqueue_scraper_task(
+    background_tasks: BackgroundTasks,
+    keywords: Optional[List[str]] = None,
+    max_results: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Register a background scraper run if no task is already running/stopping.
+    Returns {started, task_id, message}.
+    """
+    global current_task_id, last_task_id
+
+    with tasks_lock:
+        if current_task_id:
+            current = tasks.get(current_task_id)
+            if current and current.get("status") in ACTIVE_STATUSES:
+                return {
+                    "started": False,
+                    "task_id": None,
+                    "message": (
+                        f"Task {current_task_id} is already {current.get('status')}"
+                    ),
+                }
+
+    task_id = str(uuid.uuid4())
+    max_per_kw = (
+        max_results
+        if max_results is not None
+        else settings.MAX_RESULTS_PER_KEYWORD
+    )
+    now = _now_iso()
+    with tasks_lock:
+        tasks[task_id] = {
+            "id": task_id,
+            "status": "running",
+            "created_at": now,
+            "updated_at": now,
+            "stop_requested": False,
+            "requested_keywords": keywords,
+            "requested_max_results": max_per_kw,
+            "result": None,
+            "error": None,
+        }
+        current_task_id = task_id
+        last_task_id = task_id
+
+    background_tasks.add_task(
+        run_search_task,
+        task_id,
+        keywords,
+        max_per_kw,
+    )
+    return {
+        "started": True,
+        "task_id": task_id,
+        "message": "Search started successfully",
+    }
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -86,49 +144,16 @@ async def start_search(
             ),
         )
 
-    with tasks_lock:
-        if current_task_id:
-            current = tasks.get(current_task_id)
-            if current and current.get("status") in ACTIVE_STATUSES:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Task {current_task_id} is already {current.get('status')}",
-                )
-
-    task_id = str(uuid.uuid4())
-    max_per_kw = (
-        request.max_results
-        if request.max_results is not None
-        else settings.MAX_RESULTS_PER_KEYWORD
+    enq = _enqueue_scraper_task(
+        background_tasks,
+        keywords=request.keywords,
+        max_results=request.max_results,
     )
-
-    # Store task info
-    now = _now_iso()
-    with tasks_lock:
-        tasks[task_id] = {
-            "id": task_id,
-            "status": "running",
-            "created_at": now,
-            "updated_at": now,
-            "stop_requested": False,
-            "requested_keywords": request.keywords,
-            "requested_max_results": max_per_kw,
-            "result": None,
-            "error": None,
-        }
-        current_task_id = task_id
-        last_task_id = task_id
-
-    # Run search in background
-    background_tasks.add_task(
-        run_search_task,
-        task_id,
-        request.keywords,
-        max_per_kw,
-    )
+    if not enq["started"]:
+        raise HTTPException(status_code=409, detail=enq["message"])
 
     return SearchResponse(
-        task_id=task_id,
+        task_id=enq["task_id"],
         message="Search started successfully",
         status="running",
     )
@@ -253,9 +278,26 @@ async def scraper_health() -> ScraperHealthResponse:
 
 
 @router.post("/cookies", response_model=CookieUpdateResponse)
-async def update_saved_cookie(request: CookieUpdateRequest) -> CookieUpdateResponse:
+async def update_saved_cookie(
+    request: CookieUpdateRequest,
+    background_tasks: BackgroundTasks,
+) -> CookieUpdateResponse:
     """Validate and save pasted Facebook cookie JSON for scraper login reuse."""
     result = save_cookie_json_text(request.cookie_json)
+    enq = _enqueue_scraper_task(background_tasks)
+    scraper_message = enq["message"]
+    if enq["started"]:
+        logger.info(
+            "Cookie saved for %s — auto-started scraper task %s",
+            result["account_uid"],
+            enq["task_id"],
+        )
+    else:
+        logger.info(
+            "Cookie saved for %s — scraper not auto-started: %s",
+            result["account_uid"],
+            scraper_message,
+        )
     return CookieUpdateResponse(
         message=f"Saved cookie session for account {result['account_uid']}",
         account_uid=result["account_uid"],
@@ -263,6 +305,9 @@ async def update_saved_cookie(request: CookieUpdateRequest) -> CookieUpdateRespo
         cookie_count=result["cookie_count"],
         updated_at=result["updated_at"],
         active_account_uids=result["active_account_uids"],
+        scraper_started=bool(enq["started"]),
+        scraper_task_id=enq.get("task_id"),
+        scraper_message=scraper_message,
     )
 
 

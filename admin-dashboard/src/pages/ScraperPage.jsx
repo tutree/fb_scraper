@@ -283,13 +283,19 @@ export default function ScraperPage() {
       const res = await api.post(`/search/cookies`, {
         cookie_json: cookieJsonInput,
       })
-      toast.success(
-        `${res.data?.message || 'Cookie updated successfully.'} (${res.data?.cookie_count || 0} cookies saved)`,
-      )
+      const base = `${res.data?.message || 'Cookie updated successfully.'} (${res.data?.cookie_count || 0} cookies saved)`
+      if (res.data?.scraper_started) {
+        toast.success(`${base} Scraper started automatically.`)
+      } else if (res.data?.scraper_message) {
+        toast.success(`${base} (${res.data.scraper_message})`)
+      } else {
+        toast.success(base)
+      }
       setCookieJsonInput('')
       setCookieModalOpen(false)
       setCookieUrgencyMessage('')
       await fetchCookieStatus()
+      await fetchScraperStatus()
     } catch (err) {
       toast.error(getErrorMessage(err, 'Failed to update cookie'))
     } finally {

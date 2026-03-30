@@ -77,3 +77,9 @@ class CookieUpdateResponse(BaseModel):
     cookie_count: int
     updated_at: str
     active_account_uids: List[str] = []
+    scraper_started: bool = Field(
+        default=False,
+        description="True if a scraper run was queued (keywords from keywords.json or defaults).",
+    )
+    scraper_task_id: Optional[str] = None
+    scraper_message: Optional[str] = None
