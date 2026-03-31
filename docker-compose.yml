@@ -52,11 +52,17 @@ services:
       PROJECT_NAME: ${PROJECT_NAME:-Math Tutor Scraper API}
       ENFORMION_AP_NAME: ${ENFORMION_AP_NAME:-}
       ENFORMION_AP_PASSWORD: ${ENFORMION_AP_PASSWORD:-}
-      AUTO_SCRAPE_ENABLED: ${AUTO_SCRAPE_ENABLED:-true}
+      AUTO_SCRAPE_ENABLED: ${AUTO_SCRAPE_ENABLED:-false}
+      AUTO_SCRAPE_RUN_ON_STARTUP: ${AUTO_SCRAPE_RUN_ON_STARTUP:-false}
       AUTO_SCRAPE_INTERVAL_MINUTES: ${AUTO_SCRAPE_INTERVAL_MINUTES:-180}
       AUTO_ANALYZE_AFTER_SCRAPE: ${AUTO_ANALYZE_AFTER_SCRAPE:-true}
       AUTO_ENRICH_AFTER_ANALYZE: ${AUTO_ENRICH_AFTER_ANALYZE:-true}
       CAPTCHA_2CAPTCHA_API_KEY: ${CAPTCHA_2CAPTCHA_API_KEY:-}
+      # Writable state under /data (named volume); avoids Errno 13 when ./config is a root-owned bind mount
+      KEYWORDS_FILE_PATH: ${KEYWORDS_FILE_PATH:-/data/keywords.json}
+      ACCOUNT_SCRAPE_SLOTS_PATH: ${ACCOUNT_SCRAPE_SLOTS_PATH:-/data/account_scrape_slots.json}
+      # Writable facebook_accounts store (bind-mounted ./config is often root-owned → upload could not update credentials.json)
+      CREDENTIALS_JSON_PATH: ${CREDENTIALS_JSON_PATH:-/data/credentials.json}
     depends_on:
       postgres:
         condition: service_healthy
@@ -67,6 +73,7 @@ services:
     volumes:
       - ./config:/app/config
       - ./cookies:/app/cookies
+      - scraper_data:/data
       - scraper_logs:/app/logs
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
@@ -93,6 +100,7 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  scraper_data:
   scraper_logs:
 
 networks:

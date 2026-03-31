@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from .core.config import settings
+from .core.config import ensure_keywords_file_seeded, settings
 from .api.dependencies import get_current_admin, require_admin
 from .api.routes import search, results, proxy, dashboard, comments, auth, automation
 from .core.database import engine, Base
@@ -37,6 +37,7 @@ def init_admin():
 # Create database tables
 Base.metadata.create_all(bind=engine)
 run_startup_migrations()
+ensure_keywords_file_seeded()
 init_admin()
 
 

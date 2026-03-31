@@ -129,8 +129,6 @@ export default function JobsPage() {
   const [recentRefreshTick, setRecentRefreshTick] = useState(0)
 
   const [cookieModalOpen, setCookieModalOpen] = useState(false)
-  const [cookieJsonInput, setCookieJsonInput] = useState('')
-  const [cookieSubmitting, setCookieSubmitting] = useState(false)
   const [cookieStatus, setCookieStatus] = useState(null)
   const [cookieUrgencyMessage, setCookieUrgencyMessage] = useState('')
 
@@ -167,9 +165,17 @@ export default function JobsPage() {
         ])
         if (cancelled) return
         setCookieStatus(statusRes.data || null)
-        if (healthRes.data?.level === 'error') {
+        const h = healthRes.data
+        const statusOk = healthRes.status === 200 && statusRes.status === 200
+        const hasWorkingCookie = statusRes.data?.has_valid_cookies === true
+        const showCookieModal =
+          statusOk &&
+          !hasWorkingCookie &&
+          h?.level === 'error' &&
+          (h?.all_cookies_failed === true || h?.has_cookie_files === false)
+        if (showCookieModal) {
           setCookieUrgencyMessage(
-            healthRes.data?.message || 'Upload a valid Facebook cookie to continue scraping.',
+            h?.message || 'Upload a valid Facebook cookie to continue scraping.',
           )
           setCookieModalOpen(true)
         }
@@ -302,25 +308,6 @@ export default function JobsPage() {
       cancelled = true
     }
   }, [duplicateModalOpen])
-
-  const submitCookieUpdate = async () => {
-    setCookieSubmitting(true)
-    try {
-      const res = await api.post('/search/cookies', { cookie_json: cookieJsonInput })
-      toast.success(
-        `${res.data?.message || 'Cookie updated successfully.'} (${res.data?.cookie_count || 0} cookies saved)`,
-      )
-      setCookieJsonInput('')
-      setCookieModalOpen(false)
-      setCookieUrgencyMessage('')
-      const s = await api.get('/search/cookies/status')
-      setCookieStatus(s.data || null)
-    } catch (err) {
-      toast.error(getErrorMessage(err, 'Failed to update cookie'))
-    } finally {
-      setCookieSubmitting(false)
-    }
-  }
 
   const stopJob = async (job) => {
     try {
@@ -1009,12 +996,17 @@ export default function JobsPage() {
       <CookieUploadModal
         open={cookieModalOpen}
         onClose={() => setCookieModalOpen(false)}
-        cookieJsonInput={cookieJsonInput}
-        onCookieJsonChange={setCookieJsonInput}
-        cookieSubmitting={cookieSubmitting}
-        onSubmit={submitCookieUpdate}
         cookieStatus={cookieStatus}
         urgencyHint={cookieUrgencyMessage || undefined}
+        onSuccess={async () => {
+          setCookieUrgencyMessage('')
+          try {
+            const s = await api.get('/search/cookies/status')
+            setCookieStatus(s.data || null)
+          } catch {
+            setCookieStatus(null)
+          }
+        }}
       />
 
       <LeadDetailModal

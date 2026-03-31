@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 # When HEADLESS=false, start virtual display so Chromium headed mode works.
 if [ "$HEADLESS" = "false" ]; then
   # Clean up stale lock files from previous container runs
@@ -8,5 +9,13 @@ if [ "$HEADLESS" = "false" ]; then
   /usr/bin/Xvfb :99 -screen 0 1920x1080x24 &
   export DISPLAY=:99
   sleep 2
+fi
+
+# Named volumes (e.g. /data) are often root:root; bind mounts may be root-owned — app must not run as root.
+if [ "$(id -u)" = "0" ]; then
+  chown -R appuser:appuser /data /app/logs 2>/dev/null || true
+  chown -R appuser:appuser /app/cookies 2>/dev/null || true
+  chown -R appuser:appuser /app/config 2>/dev/null || true
+  exec gosu appuser "$@"
 fi
 exec "$@"

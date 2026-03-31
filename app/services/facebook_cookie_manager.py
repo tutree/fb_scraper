@@ -6,11 +6,39 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 
-from .fb_account_loader import _cookie_uid_order, _extract_c_user_from_cookie_json, load_accounts
+from .fb_account_loader import (
+    COOKIE_DIRS,
+    _cookie_uid_order,
+    _extract_c_user_from_cookie_json,
+    ensure_accounts_json_entry_for_uid,
+    ensure_credentials_json_entry_for_uid,
+    load_accounts,
+)
 
 logger = logging.getLogger(__name__)
 
 COOKIE_DIR = Path("cookies")
+
+
+def _resolve_cookie_path_for_uid(uid: str) -> Optional[Path]:
+    for directory in COOKIE_DIRS:
+        candidate = directory / f"{uid.strip()}.json"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _count_cookies_in_file(path: Path) -> int:
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            raw_data = json.load(f)
+        if isinstance(raw_data, dict) and isinstance(raw_data.get("cookies"), list):
+            return len(raw_data.get("cookies", []))
+        if isinstance(raw_data, list):
+            return len(raw_data)
+    except Exception:
+        return 0
+    return 0
 
 
 def _normalize_same_site(value: Optional[str]) -> str:
@@ -215,8 +243,22 @@ def save_cookie_json_text(cookie_json: str) -> Dict[str, Any]:
     else:
         logger.error("Cookie file NOT found after write: %s", cookie_path)
 
+    logger.info(
+        "[cookie-upload] uid=%s — syncing config (accounts.json + credentials.json paths below)",
+        account_uid,
+    )
+    ensure_accounts_json_entry_for_uid(account_uid)
+    ensure_credentials_json_entry_for_uid(account_uid)
+    logger.info("[cookie-upload] uid=%s — config sync finished", account_uid)
+
     updated_at = datetime.fromtimestamp(cookie_path.stat().st_mtime, tz=timezone.utc).isoformat()
     active_account_uids = [str(account.get("uid", "")).strip() for account in load_accounts() if str(account.get("uid", "")).strip()]
+    logger.info(
+        "[cookie-upload] uid=%s — load_accounts() → %d account(s): %s",
+        account_uid,
+        len(active_account_uids),
+        active_account_uids,
+    )
 
     cookie_count = len(storage_state.get("cookies", []))
 
@@ -230,36 +272,51 @@ def save_cookie_json_text(cookie_json: str) -> Dict[str, Any]:
 
 
 def get_cookie_status() -> Dict[str, Any]:
-    active_account_uids = [str(account.get("uid", "")).strip() for account in load_accounts() if str(account.get("uid", "")).strip()]
     saved_cookie_uids = _cookie_uid_order()
     latest_cookie_uid = saved_cookie_uids[0] if saved_cookie_uids else None
 
-    logger.debug(
-        "Cookie status check: active_accounts=%s, saved_uids=%s, latest=%s, cookie_dir=%s (exists=%s)",
-        active_account_uids,
-        saved_cookie_uids,
-        latest_cookie_uid,
-        COOKIE_DIR.absolute(),
-        COOKIE_DIR.exists(),
-    )
+    # Per-UID counts (freshest-first order). The "latest" file alone can be empty/corrupt while older UIDs are valid.
+    per_uid_counts: Dict[str, int] = {}
+    for uid in saved_cookie_uids:
+        p = _resolve_cookie_path_for_uid(uid)
+        if p:
+            per_uid_counts[uid] = _count_cookies_in_file(p)
+
+    sessions_with_cookies = sum(1 for n in per_uid_counts.values() if n > 0)
+    total_cookie_entries = sum(per_uid_counts.values())
+    has_valid_cookies = sessions_with_cookies > 0
+
+    # UI: sessions that actually have cookies (upload-managed); not only credential-configured UIDs.
+    active_account_uids = [uid for uid in saved_cookie_uids if per_uid_counts.get(uid, 0) > 0]
+
+    # Primary row for UI: first UID in freshness order that actually has cookies; else show latest file even if broken
+    primary_uid: Optional[str] = None
+    for uid in saved_cookie_uids:
+        if per_uid_counts.get(uid, 0) > 0:
+            primary_uid = uid
+            break
+    if primary_uid is None:
+        primary_uid = latest_cookie_uid
 
     cookie_file = None
     updated_at = None
     cookie_count = 0
-    if latest_cookie_uid:
-        cookie_path = COOKIE_DIR / f"{latest_cookie_uid}.json"
-        if cookie_path.exists():
+    if primary_uid:
+        cookie_path = _resolve_cookie_path_for_uid(primary_uid)
+        if cookie_path:
             cookie_file = str(cookie_path)
             updated_at = datetime.fromtimestamp(cookie_path.stat().st_mtime, tz=timezone.utc).isoformat()
-            try:
-                with open(cookie_path, "r", encoding="utf-8-sig") as f:
-                    raw_data = json.load(f)
-                if isinstance(raw_data, dict) and isinstance(raw_data.get("cookies"), list):
-                    cookie_count = len(raw_data.get("cookies", []))
-                elif isinstance(raw_data, list):
-                    cookie_count = len(raw_data)
-            except Exception:
-                cookie_count = 0
+            cookie_count = per_uid_counts.get(primary_uid, _count_cookies_in_file(cookie_path))
+
+    logger.debug(
+        "Cookie status: active=%s, saved_uids=%s, latest=%s, has_valid=%s, sessions=%s, total_entries=%s",
+        active_account_uids,
+        saved_cookie_uids,
+        latest_cookie_uid,
+        has_valid_cookies,
+        sessions_with_cookies,
+        total_cookie_entries,
+    )
 
     return {
         "active_account_uids": active_account_uids,
@@ -268,4 +325,7 @@ def get_cookie_status() -> Dict[str, Any]:
         "cookie_file": cookie_file,
         "updated_at": updated_at,
         "cookie_count": cookie_count,
+        "has_valid_cookies": has_valid_cookies,
+        "sessions_with_cookies": sessions_with_cookies,
+        "total_cookie_entries": total_cookie_entries,
     }

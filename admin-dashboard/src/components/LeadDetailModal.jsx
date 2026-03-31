@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { toast } from 'sonner'
 
 import api from '../api'
@@ -246,9 +247,14 @@ export default function LeadDetailModal({
 
   if (!open || !result) return null
 
-  return (
+  return createPortal(
     <>
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4" onClick={closeAll}>
+      <div
+        className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-slate-950/60 p-4 backdrop-blur-[1px]"
+        style={{ top: 0, left: 0, right: 0, bottom: 0, minHeight: '100dvh' }}
+        role="presentation"
+        onClick={closeAll}
+      >
         <div className="max-h-[90vh] w-full max-w-4xl overflow-y-auto rounded-2xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
           <div className="sticky top-0 flex items-center justify-between border-b border-slate-200 bg-white px-6 py-4">
             <h2 className="text-xl font-semibold text-slate-900">{editResultValues ? 'Edit Lead' : 'Lead Details'}</h2>
@@ -452,7 +458,12 @@ export default function LeadDetailModal({
       </div>
 
       {showCommentDialog && selectedComment && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/60 p-4" onClick={closeCommentDetail}>
+        <div
+          className="fixed inset-0 z-[110] flex items-center justify-center overflow-y-auto bg-slate-950/70 p-4 backdrop-blur-[1px]"
+          style={{ top: 0, left: 0, right: 0, bottom: 0, minHeight: '100dvh' }}
+          role="presentation"
+          onClick={closeCommentDetail}
+        >
           <div className="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="sticky top-0 flex items-center justify-between border-b border-slate-200 bg-white px-6 py-4">
               <h3 className="text-lg font-semibold text-slate-900">{editCommentValues ? 'Edit Comment' : 'Comment Analysis'}</h3>
@@ -530,6 +541,7 @@ export default function LeadDetailModal({
           </div>
         </div>
       )}
-    </>
+    </>,
+    document.body,
   )
 }

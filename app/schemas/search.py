@@ -49,6 +49,9 @@ class CookieStatusResponse(BaseModel):
     cookie_file: Optional[str] = None
     updated_at: Optional[str] = None
     cookie_count: int = 0
+    has_valid_cookies: bool = False
+    sessions_with_cookies: int = 0
+    total_cookie_entries: int = 0
 
 
 class ScraperHealthResponse(BaseModel):
@@ -68,6 +71,18 @@ class ScraperHealthResponse(BaseModel):
 
 class CookieUpdateRequest(BaseModel):
     cookie_json: str
+    slot: Optional[int] = Field(
+        None,
+        ge=1,
+        le=4,
+        description="Dashboard Account tab 1–4: binds this UID to that slot for scrape order and proxy index",
+    )
+
+
+class ScrapeSlotsResponse(BaseModel):
+    """bindings[i] = UID saved from Account tab i+1. Proxies: set PROXY_LIST in .env (comma-separated)."""
+
+    bindings: List[str] = []
 
 
 class CookieUpdateResponse(BaseModel):
@@ -77,3 +92,17 @@ class CookieUpdateResponse(BaseModel):
     cookie_count: int
     updated_at: str
     active_account_uids: List[str] = []
+
+
+class AccountProxiesResponse(BaseModel):
+    """uid -> proxy URL (e.g. socks5://user:pass@host:port)."""
+
+    proxies: Dict[str, str]
+
+
+class AccountProxySetRequest(BaseModel):
+    uid: str = Field(..., min_length=1)
+    proxy_url: str = Field(
+        "",
+        description="Full proxy URL; empty string removes the mapping for this uid",
+    )

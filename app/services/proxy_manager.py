@@ -2,7 +2,7 @@ import asyncio
 import socket
 import struct
 import threading
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 from sqlalchemy.orm import Session
 from datetime import datetime
 from ..models.proxy_log import ProxyLog
@@ -193,7 +193,8 @@ class ProxyManager:
         self.db = db
         self.proxies = settings.proxies
         self.current_index = 0
-        self._bridge: Optional[_Socks5AuthBridge] = None
+        # One SOCKS5 auth bridge per distinct upstream proxy URL (multi-account lanes).
+        self._bridges: Dict[str, _Socks5AuthBridge] = {}
 
         if self.proxies:
             logger.info(f"ProxyManager: {len(self.proxies)} proxy(ies) loaded")
@@ -215,19 +216,35 @@ class ProxyManager:
         """Return True if this is a socks5:// proxy with username:password."""
         return proxy_string.startswith("socks5://") and "@" in proxy_string
 
-    def _ensure_bridge(self, proxy_string: str) -> Dict:
-        """Start a local SOCKS5 bridge if needed and return Playwright proxy dict."""
-        if self._bridge is None:
-            protocol, rest = proxy_string.split("://")
-            credentials, host_port = rest.split("@")
-            username, password = credentials.split(":")
+    def _ensure_bridge(self, proxy_string: str) -> Dict[str, Any]:
+        """Start a local SOCKS5 bridge for this upstream URL if needed; return Playwright proxy dict."""
+        key = proxy_string.strip()
+        if key not in self._bridges:
+            _, rest = key.split("://", 1)
+            credentials, host_port = rest.split("@", 1)
+            username, password = credentials.split(":", 1)
             host, port = host_port.rsplit(":", 1)
 
-            self._bridge = _Socks5AuthBridge(host, int(port), username, password)
-            local_port = self._bridge.start()
-            logger.info(f"SOCKS5 auth bridge started on local port {local_port}")
+            bridge = _Socks5AuthBridge(host, int(port), username, password)
+            local_port = bridge.start()
+            self._bridges[key] = bridge
+            logger.info(
+                "SOCKS5 auth bridge for upstream %s → local port %s",
+                key.split("@")[-1] if "@" in key else key,
+                local_port,
+            )
 
-        return {"server": f"socks5://127.0.0.1:{self._bridge.local_port}"}
+        br = self._bridges[key]
+        return {"server": f"socks5://127.0.0.1:{br.local_port}"}
+
+    def get_playwright_proxy_dict_for_url(self, proxy_url: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Resolve a proxy URL string to Playwright's proxy option (incl. SOCKS5+auth bridge)."""
+        if not proxy_url or not str(proxy_url).strip():
+            return None
+        proxy_url = str(proxy_url).strip()
+        if self._needs_socks5_bridge(proxy_url):
+            return self._ensure_bridge(proxy_url)
+        return self.parse_proxy_string(proxy_url)
 
     def get_next_proxy(self) -> Optional[Dict]:
         """Get next working proxy in round-robin fashion."""
@@ -313,7 +330,10 @@ class ProxyManager:
             logger.warning(f"DB unavailable, skipping proxy result logging: {e}")
 
     def close(self):
-        """Stop the local bridge if running."""
-        if self._bridge:
-            self._bridge.stop()
-            self._bridge = None
+        """Stop all SOCKS5 auth bridges."""
+        for key, bridge in list(self._bridges.items()):
+            try:
+                bridge.stop()
+            except Exception:
+                pass
+        self._bridges.clear()

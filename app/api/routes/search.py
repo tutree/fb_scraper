@@ -13,9 +13,12 @@ from ...services.scraper import ScraperService
 from ...services.facebook_cookie_manager import get_cookie_status, save_cookie_json_text
 from ...core.logging_config import get_logger
 from ...schemas.search import (
+    AccountProxiesResponse,
+    AccountProxySetRequest,
     CookieStatusResponse,
     CookieUpdateRequest,
     CookieUpdateResponse,
+    ScrapeSlotsResponse,
     ScraperHealthResponse,
     SearchRequest,
     SearchResponse,
@@ -23,7 +26,9 @@ from ...schemas.search import (
     SearchStopResponse,
     SearchLogsResponse,
 )
-from ...services.scraper_state import get_scraper_health
+from ...services.account_proxy_store import load_account_proxies, merge_account_proxy
+from ...services.account_scrape_slots import load_scrape_slots
+from ...services.scraper_state import clear_all_cookies_failed, get_scraper_health
 
 router = APIRouter(prefix="/search", tags=["search"])
 logger = get_logger(__name__)
@@ -73,7 +78,7 @@ async def start_search(
     global current_task_id, last_task_id
 
     cookie_status = get_cookie_status()
-    if not cookie_status.get("cookie_file") or int(cookie_status.get("cookie_count") or 0) <= 0:
+    if not cookie_status.get("has_valid_cookies"):
         saved_uids = cookie_status.get("saved_cookie_uids", [])
         active_uids = cookie_status.get("active_account_uids", [])
         raise HTTPException(
@@ -211,8 +216,13 @@ async def scraper_health() -> ScraperHealthResponse:
     cookie = get_cookie_status()
     health = get_scraper_health()
 
-    has_files = bool(cookie.get("cookie_file"))
-    count = int(cookie.get("cookie_count") or 0)
+    has_files = bool(cookie.get("has_valid_cookies"))
+    count = int(cookie.get("total_cookie_entries") or cookie.get("cookie_count") or 0)
+
+    # Stale in-memory flag: at least one session file has cookies — do not keep "all failed" forever.
+    if has_files and health.get("all_cookies_failed"):
+        clear_all_cookies_failed()
+        health = get_scraper_health()
 
     age_hours = None
     if cookie.get("updated_at"):
@@ -223,12 +233,13 @@ async def scraper_health() -> ScraperHealthResponse:
             pass
 
     all_failed = bool(health.get("all_cookies_failed"))
-    no_cookies = not has_files or count == 0
+    no_cookies = not bool(cookie.get("has_valid_cookies"))
 
-    if all_failed:
-        level, message = "error", "All cookies expired — upload fresh cookies"
-    elif no_cookies:
+    # Error only when there is no usable cookie data on disk, or a live run exhausted every session.
+    if no_cookies:
         level, message = "error", "No cookie files found — upload cookies to start scraping"
+    elif all_failed:
+        level, message = "error", "All saved sessions failed in the last run — upload fresh cookies"
     elif health.get("last_scrape_success") is False and health.get("last_scrape_error"):
         level, message = "warning", f"Last scrape failed: {health['last_scrape_error'][:120]}"
     elif age_hours is not None and age_hours > 72:
@@ -252,10 +263,34 @@ async def scraper_health() -> ScraperHealthResponse:
     )
 
 
+@router.get("/account-proxies", response_model=AccountProxiesResponse)
+async def get_account_proxies() -> AccountProxiesResponse:
+    """Per-Facebook-UID proxy URLs (see config/account_proxies.json)."""
+    return AccountProxiesResponse(proxies=load_account_proxies())
+
+
+@router.post("/account-proxies", response_model=AccountProxiesResponse)
+async def set_account_proxy(request: AccountProxySetRequest) -> AccountProxiesResponse:
+    """Set or clear one uid's proxy. Empty ``proxy_url`` removes the entry."""
+    merged = merge_account_proxy(request.uid, request.proxy_url)
+    return AccountProxiesResponse(proxies=merged)
+
+
+@router.get("/scrape-slots", response_model=ScrapeSlotsResponse)
+async def get_scrape_slots() -> ScrapeSlotsResponse:
+    """Account tab → UID bindings. Proxies: PROXY_LIST in environment (comma-separated)."""
+    data = load_scrape_slots()
+    return ScrapeSlotsResponse(bindings=data["bindings"])
+
+
 @router.post("/cookies", response_model=CookieUpdateResponse)
 async def update_saved_cookie(request: CookieUpdateRequest) -> CookieUpdateResponse:
     """Validate and save pasted Facebook cookie JSON for scraper login reuse."""
+    from ...services.account_scrape_slots import set_binding_slot
+
     result = save_cookie_json_text(request.cookie_json)
+    if request.slot is not None:
+        set_binding_slot(request.slot - 1, result["account_uid"])
     return CookieUpdateResponse(
         message=f"Saved cookie session for account {result['account_uid']}",
         account_uid=result["account_uid"],

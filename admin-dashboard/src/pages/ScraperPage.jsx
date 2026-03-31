@@ -196,8 +196,6 @@ export default function ScraperPage() {
   const [scraperTask, setScraperTask] = useState(null)
   const [scraperLogs, setScraperLogs] = useState([])
   const [cookieModalOpen, setCookieModalOpen] = useState(false)
-  const [cookieJsonInput, setCookieJsonInput] = useState('')
-  const [cookieSubmitting, setCookieSubmitting] = useState(false)
   const [cookieStatus, setCookieStatus] = useState(null)
   const [cookieUrgencyMessage, setCookieUrgencyMessage] = useState('')
   const [logLines, setLogLines] = useState(300)
@@ -277,26 +275,6 @@ export default function ScraperPage() {
     }
   }
 
-  const submitCookieUpdate = async () => {
-    setCookieSubmitting(true)
-    try {
-      const res = await api.post(`/search/cookies`, {
-        cookie_json: cookieJsonInput,
-      })
-      toast.success(
-        `${res.data?.message || 'Cookie updated successfully.'} (${res.data?.cookie_count || 0} cookies saved)`,
-      )
-      setCookieJsonInput('')
-      setCookieModalOpen(false)
-      setCookieUrgencyMessage('')
-      await fetchCookieStatus()
-    } catch (err) {
-      toast.error(getErrorMessage(err, 'Failed to update cookie'))
-    } finally {
-      setCookieSubmitting(false)
-    }
-  }
-
   useEffect(() => {
     fetchScraperStatus()
     fetchScraperLogs(logLines)
@@ -308,11 +286,22 @@ export default function ScraperPage() {
     let cancelled = false
     ;(async () => {
       try {
-        const res = await api.get('/search/scraper-health')
+        const [healthRes, statusRes] = await Promise.all([
+          api.get('/search/scraper-health'),
+          api.get('/search/cookies/status'),
+        ])
         if (cancelled) return
-        if (res.data?.level === 'error') {
+        const h = healthRes.data
+        const statusOk = healthRes.status === 200 && statusRes.status === 200
+        const hasWorkingCookie = statusRes.data?.has_valid_cookies === true
+        const showCookieModal =
+          statusOk &&
+          !hasWorkingCookie &&
+          h?.level === 'error' &&
+          (h?.all_cookies_failed === true || h?.has_cookie_files === false)
+        if (showCookieModal) {
           setCookieUrgencyMessage(
-            res.data?.message || 'Upload a valid Facebook cookie to continue scraping.',
+            h?.message || 'Upload a valid Facebook cookie to continue scraping.',
           )
           setCookieModalOpen(true)
         }
@@ -394,14 +383,27 @@ export default function ScraperPage() {
             </p>
             <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
               <p>
-                Active account UIDs: {cookieStatus?.active_account_uids?.length ? cookieStatus.active_account_uids.join(', ') : 'none configured'}
+                Active account UIDs (credentials):{' '}
+                {cookieStatus?.active_account_uids?.length ? cookieStatus.active_account_uids.join(', ') : 'none configured'}
               </p>
               <p>
-                Latest saved cookie UID: {cookieStatus?.latest_cookie_uid || 'none'}
-                {cookieStatus?.updated_at ? ` | Updated ${new Date(cookieStatus.updated_at).toLocaleString()}` : ''}
+                Cookie files on disk (UIDs):{' '}
+                {cookieStatus?.saved_cookie_uids?.length
+                  ? cookieStatus.saved_cookie_uids.join(', ')
+                  : 'none'}
+                {typeof cookieStatus?.sessions_with_cookies === 'number'
+                  ? ` · ${cookieStatus.sessions_with_cookies} session file(s) with cookies`
+                  : ''}
               </p>
               <p>
-                Saved cookie count: {cookieStatus?.cookie_count ?? 0}
+                Primary display UID: {cookieStatus?.latest_cookie_uid || 'none'}
+                {cookieStatus?.updated_at ? ` | File updated ${new Date(cookieStatus.updated_at).toLocaleString()}` : ''}
+              </p>
+              <p>
+                Cookie entries (primary file / total): {cookieStatus?.cookie_count ?? 0}
+                {typeof cookieStatus?.total_cookie_entries === 'number'
+                  ? ` / ${cookieStatus.total_cookie_entries} total across sessions`
+                  : ''}
               </p>
             </div>
             {scraperTask?.requested_keywords && (
@@ -575,12 +577,12 @@ export default function ScraperPage() {
       <CookieUploadModal
         open={cookieModalOpen}
         onClose={() => setCookieModalOpen(false)}
-        cookieJsonInput={cookieJsonInput}
-        onCookieJsonChange={setCookieJsonInput}
-        cookieSubmitting={cookieSubmitting}
-        onSubmit={submitCookieUpdate}
         cookieStatus={cookieStatus}
         urgencyHint={cookieUrgencyMessage || undefined}
+        onSuccess={async () => {
+          setCookieUrgencyMessage('')
+          await fetchCookieStatus()
+        }}
       />
 
       {keywordModalOpen && (

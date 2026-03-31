@@ -404,36 +404,15 @@ class BrowserManager:
                 ],
             }
 
-            # Add proxy if available
-            if self.proxy_manager:
-                logger.info("Checking for proxy configuration...")
-                proxy_config = self.proxy_manager.get_next_proxy()
-                if proxy_config:
-                    logger.info(f"Using proxy: {proxy_config}")
-                    launch_options["proxy"] = proxy_config
-                else:
-                    logger.info("No proxy configured, using direct connection")
+            # Proxies are applied per browser context (multi-account lanes can use different IPs).
+            if self.proxy_manager and self.proxy_manager.proxies:
+                logger.info("Proxy list loaded — each context will attach its own proxy (per account or round-robin).")
             else:
-                logger.info("Proxy manager not configured")
+                logger.info("No global PROXY_LIST — contexts use per-account proxy from account_proxies.json or direct.")
 
             logger.info("Launching Chromium browser...")
             self.browser = await self.playwright.chromium.launch(**launch_options)
             logger.info("✓ Browser launched successfully")
-
-            # Quick proxy check (5 second timeout, non-blocking)
-            if "proxy" in launch_options:
-                try:
-                    verify_page = await self.browser.new_page()
-                    response = await verify_page.goto("https://api.ipify.org?format=text", wait_until="domcontentloaded", timeout=5000)
-                    if response and response.ok:
-                        public_ip = await verify_page.inner_text("body")
-                        logger.info(f"✓ Proxy working - IP: {public_ip.strip()}")
-                    await verify_page.close()
-                except Exception as e:
-                    logger.warning(f"Proxy check skipped (non-critical): {e}")
-                logger.info(f"ℹ Using proxy: {launch_options['proxy'].get('server')}")
-            else:
-                logger.info(f"ℹ Using direct connection (no proxy)")
 
         return self.browser
 
@@ -497,8 +476,40 @@ class BrowserManager:
         logger.info("✓ Browser page created with stealth configuration")
         return page
     
-    async def create_page_with_cookies(self, account_uid: str) -> Page:
-        """Create a page and load saved cookies for the account if available."""
+    def _resolve_playwright_proxy(
+        self,
+        account_uid: str,
+        proxy_url: Optional[str],
+        proxy_slot_index: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Per-context proxy: explicit URL, then PROXY_LIST by slot index (1st account → 1st URL), then per-UID file, else round-robin."""
+        if not self.proxy_manager:
+            return None
+        from .account_proxy_store import load_account_proxies
+
+        resolved = (proxy_url or "").strip() or None
+        plist = self.proxy_manager.proxies
+        if not resolved and proxy_slot_index is not None and plist:
+            resolved = plist[proxy_slot_index % len(plist)]
+        if not resolved:
+            resolved = load_account_proxies().get(str(account_uid).strip()) or None
+        if resolved:
+            return self.proxy_manager.get_playwright_proxy_dict_for_url(resolved)
+        if plist:
+            return self.proxy_manager.get_next_proxy()
+        return None
+
+    async def create_page_with_cookies(
+        self,
+        account_uid: str,
+        proxy_url: Optional[str] = None,
+        proxy_slot_index: Optional[int] = None,
+    ) -> Page:
+        """Create a page and load saved cookies for the account if available.
+
+        ``proxy_url`` overrides everything. Else ``proxy_slot_index`` picks PROXY_LIST
+        (comma-separated in .env) by position: slot 0 → first URL, etc. Then per-UID ``account_proxies.json``.
+        """
         logger.info(f"Creating browser page for account: {account_uid}")
         browser = await self.get_browser()
 
@@ -506,6 +517,10 @@ class BrowserManager:
         viewport = self.viewport
         user_agent = random.choice(self.user_agents)
         logger.info(f"Using viewport: {viewport['width']}x{viewport['height']}")
+
+        proxy_dict = self._resolve_playwright_proxy(account_uid, proxy_url, proxy_slot_index)
+        if proxy_dict:
+            logger.info("Using per-context proxy: %s", proxy_dict.get("server", proxy_dict))
 
         for directory in self._cookie_dirs():
             try:
@@ -530,7 +545,7 @@ class BrowserManager:
                 ", ".join(str(d) for d in self._cookie_dirs()),
             )
 
-        # Create context with or without cookies
+        # Create context with or without cookies (proxy is per-context for multi-account IP isolation)
         context = await browser.new_context(
             viewport=viewport,
             user_agent=user_agent,
@@ -540,6 +555,7 @@ class BrowserManager:
             is_mobile=False,
             device_scale_factor=1,
             storage_state=storage_state,
+            proxy=proxy_dict,
         )
 
         try:
@@ -590,7 +606,9 @@ class BrowserManager:
             except Exception as exc:
                 logger.debug("close_page_context: context.close: %s", exc)
 
-    async def create_fresh_page_for_login(self, account_uid: str) -> Page:
+    async def create_fresh_page_for_login(
+        self, account_uid: str, proxy_url: Optional[str] = None
+    ) -> Page:
         """
         New browser context with no saved cookies — required so each credential
         sees the real login form instead of checkpoint/redirect from a stale session.
@@ -599,6 +617,8 @@ class BrowserManager:
         browser = await self.get_browser()
         viewport = self.viewport
         user_agent = random.choice(self.user_agents)
+
+        proxy_dict = self._resolve_playwright_proxy(account_uid, proxy_url)
 
         context = await browser.new_context(
             viewport=viewport,
@@ -609,6 +629,7 @@ class BrowserManager:
             is_mobile=False,
             device_scale_factor=1,
             storage_state=None,
+            proxy=proxy_dict,
         )
         try:
             await context.grant_permissions(

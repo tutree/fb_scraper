@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 from ..core.config import settings
 from ..core.logging_config import get_logger
 from . import scraper_state
-from .fb_account_loader import load_accounts
+from .fb_account_loader import load_accounts, on_cookie_session_removed
 from .fb_auto_login import load_login_accounts, login_on_page
 from .fb_errors import CookieExpiredDuringProfileScrape
 from .fb_feed_scanner import enable_search_recent_posts_filter, scroll_and_process_posts
@@ -40,19 +40,29 @@ class NoActiveCookieError(RuntimeError):
 
 
 class FacebookScraper:
-    def __init__(self, db: Session, browser_manager):
+    def __init__(
+        self,
+        db: Session,
+        browser_manager,
+        accounts: Optional[List[Dict]] = None,
+        proxy_slot_index: Optional[int] = None,
+    ):
         self.db = db
         self.browser_manager = browser_manager
-        self.accounts = load_accounts()
+        self.accounts = accounts if accounts is not None else load_accounts()
         self.account_index = 0
+        self._proxy_slot_index = proxy_slot_index
         self._current_page: Optional[Page] = None
         self._current_account: Dict = {}
 
-        logger.info(f"FacebookScraper initialized with {len(self.accounts)} accounts")
+        logger.info("FacebookScraper initialized with %d account(s)", len(self.accounts))
         if not self.accounts:
             logger.error("No Facebook accounts available! Scraping will fail.")
         else:
-            logger.info(f"Using single account: {self.accounts[0].get('uid', 'Unknown')}")
+            logger.info(
+                "Account UID(s) in this session: %s",
+                [a.get("uid", "?") for a in self.accounts],
+            )
 
     def _get_next_account(self) -> Dict:
         """Always use the first (and only) account — no rotation."""
@@ -151,7 +161,9 @@ class FacebookScraper:
         logger.info("Trying saved cookies for UID %s (%s)", uid, storage_path)
         cookie_page: Optional[Page] = None
         try:
-            cookie_page = await self.browser_manager.create_page_with_cookies(uid)
+            cookie_page = await self.browser_manager.create_page_with_cookies(
+                uid, proxy_slot_index=self._proxy_slot_index
+            )
             await cookie_page.goto(
                 "https://www.facebook.com",
                 wait_until="domcontentloaded",
@@ -173,6 +185,7 @@ class FacebookScraper:
                 try:
                     storage_path.unlink()
                     logger.info("Removed stale cookie file: %s", storage_path)
+                    on_cookie_session_removed(uid)
                 except Exception as exc:
                     logger.warning("Could not remove %s: %s", storage_path, exc)
         except Exception as exc:
@@ -318,7 +331,7 @@ class FacebookScraper:
             logger.info(f"Using account: {account.get('uid', 'Unknown')}")
             logger.info("Creating browser page...")
             self._current_page = await self.browser_manager.create_page_with_cookies(
-                account.get("uid")
+                account.get("uid"), proxy_slot_index=self._proxy_slot_index
             )
             logger.info("Browser page created successfully")
 
@@ -355,14 +368,18 @@ class FacebookScraper:
             if not is_logged_in:
                 uid = account.get("uid", "")
                 logger.warning("Cookie session expired for %s — removing stale cookie file", uid)
+                removed_any = False
                 for cookie_dir in self.browser_manager._cookie_dirs():
                     stale_file = cookie_dir / f"{uid}.json"
                     if stale_file.exists():
                         try:
                             stale_file.unlink()
+                            removed_any = True
                             logger.info("Removed stale cookie file: %s", stale_file)
                         except Exception as exc:
                             logger.warning("Could not remove stale cookie %s: %s", stale_file, exc)
+                if removed_any:
+                    on_cookie_session_removed(str(uid))
                 raise NoActiveCookieError("no active cookie")
 
             logger.info("Cookie session verified (cookie-only mode)")

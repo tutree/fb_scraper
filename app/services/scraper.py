@@ -9,11 +9,23 @@ from .browser_manager import BrowserManager
 from .fb_errors import CookieExpiredDuringProfileScrape
 from .facebook_scraper import FacebookScraper, NoActiveCookieError
 from .proxy_manager import ProxyManager
+from .fb_account_loader import load_accounts, ordered_accounts_with_proxy_slots
 from ..models.search_result import SearchResult
 from ..core.config import keywords_json_path, settings
+from ..core.database import SessionLocal
 from ..core.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+def split_keywords_across_accounts(keywords: List[str], n: int) -> List[List[str]]:
+    """Round-robin split: account i gets keywords i, i+n, i+2n, ..."""
+    if n <= 0:
+        return []
+    chunks: List[List[str]] = [[] for _ in range(n)]
+    for i, kw in enumerate(keywords):
+        chunks[i % n].append(kw)
+    return chunks
 
 
 class ScraperService:
@@ -22,6 +34,177 @@ class ScraperService:
         self.proxy_manager = ProxyManager(db)
         self.browser_manager = BrowserManager(self.proxy_manager)
         self.facebook_scraper = FacebookScraper(db, self.browser_manager)
+
+    async def _run_parallel_account_lanes(
+        self,
+        accounts: List[Dict],
+        slot_indices: List[Optional[int]],
+        keywords: List[str],
+        max_results: int,
+        should_stop: Optional[Callable[[], bool]],
+    ) -> Dict[str, Any]:
+        """One asyncio task per account; each has its own DB session + browser + proxy context."""
+        n = len(accounts)
+        if len(slot_indices) != n:
+            slot_indices = [None] * n
+        chunks = split_keywords_across_accounts(keywords, n)
+        lanes = [
+            (accounts[i], chunks[i], slot_indices[i])
+            for i in range(n)
+            if chunks[i]
+        ]
+
+        if not lanes:
+            return {
+                "success": True,
+                "stopped": False,
+                "total_results": 0,
+                "keywords_searched": 0,
+                "parallel": True,
+                "lane_results": [],
+                "error": None,
+            }
+
+        logger.info(
+            "Parallel scrape: %d lane(s), accounts=%s",
+            len(lanes),
+            [acc.get("uid") for acc, _kws, _slot in lanes],
+        )
+
+        async def one_lane(
+            lane_idx: int,
+            account: Dict,
+            kws: List[str],
+            proxy_slot_idx: Optional[int],
+        ) -> Dict[str, Any]:
+            db = SessionLocal()
+            bm: Optional[BrowserManager] = None
+            total_results_count = 0
+            try:
+                pm = ProxyManager(db)
+                bm = BrowserManager(pm)
+                fs = FacebookScraper(
+                    db, bm, accounts=[account], proxy_slot_index=proxy_slot_idx
+                )
+                uid = str(account.get("uid", ""))
+                stopped = False
+                for idx, keyword in enumerate(kws, 1):
+                    if should_stop and should_stop():
+                        logger.warning(
+                            "[Lane %s uid=%s] Stop requested before keyword %s",
+                            lane_idx,
+                            uid,
+                            keyword,
+                        )
+                        stopped = True
+                        break
+                    logger.info(
+                        "=" * 40
+                        + f" [Lane {lane_idx} uid={uid} KEYWORD {idx}/{len(kws)}: '{keyword}'] "
+                        + "=" * 40
+                    )
+                    try:
+                        processed_count = await fs.search_keyword(
+                            keyword, max_results, should_stop=should_stop
+                        )
+                        total_results_count += int(processed_count or 0)
+                    except CookieExpiredDuringProfileScrape as ce:
+                        logger.error(
+                            "[Lane %s] Cookie expired on '%s': %s",
+                            lane_idx,
+                            keyword,
+                            ce,
+                        )
+                        return {
+                            "success": False,
+                            "stopped": False,
+                            "uid": uid,
+                            "total": total_results_count,
+                            "error": str(ce),
+                            "lane": lane_idx,
+                        }
+                    except NoActiveCookieError:
+                        logger.error(
+                            "[Lane %s] No active cookie for keyword '%s'",
+                            lane_idx,
+                            keyword,
+                        )
+                        scraper_state.report_all_cookies_failed()
+                        return {
+                            "success": False,
+                            "stopped": False,
+                            "uid": uid,
+                            "total": total_results_count,
+                            "error": "no active cookie",
+                            "lane": lane_idx,
+                        }
+                    if idx < len(kws):
+                        delay = random.uniform(
+                            max(settings.SCRAPE_DELAY_MIN, 10),
+                            max(settings.SCRAPE_DELAY_MAX, 30),
+                        )
+                        logger.info(
+                            "[Lane %s] Waiting %.1fs before next keyword...",
+                            lane_idx,
+                            delay,
+                        )
+                        if await self._sleep_with_stop(delay, should_stop):
+                            stopped = True
+                            break
+                if stopped:
+                    return {
+                        "success": False,
+                        "stopped": True,
+                        "uid": uid,
+                        "total": total_results_count,
+                        "error": None,
+                        "lane": lane_idx,
+                    }
+                return {
+                    "success": True,
+                    "stopped": False,
+                    "uid": uid,
+                    "total": total_results_count,
+                    "error": None,
+                    "lane": lane_idx,
+                }
+            except Exception as e:
+                logger.exception("[Lane %s] failed: %s", lane_idx, e)
+                return {
+                    "success": False,
+                    "stopped": False,
+                    "uid": str(account.get("uid", "")),
+                    "total": total_results_count,
+                    "error": str(e),
+                    "lane": lane_idx,
+                }
+            finally:
+                if bm:
+                    await bm.close()
+                db.close()
+
+        tasks = [
+            one_lane(i, acc, kws, slot_idx)
+            for i, (acc, kws, slot_idx) in enumerate(lanes)
+        ]
+        lane_out = await asyncio.gather(*tasks)
+        total = sum(int(r.get("total") or 0) for r in lane_out)
+        any_stopped = any(r.get("stopped") for r in lane_out)
+        any_fail = any(
+            not r.get("success") and not r.get("stopped") for r in lane_out
+        )
+        err_msgs = [r.get("error") for r in lane_out if r.get("error")]
+        combined_error = "; ".join(str(x) for x in err_msgs if x) if err_msgs else None
+
+        return {
+            "success": not any_fail and not any_stopped,
+            "stopped": any_stopped,
+            "total_results": total,
+            "keywords_searched": len(keywords),
+            "parallel": True,
+            "lane_results": lane_out,
+            "error": combined_error,
+        }
 
     async def load_keywords(self) -> List[str]:
         """Load keywords from keywords.json (same path as API: keywords_json_path())."""
@@ -66,10 +249,65 @@ class ScraperService:
                 "keywords_searched": 0,
             }
 
-        total_results_count = 0
         scraper_state.report_scrape_start()
         logger.info(f"Will search {len(keywords)} keywords with max {max_results} results each")
 
+        ordered = ordered_accounts_with_proxy_slots()
+        accounts = [t[0] for t in ordered]
+        slot_indices = [t[1] for t in ordered]
+
+        if not accounts:
+            logger.error("No Facebook accounts with cookie files — cannot run search.")
+            return {
+                "success": False,
+                "error": "No accounts with saved cookie sessions",
+                "total_results": 0,
+                "keywords_searched": 0,
+            }
+
+        if len(accounts) > 1:
+            logger.info(
+                "Multi-account mode: %d accounts with cookie files — parallel lanes",
+                len(accounts),
+            )
+            try:
+                result = await self._run_parallel_account_lanes(
+                    accounts, slot_indices, keywords, max_results, should_stop
+                )
+                if result.get("stopped"):
+                    scraper_state.report_scrape_finish(
+                        success=False, error="Stop requested"
+                    )
+                elif result.get("success"):
+                    scraper_state.report_scrape_finish(success=True)
+                else:
+                    scraper_state.report_scrape_finish(
+                        success=False,
+                        error=result.get("error") or "Parallel scrape had failures",
+                    )
+                return result
+            except Exception as e:
+                logger.error("Parallel scrape failed: %s", e, exc_info=True)
+                scraper_state.report_scrape_finish(success=False, error=str(e))
+                return {
+                    "success": False,
+                    "stopped": False,
+                    "error": str(e),
+                    "total_results": 0,
+                    "keywords_searched": len(keywords),
+                    "parallel": True,
+                }
+            finally:
+                logger.info("Closing idle shared browser manager (parallel mode)...")
+                await self.browser_manager.close()
+
+        total_results_count = 0
+        single_fs = FacebookScraper(
+            self.db,
+            self.browser_manager,
+            accounts=[accounts[0]],
+            proxy_slot_index=slot_indices[0],
+        )
         try:
             for idx, keyword in enumerate(keywords, 1):
                 if should_stop and should_stop():
@@ -86,7 +324,7 @@ class ScraperService:
                 logger.info("=" * 80)
 
                 try:
-                    processed_count = await self.facebook_scraper.search_keyword(
+                    processed_count = await single_fs.search_keyword(
                         keyword, max_results, should_stop=should_stop
                     )
                     processed_count = int(processed_count or 0)

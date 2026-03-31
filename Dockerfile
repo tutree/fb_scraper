@@ -8,6 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    gosu \
     xvfb \
     ca-certificates \
     libasound2 \
@@ -41,10 +42,10 @@ COPY entrypoint.sh /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh 2>/dev/null || true && chmod +x /entrypoint.sh
 
 RUN useradd --create-home --shell /bin/bash appuser && \
-    mkdir -p /app/logs /app/cookies /app/config /ms-playwright && \
-    chown -R appuser:appuser /app /ms-playwright
+    mkdir -p /app/logs /app/cookies /app/config /data /ms-playwright && \
+    chown -R appuser:appuser /app /data /ms-playwright
 
-USER appuser
+# Entrypoint runs as root briefly to chown /data (named volume) then execs the app as appuser.
 
 EXPOSE 8000
 

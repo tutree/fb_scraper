@@ -51,6 +51,13 @@ def report_all_cookies_failed() -> None:
         _state["all_cookies_failed_at"] = _now()
 
 
+def clear_all_cookies_failed() -> None:
+    """Reset stale 'all sessions failed' when valid cookie files exist again."""
+    with _lock:
+        _state["all_cookies_failed"] = False
+        _state["all_cookies_failed_at"] = None
+
+
 def report_scrape_start(keyword: Optional[str] = None) -> None:
     with _lock:
         _state["last_scrape_started_at"] = _now()

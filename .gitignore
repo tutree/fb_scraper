@@ -41,6 +41,7 @@ cookies/
 
 # Account credentials - SENSITIVE
 config/accounts.json
+config/credentials.json
 
 # Database
 *.db

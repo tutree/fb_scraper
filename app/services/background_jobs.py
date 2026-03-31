@@ -226,6 +226,7 @@ def should_stop_scheduled_scrape() -> bool:
 def _save_config():
     _save_json(REDIS_KEY_CONFIG, {
         "auto_scrape_enabled": settings.AUTO_SCRAPE_ENABLED,
+        "auto_scrape_run_on_startup": settings.AUTO_SCRAPE_RUN_ON_STARTUP,
         "interval_minutes": settings.AUTO_SCRAPE_INTERVAL_MINUTES,
         "auto_analyze": settings.AUTO_ANALYZE_AFTER_SCRAPE,
         "auto_enrich": settings.AUTO_ENRICH_AFTER_ANALYZE,
@@ -242,9 +243,10 @@ def _load_config():
     # Persist current code defaults so the UI and get_status() reflect them
     _save_config()
     logger.info(
-        "Config loaded from code defaults: interval=%d min, enabled=%s",
+        "Config loaded from code defaults: interval=%d min, auto_scrape=%s, run_on_startup=%s",
         settings.AUTO_SCRAPE_INTERVAL_MINUTES,
         settings.AUTO_SCRAPE_ENABLED,
+        settings.AUTO_SCRAPE_RUN_ON_STARTUP,
     )
 
 
@@ -1023,7 +1025,7 @@ async def run_scheduled_scrape():
     db = SessionLocal()
     try:
         cookie_status = get_cookie_status()
-        if not cookie_status.get("cookie_file") or int(cookie_status.get("cookie_count") or 0) <= 0:
+        if not cookie_status.get("has_valid_cookies"):
             logger.warning("Scheduled scrape skipped — no active cookie session")
             entry["status"] = "skipped"
             entry["error"] = "No active cookie session"
@@ -1183,7 +1185,13 @@ def start_scheduler():
             "Auto-scrape scheduler started: every %d minutes",
             settings.AUTO_SCRAPE_INTERVAL_MINUTES,
         )
-        trigger_now()
+        if settings.AUTO_SCRAPE_RUN_ON_STARTUP:
+            logger.info("AUTO_SCRAPE_RUN_ON_STARTUP=true — running one scrape immediately")
+            trigger_now()
+        else:
+            logger.info(
+                "No immediate scrape on startup (set AUTO_SCRAPE_RUN_ON_STARTUP=true to enable)"
+            )
 
     # Periodic feeder: push un-analyzed DB entries to analyze queue
     scheduler.add_job(
